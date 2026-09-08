@@ -63,7 +63,18 @@ export class AgentController {
     res.setHeader('X-Accel-Buffering', 'no'); // 关掉反代缓冲
     res.flushHeaders?.();
 
-    const send = (obj: unknown) => res.write(`data: ${JSON.stringify(obj)}\n\n`);
+    const connection = new AbortController();
+    res.on('close', () => connection.abort());
+    res.write('retry: 3000\n\n');
+    const heartbeat = setInterval(() => {
+      if (!res.writableEnded && !res.destroyed) res.write(': heartbeat\n\n');
+    }, 15_000);
+    heartbeat.unref();
+    const send = (obj: unknown) => {
+      if (!res.writableEnded && !res.destroyed) {
+        res.write(`data: ${JSON.stringify(obj)}\n\n`);
+      }
+    };
     try {
       const { task, job } = await this.queue.enqueue(
         user.id,
@@ -74,6 +85,7 @@ export class AgentController {
       const result = await this.queue.waitFor(
         job,
         (e) => send({ type: 'event', event: e }),
+        connection.signal,
       );
       send({
         type: 'done',
@@ -82,9 +94,12 @@ export class AgentController {
         log: result.log,
       });
     } catch (err) {
-      send({ type: 'error', message: (err as Error)?.message ?? '生成失败' });
+      if ((err as Error)?.name !== 'GenerationStreamDisconnectedError') {
+        send({ type: 'error', message: (err as Error)?.message ?? '生成失败' });
+      }
     } finally {
-      res.end();
+      clearInterval(heartbeat);
+      if (!res.writableEnded && !res.destroyed) res.end();
     }
   }
 
@@ -92,6 +107,57 @@ export class AgentController {
   @RequirePermissions(PERMISSIONS.PROJECT_READ)
   task(@CurrentUser() user: AuthUser, @Param('id') taskId: string) {
     return this.agent.getTask(user.id, taskId);
+  }
+
+  /** SSE 断线恢复：重新订阅已有任务，不会重复创建生成任务。 */
+  @Get('tasks/:id/stream')
+  @RequirePermissions(PERMISSIONS.PROJECT_READ)
+  async resumeStream(
+    @CurrentUser() user: AuthUser,
+    @Param('id') taskId: string,
+    @Res() res: Response,
+  ) {
+    res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-cache, no-transform');
+    res.setHeader('Connection', 'keep-alive');
+    res.setHeader('X-Accel-Buffering', 'no');
+    res.flushHeaders?.();
+    const connection = new AbortController();
+    res.on('close', () => connection.abort());
+    res.write('retry: 3000\n\n');
+    const heartbeat = setInterval(() => {
+      if (!res.writableEnded && !res.destroyed) res.write(': heartbeat\n\n');
+    }, 15_000);
+    heartbeat.unref();
+    const send = (obj: unknown) => {
+      if (!res.writableEnded && !res.destroyed) {
+        res.write(`data: ${JSON.stringify(obj)}\n\n`);
+      }
+    };
+    try {
+      const result = await this.queue.resume(
+        user.id,
+        taskId,
+        (event) => send({ type: 'event', event }),
+        connection.signal,
+      );
+      send({
+        type: 'done',
+        taskId: result.taskId,
+        status: result.status,
+        log: result.log,
+      });
+    } catch (error) {
+      if ((error as Error)?.name !== 'GenerationStreamDisconnectedError') {
+        send({
+          type: 'error',
+          message: (error as Error)?.message ?? '恢复任务流失败',
+        });
+      }
+    } finally {
+      clearInterval(heartbeat);
+      if (!res.writableEnded && !res.destroyed) res.end();
+    }
   }
 
   @Get('admin/tasks')

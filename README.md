@@ -306,6 +306,7 @@ npm run seed:runtime-demo --workspace=apps/api # 可选：写入运行资源/部
 
 - API 已有自动化测试；提交前应运行 `npm test --workspace apps/api` 和 `npm run build`。
 - 生成任务已使用 BullMQ 持久化和独立 Worker；数据库迁移任务使用数据库租约与心跳协调。预览维护、日志保留和告警评估也只在 Worker 运行，API 副本不再启动后台轮询器。
+- 代码生成 SSE 每 15 秒发送心跳；客户端连接中断不会取消或重复提交任务，并会使用持久化 `taskId` 最多三次恢复订阅。恢复失败时任务继续由 Worker 执行，最终结果可从任务中心或会话历史读取；API 会立即释放断开连接对应的 QueueEvents 监听器。
 - Python 沙箱镜像已提供；React 静态部署模板也复用该镜像，通过 Python `http.server` 托管静态产物。
 - 产物直传当前仅支持 Java Maven 的主 JAR/WAR；Node、Python 和前端静态目录仍需选择 Docker/Kubernetes 目标。
 - 数据库迁移当前只执行一次性全量复制，不消费 MySQL binlog，也不提供持续增量同步；平台不会自动修改数据库全局配置或重启数据库。
