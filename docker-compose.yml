@@ -1,0 +1,230 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: codegen-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: codegen
+      POSTGRES_PASSWORD: codegen
+      POSTGRES_DB: codegen
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U codegen"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  mysql:
+    image: mysql:8.4
+    container_name: codegen-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: root-codegen-local
+      MYSQL_DATABASE: codegen_demo
+      MYSQL_USER: codegen
+      MYSQL_PASSWORD: codegen
+    ports:
+      - "3307:3306"
+    volumes:
+      - mysqldata:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -u codegen -pcodegen --silent"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+  redis:
+    image: redis:7-alpine
+    container_name: codegen-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # 仅作为平台内部的业务日志存储/检索引擎，不暴露 OpenSearch Dashboards。
+  # 本地开发关闭安全插件；生产环境必须启用 TLS/认证并通过 OPENSEARCH_* 配置接入。
+  opensearch:
+    image: opensearchproject/opensearch:3.7.0
+    container_name: codegen-opensearch
+    restart: unless-stopped
+    environment:
+      discovery.type: single-node
+      DISABLE_SECURITY_PLUGIN: "true"
+      bootstrap.memory_lock: "true"
+      OPENSEARCH_JAVA_OPTS: "-Xms512m -Xmx512m"
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    ports:
+      - "9200:9200"
+      - "9600:9600"
+    volumes:
+      - opensearchdata:/usr/share/opensearch/data
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "curl -fs http://localhost:9200/_cluster/health >/dev/null || exit 1",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  tempo:
+    image: grafana/tempo:2.10.5
+    container_name: codegen-tempo
+    restart: unless-stopped
+    command: ["-config.file=/etc/tempo.yaml"]
+    volumes:
+      - ./deploy/observability/tempo.yaml:/etc/tempo.yaml:ro
+      - tempodata:/var/tempo
+    ports:
+      - "3200:3200"
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.153.0
+    container_name: codegen-otel-collector
+    restart: unless-stopped
+    command: ["--config=/etc/otelcol-contrib/config.yaml"]
+    volumes:
+      - ./deploy/observability/otel-collector.yaml:/etc/otelcol-contrib/config.yaml:ro
+    ports:
+      - "4317:4317"
+      - "4318:4318"
+      - "9464:9464"
+      - "13133:13133"
+    depends_on:
+      tempo: { condition: service_started }
+
+  cadvisor:
+    image: ghcr.io/google/cadvisor:v0.60.5
+    container_name: codegen-cadvisor
+    restart: unless-stopped
+    privileged: true
+    command: ["--docker_only=true", "--housekeeping_interval=15s"]
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /sys:/sys:ro
+      - /var/lib/docker:/var/lib/docker:ro
+      - /dev/disk:/dev/disk:ro
+    ports:
+      - "8080:8080"
+
+  prometheus:
+    image: prom/prometheus:v3.13.2
+    container_name: codegen-prometheus
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.yaml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=15d
+      - --web.enable-lifecycle
+    volumes:
+      - ./deploy/observability/prometheus.yaml:/etc/prometheus/prometheus.yaml:ro
+      - ./deploy/observability/alert-rules.yaml:/etc/prometheus/rules/code-studio.yaml:ro
+      - prometheusdata:/prometheus
+    ports:
+      - "9090:9090"
+    depends_on:
+      otel-collector: { condition: service_started }
+      cadvisor: { condition: service_started }
+
+  api:
+    profiles: ["platform"]
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    restart: unless-stopped
+    command: ["node", "--require", "./apps/api/dist/instrumentation.js", "apps/api/dist/main.js"]
+    env_file: [apps/api/.env]
+    environment:
+      NODE_ENV: development
+      DATABASE_URL: postgresql://codegen:codegen@postgres:5432/codegen?schema=public
+      REDIS_HOST: redis
+      REDIS_MODE: standalone
+      OPENSEARCH_URL: http://opensearch:9200
+      SANDBOX_PROJECTS_ROOT: /data/projects
+      SANDBOX_WORKSPACES_ROOT: /data/workspaces
+      DEPLOY_WORKSPACES_ROOT: /data/deployments
+      OTEL_SERVICE_NAME: codegen-api
+      OTEL_ENABLED: "true"
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
+      OTEL_RESOURCE_ATTRIBUTES: service.namespace=code-studio,deployment.environment.name=development,service.version=0.1.0
+      TEMPO_URL: http://tempo:3200
+      PROMETHEUS_URL: http://prometheus:9090
+    ports: ["3000:3000"]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:3000/api/health/ready || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - projectdata:/data
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      opensearch: { condition: service_healthy }
+      otel-collector: { condition: service_started }
+      prometheus: { condition: service_started }
+
+  worker:
+    profiles: ["platform"]
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    restart: unless-stopped
+    command: ["node", "--require", "./apps/api/dist/instrumentation.js", "apps/api/dist/worker-main.js"]
+    env_file: [apps/api/.env]
+    environment:
+      NODE_ENV: development
+      DATABASE_URL: postgresql://codegen:codegen@postgres:5432/codegen?schema=public
+      REDIS_HOST: redis
+      REDIS_MODE: standalone
+      SANDBOX_PROJECTS_ROOT: /data/projects
+      SANDBOX_WORKSPACES_ROOT: /data/workspaces
+      DEPLOY_WORKSPACES_ROOT: /data/deployments
+      WORKER_HEALTH_PORT: 3001
+      OTEL_SERVICE_NAME: codegen-worker
+      OTEL_ENABLED: "true"
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
+      OTEL_RESOURCE_ATTRIBUTES: service.namespace=code-studio,deployment.environment.name=development,service.version=0.1.0
+      SCHEDULED_TASK_DISPATCHER_ENABLED: "true"
+      PROJECT_CLEANUP_WORKER_ENABLED: "true"
+      SCHEDULED_TASK_WORKER_CONCURRENCY: 4
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:3001/health/ready || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - projectdata:/data
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      otel-collector: { condition: service_started }
+
+volumes:
+  pgdata:
+  mysqldata:
+  redisdata:
+  opensearchdata:
+  projectdata:
+  tempodata:
+  prometheusdata:

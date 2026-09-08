@@ -1,0 +1,46 @@
+{{- if eq .Values.runtime.generationExecutor "kubernetes" }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "codegen.fullname" . }}-generation-controller
+  namespace: {{ default .Release.Namespace .Values.runtime.kubernetes.namespace }}
+  labels:
+    {{- include "codegen.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["create", "get", "list", "delete"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "codegen.fullname" . }}-generation-controller
+  namespace: {{ default .Release.Namespace .Values.runtime.kubernetes.namespace }}
+  labels:
+    {{- include "codegen.labels" . | nindent 4 }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "codegen.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "codegen.fullname" . }}-generation-controller
+---
+{{- if not .Values.runtime.kubernetes.jobServiceAccountName }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "codegen.generationServiceAccountName" . }}
+  namespace: {{ default .Release.Namespace .Values.runtime.kubernetes.namespace }}
+  labels:
+    {{- include "codegen.labels" . | nindent 4 }}
+automountServiceAccountToken: false
+{{- end }}
+{{- end }}

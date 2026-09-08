@@ -1,0 +1,134 @@
+{{- if and (eq .Values.runtime.generationExecutor "kubernetes") .Values.runtime.kubernetes.requireImageDigest }}
+  {{- range $name, $image := .Values.runtime.images }}
+    {{- if not (regexMatch "@sha256:[a-fA-F0-9]{64}$" $image) }}
+      {{- fail (printf "runtime.images.%s 必须固定为 name@sha256:digest" $name) }}
+    {{- end }}
+  {{- end }}
+{{- end }}
+{{- $multiReplica := or (gt (int .Values.api.replicaCount) 1) (gt (int .Values.worker.replicaCount) 1) .Values.api.autoscaling.enabled .Values.worker.autoscaling.enabled }}
+{{- if and $multiReplica (not .Values.persistence.enabled) }}
+  {{- fail "API/Worker 多副本必须启用共享工作区 PVC，禁止使用各 Pod 独立 emptyDir" }}
+{{- end }}
+{{- if and $multiReplica (not .Values.persistence.rwxVerified) }}
+  {{- fail "API/Worker 多副本部署前必须验证共享存储的跨节点 RWX 与 Git 文件系统语义，并设置 persistence.rwxVerified=true" }}
+{{- end }}
+{{- if and .Values.persistence.enabled (not (has "ReadWriteMany" .Values.persistence.accessModes)) (not .Values.persistence.existingClaim) }}
+  {{- fail "Chart 创建的多 Pod 工作区 PVC 必须声明 ReadWriteMany" }}
+{{- end }}
+{{- if not (has .Values.config.dependencyProxy.accessPolicy (list "proxy-upstream" "proxy-cache-only" "direct")) }}
+  {{- fail "config.dependencyProxy.accessPolicy 仅支持 proxy-upstream、proxy-cache-only 或 direct" }}
+{{- end }}
+{{- if and (eq .Values.runtime.generationExecutor "kubernetes") (ne .Values.config.dependencyProxy.accessPolicy "direct") }}
+  {{- range $name, $url := dict "npmRegistry" .Values.config.dependencyProxy.npmRegistry "pipIndexUrl" .Values.config.dependencyProxy.pipIndexUrl "mavenMirrorUrl" .Values.config.dependencyProxy.mavenMirrorUrl }}
+    {{- if not (regexMatch "^https://" $url) }}
+      {{- fail (printf "config.dependencyProxy.%s 在 Kubernetes 生产模式必须配置 HTTPS 地址" $name) }}
+    {{- end }}
+  {{- end }}
+{{- end }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "codegen.fullname" . }}
+  labels:
+    {{- include "codegen.labels" . | nindent 4 }}
+data:
+  NODE_ENV: {{ .Values.config.nodeEnv | quote }}
+  APP_VERSION: {{ .Values.build.version | quote }}
+  BUILD_GIT_SHA: {{ .Values.build.gitSha | quote }}
+  BUILD_TIME: {{ .Values.build.time | quote }}
+  WEB_ORIGIN: {{ .Values.config.webOrigin | quote }}
+  TRUST_PROXY: {{ .Values.config.trustProxy | quote }}
+  SELF_REGISTRATION_ENABLED: {{ .Values.config.selfRegistrationEnabled | quote }}
+  SELF_REGISTRATION_ROLE: {{ .Values.config.selfRegistrationRole | quote }}
+  MCP_ENABLED: {{ .Values.config.mcp.enabled | quote }}
+  MCP_READ_TOOLS_ENABLED: {{ .Values.config.mcp.readToolsEnabled | quote }}
+  MCP_RESULT_MAX_BYTES: {{ .Values.config.mcp.resultMaxBytes | quote }}
+  MCP_ALLOWED_HOSTS: {{ join "," .Values.config.mcp.allowedHosts | quote }}
+  LSP_ENABLED: {{ .Values.config.lsp.enabled | quote }}
+  LSP_TICKET_TTL_SECONDS: {{ .Values.config.lsp.ticketTtlSeconds | quote }}
+  LSP_SESSION_TTL_SECONDS: {{ .Values.config.lsp.sessionTtlSeconds | quote }}
+  DEPENDENCY_NPM_REGISTRY: {{ .Values.config.dependencyProxy.npmRegistry | quote }}
+  DEPENDENCY_PIP_INDEX_URL: {{ .Values.config.dependencyProxy.pipIndexUrl | quote }}
+  DEPENDENCY_MAVEN_MIRROR_URL: {{ .Values.config.dependencyProxy.mavenMirrorUrl | quote }}
+  DEPENDENCY_ACCESS_POLICY: {{ .Values.config.dependencyProxy.accessPolicy | quote }}
+  SANDBOX_NODE_IMAGE: {{ .Values.runtime.images.node | quote }}
+  SANDBOX_JAVA_IMAGE: {{ .Values.runtime.images.java | quote }}
+  SANDBOX_PYTHON_IMAGE: {{ .Values.runtime.images.python | quote }}
+  SANDBOX_REACT_NATIVE_IMAGE: {{ .Values.runtime.images.reactNative | quote }}
+  PROJECT_CLEANUP_WORKER_ENABLED: "true"
+  PROJECT_CLEANUP_MAX_ATTEMPTS: {{ .Values.worker.projectCleanupMaxAttempts | quote }}
+  WORKSPACE_MAX_SOURCE_FILES: {{ .Values.config.workspace.maxSourceFiles | quote }}
+  WORKSPACE_MAX_FILE_BYTES: {{ .Values.config.workspace.maxFileBytes | quote }}
+  WORKSPACE_MAX_SOURCE_BYTES: {{ .Values.config.workspace.maxSourceBytes | quote }}
+  WORKSPACE_LOCK_LEASE_MS: {{ .Values.config.workspace.lockLeaseMs | quote }}
+  WORKSPACE_LOCK_WAIT_MS: {{ .Values.config.workspace.lockWaitMs | quote }}
+  GIT_COMMAND_TIMEOUT_MS: {{ .Values.config.gitCommandTimeoutMs | quote }}
+  SANDBOX_PIDS_LIMIT: {{ .Values.runtime.dockerSandbox.pidsLimit | quote }}
+  SANDBOX_TMPFS_BYTES: {{ .Values.runtime.dockerSandbox.tmpfsBytes | quote }}
+  SANDBOX_EXEC_MAX_OUTPUT_BYTES: {{ .Values.runtime.dockerSandbox.execMaxOutputBytes | quote }}
+  DB_QUERY_TIMEOUT_MS: {{ .Values.config.dbQuery.timeoutMs | quote }}
+  DB_QUERY_MAX_ROWS: {{ .Values.config.dbQuery.maxRows | quote }}
+  DB_QUERY_MAX_RESULT_BYTES: {{ .Values.config.dbQuery.maxResultBytes | quote }}
+  DB_EXPORT_MAX_BYTES: {{ .Values.config.dbQuery.maxExportBytes | quote }}
+  DB_BACKUP_MAX_BYTES: {{ .Values.config.dbQuery.maxBackupBytes | quote }}
+  REDIS_MODE: {{ .Values.config.redis.mode | quote }}
+  REDIS_HOST: {{ .Values.config.redis.host | quote }}
+  REDIS_PORT: {{ .Values.config.redis.port | quote }}
+  REDIS_DB: {{ .Values.config.redis.db | quote }}
+  REDIS_TLS: {{ .Values.config.redis.tls | quote }}
+  REDIS_CLUSTER_NODES: {{ .Values.config.redis.clusterNodes | quote }}
+  REDIS_CLUSTER_SCALE_READS: {{ .Values.config.redis.clusterScaleReads | quote }}
+  OPENSEARCH_URL: {{ .Values.config.opensearchUrl | quote }}
+  OPENSEARCH_MAX_RESPONSE_BYTES: {{ .Values.config.opensearchMaxResponseBytes | quote }}
+  TEMPO_URL: {{ .Values.config.tempoUrl | quote }}
+  PROMETHEUS_URL: {{ .Values.config.prometheusUrl | quote }}
+  PROMETHEUS_MAX_RESPONSE_BYTES: {{ .Values.config.prometheusMaxResponseBytes | quote }}
+  KAFKA_BROKERS: {{ .Values.config.kafka.brokers | quote }}
+  KAFKA_CLIENT_ID: {{ .Values.config.kafka.clientId | quote }}
+  KAFKA_INSPECTOR_GROUP_ID: {{ .Values.config.kafka.inspectorGroupId | quote }}
+  KAFKA_SSL: {{ .Values.config.kafka.ssl | quote }}
+  KAFKA_SASL_MECHANISM: {{ .Values.config.kafka.saslMechanism | quote }}
+  OTEL_ENABLED: {{ .Values.config.otel.enabled | quote }}
+  OTEL_EXPORTER_OTLP_ENDPOINT: {{ .Values.config.otel.endpoint | quote }}
+  OTEL_RESOURCE_ATTRIBUTES: {{ .Values.config.otel.resourceAttributes | quote }}
+  SANDBOX_PROJECTS_ROOT: /data/projects
+  SANDBOX_WORKSPACES_ROOT: /data/workspaces
+  DEPLOY_WORKSPACES_ROOT: /data/deployments
+  DATABASE_BACKUP_DIR: /data/backups/databases
+  GENERATION_EXECUTOR: {{ .Values.runtime.generationExecutor | quote }}
+  LOCAL_PREVIEW_ENABLED: {{ .Values.runtime.localPreviewEnabled | quote }}
+  K8S_GENERATION_NAMESPACE: {{ default .Release.Namespace .Values.runtime.kubernetes.namespace | quote }}
+  K8S_GENERATION_WORKSPACE_ROOT: {{ .Values.runtime.kubernetes.workspaceRoot | quote }}
+  K8S_GENERATION_WORKSPACE_CLAIM: {{ include "codegen.generationWorkspaceClaim" . | quote }}
+  PREVIEW_SNAPSHOT_ROOT: /data/preview-snapshots
+  PREVIEW_SNAPSHOT_TTL_MINUTES: "120"
+  PREVIEW_SNAPSHOT_MAX_BYTES: "134217728"
+  PREVIEW_ROUTE_LEASE_SECONDS: "90"
+  PREVIEW_ROUTING_CACHE_TTL_SECONDS: "10"
+  RATE_LIMIT_ROUTING_MAX: "6000"
+  RATE_LIMIT_ROUTING_WINDOW_MS: "60000"
+  K8S_GENERATION_JOB_SERVICE_ACCOUNT: {{ include "codegen.generationServiceAccountName" . | quote }}
+  K8S_GENERATION_CONTROLLER_INSTANCE: {{ .Release.Name | quote }}
+  K8S_GENERATION_IMAGE_PULL_SECRETS: {{ join "," .Values.runtime.kubernetes.imagePullSecrets | quote }}
+  K8S_GENERATION_NODE_SELECTOR: {{ toJson .Values.runtime.kubernetes.nodeSelector | quote }}
+  K8S_GENERATION_TOLERATIONS: {{ toJson .Values.runtime.kubernetes.tolerations | quote }}
+  K8S_GENERATION_JOB_TIMEOUT_SECONDS: {{ .Values.runtime.kubernetes.jobTimeoutSeconds | quote }}
+  K8S_GENERATION_JOB_TTL_SECONDS: {{ .Values.runtime.kubernetes.jobTtlSeconds | quote }}
+  K8S_GENERATION_REQUIRE_IMAGE_DIGEST: {{ .Values.runtime.kubernetes.requireImageDigest | quote }}
+  K8S_GENERATION_REQUIRE_DEPENDENCY_PROXY: {{ .Values.runtime.kubernetes.requireDependencyProxy | quote }}
+  K8S_GENERATION_LOG_MAX_BYTES: {{ .Values.runtime.kubernetes.logMaxBytes | quote }}
+  K8S_GENERATION_BUILD_SIZE_LIMIT: {{ .Values.runtime.kubernetes.buildSizeLimit | quote }}
+  K8S_GENERATION_TMP_SIZE_LIMIT: {{ .Values.runtime.kubernetes.tmpSizeLimit | quote }}
+  K8S_GENERATION_EPHEMERAL_REQUEST: {{ .Values.runtime.kubernetes.resources.requests.ephemeralStorage | quote }}
+  K8S_GENERATION_EPHEMERAL_LIMIT: {{ .Values.runtime.kubernetes.resources.limits.ephemeralStorage | quote }}
+  K8S_GENERATION_CPU_REQUEST: {{ .Values.runtime.kubernetes.resources.requests.cpu | quote }}
+  K8S_GENERATION_MEMORY_REQUEST: {{ .Values.runtime.kubernetes.resources.requests.memory | quote }}
+  K8S_GENERATION_CPU_LIMIT: {{ .Values.runtime.kubernetes.resources.limits.cpu | quote }}
+  K8S_GENERATION_MEMORY_LIMIT: {{ .Values.runtime.kubernetes.resources.limits.memory | quote }}
+  GENERATION_MAX_PER_TEAM: {{ .Values.worker.scheduling.maxPerTeam | quote }}
+  GENERATION_MAX_PER_USER: {{ .Values.worker.scheduling.maxPerUser | quote }}
+  GENERATION_RESOURCE_RETRY_MS: {{ .Values.worker.scheduling.resourceRetryMs | quote }}
+  RATE_LIMIT_ENABLED: "true"
+  {{- range $key, $value := .Values.config.extraEnv }}
+  {{ $key }}: {{ $value | quote }}
+  {{- end }}

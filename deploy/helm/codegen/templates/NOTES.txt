@@ -1,0 +1,19 @@
+1. 等待部署就绪：
+   kubectl rollout status deployment/{{ include "codegen.fullname" . }}-api -n {{ .Release.Namespace }}
+   kubectl rollout status deployment/{{ include "codegen.fullname" . }}-worker -n {{ .Release.Namespace }}
+   kubectl rollout status deployment/{{ include "codegen.fullname" . }}-web -n {{ .Release.Namespace }}
+
+2. 健康检查：
+   https://{{ .Values.ingress.host }}/api/health/ready
+
+{{- if .Values.runtime.dockerSocket.enabled }}
+警告：当前已挂载宿主机 Docker Socket，以兼容现有沙箱执行器。这等同于宿主机高权限，
+请使用隔离的执行节点并通过 nodeSelector/taints 限制调度。
+{{- end }}
+{{- if eq .Values.runtime.generationExecutor "kubernetes" }}
+
+代码生成构建门禁已使用 Kubernetes Job：
+  Namespace: {{ default .Release.Namespace .Values.runtime.kubernetes.namespace }}
+  Workspace PVC: {{ include "codegen.generationWorkspaceClaim" . }}
+Job 使用独立、无 API Token 的 ServiceAccount，并在结束、失败或取消后自动清理。
+{{- end }}

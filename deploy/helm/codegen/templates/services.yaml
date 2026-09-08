@@ -1,0 +1,27 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "codegen.fullname" . }}-api
+  labels:
+    {{- include "codegen.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "codegen.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: api
+  ports:
+    - { name: http, port: {{ .Values.service.apiPort }}, targetPort: http }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "codegen.fullname" . }}-web
+  labels:
+    {{- include "codegen.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "codegen.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: web
+  ports:
+    - { name: http, port: {{ .Values.service.webPort }}, targetPort: http }

@@ -1,0 +1,35 @@
+{{- if .Values.namespaceGovernance.enabled }}
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: {{ include "codegen.fullname" . }}
+  labels:
+    {{- include "codegen.labels" . | nindent 4 }}
+spec:
+  hard:
+    pods: {{ .Values.namespaceGovernance.resourceQuota.pods | quote }}
+    requests.cpu: {{ .Values.namespaceGovernance.resourceQuota.requestsCpu | quote }}
+    requests.memory: {{ .Values.namespaceGovernance.resourceQuota.requestsMemory | quote }}
+    limits.cpu: {{ .Values.namespaceGovernance.resourceQuota.limitsCpu | quote }}
+    limits.memory: {{ .Values.namespaceGovernance.resourceQuota.limitsMemory | quote }}
+    requests.ephemeral-storage: {{ .Values.namespaceGovernance.resourceQuota.requestsEphemeralStorage | quote }}
+    limits.ephemeral-storage: {{ .Values.namespaceGovernance.resourceQuota.limitsEphemeralStorage | quote }}
+    persistentvolumeclaims: {{ .Values.namespaceGovernance.resourceQuota.persistentVolumeClaims | quote }}
+    requests.storage: {{ .Values.namespaceGovernance.resourceQuota.requestsStorage | quote }}
+---
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: {{ include "codegen.fullname" . }}
+  labels:
+    {{- include "codegen.labels" . | nindent 4 }}
+spec:
+  limits:
+    - type: Container
+      default:
+        {{- toYaml .Values.namespaceGovernance.limitRange.default | nindent 8 }}
+      defaultRequest:
+        {{- toYaml .Values.namespaceGovernance.limitRange.defaultRequest | nindent 8 }}
+      max:
+        {{- toYaml .Values.namespaceGovernance.limitRange.max | nindent 8 }}
+{{- end }}

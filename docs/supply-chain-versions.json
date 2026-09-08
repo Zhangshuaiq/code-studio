@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "policy": {
+    "productionBaseImagesRequireDigest": true,
+    "externalArchivesRequireSha256": true
+  },
+  "sandboxBaseImages": {
+    "node": { "buildArg": "NODE_BASE_IMAGE", "developmentDefault": "node:20-bookworm" },
+    "python": { "buildArg": "PYTHON_BASE_IMAGE", "developmentDefault": "python:3.12-bookworm" },
+    "java": { "buildArg": "JAVA_BASE_IMAGE", "developmentDefault": "maven:3.9-eclipse-temurin-17" },
+    "reactNative": { "buildArg": "NODE_BASE_IMAGE", "developmentDefault": "node:20-bookworm", "platform": "linux/amd64" }
+  },
+  "externalArchives": {
+    "androidCommandLineToolsLinux": {
+      "version": "15859902",
+      "url": "https://dl.google.com/android/repository/commandlinetools-linux-15859902_latest.zip",
+      "sha256": "4e4c464f145a7512b57d088ac6c278c03c9eea610886b35a5e0804e74eedf583",
+      "source": "https://developer.android.com/studio/"
+    }
+  }
+}

@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>K8s Namespace 调试</title>
+  <style>
+    body { font-family: monospace; padding: 20px; background: #1e1e1e; color: #d4d4d4; }
+    button { padding: 10px 20px; margin: 5px; cursor: pointer; background: #0e639c; color: white; border: none; border-radius: 4px; }
+    button:hover { background: #1177bb; }
+    pre { background: #2d2d2d; padding: 15px; border-radius: 4px; overflow-x: auto; }
+    .success { color: #4ec9b0; }
+    .error { color: #f48771; }
+    input { padding: 8px; width: 300px; }
+  </style>
+</head>
+<body>
+  <h1>🐛 K8s Namespace 功能调试</h1>
+
+  <div>
+    <h3>步骤 1: 登录</h3>
+    <input type="text" id="username" placeholder="用户名" value="demo">
+    <input type="password" id="password" placeholder="密码" value="">
+    <button onclick="login()">登录</button>
+    <pre id="loginResult"></pre>
+  </div>
+
+  <div>
+    <h3>步骤 2: 获取 K8s 目标列表</h3>
+    <button onclick="getTargets()">获取目标</button>
+    <pre id="targetsResult"></pre>
+  </div>
+
+  <div>
+    <h3>步骤 3: 获取 Namespace 列表</h3>
+    <input type="text" id="targetId" placeholder="目标 ID">
+    <button onclick="getNamespaces()">获取 Namespace</button>
+    <pre id="namespacesResult"></pre>
+  </div>
+
+  <div>
+    <h3>步骤 4: 创建 Namespace</h3>
+    <input type="text" id="nsName" placeholder="Namespace 名称" value="test-ns">
+    <button onclick="createNamespace()">创建</button>
+    <pre id="createResult"></pre>
+  </div>
+
+  <script>
+    let token = localStorage.getItem('auth-token') || '';
+
+    async function login() {
+      const username = document.getElementById('username').value;
+      const password = document.getElementById('password').value;
+
+      try {
+        const response = await fetch('http://localhost:3000/api/auth/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ username, password })
+        });
+
+        const data = await response.json();
+        document.getElementById('loginResult').innerHTML = JSON.stringify(data, null, 2);
+
+        if (data.token) {
+          token = data.token;
+          localStorage.setItem('auth-token', token);
+          document.getElementById('loginResult').className = 'success';
+          document.getElementById('loginResult').innerHTML = '✅ 登录成功！\n' + JSON.stringify(data, null, 2);
+        } else {
+          document.getElementById('loginResult').className = 'error';
+        }
+      } catch (error) {
+        document.getElementById('loginResult').className = 'error';
+        document.getElementById('loginResult').innerHTML = '❌ 错误: ' + error.message;
+      }
+    }
+
+    async function getTargets() {
+      try {
+        const response = await fetch('http://localhost:3000/api/k8s/targets', {
+          headers: { 'Authorization': 'Bearer ' + token }
+        });
+
+        const data = await response.json();
+        document.getElementById('targetsResult').innerHTML = JSON.stringify(data, null, 2);
+
+        if (response.ok && data.length > 0) {
+          document.getElementById('targetId').value = data[0].id;
+          document.getElementById('targetsResult').className = 'success';
+        } else {
+          document.getElementById('targetsResult').className = 'error';
+        }
+      } catch (error) {
+        document.getElementById('targetsResult').className = 'error';
+        document.getElementById('targetsResult').innerHTML = '❌ 错误: ' + error.message;
+      }
+    }
+
+    async function getNamespaces() {
+      const targetId = document.getElementById('targetId').value;
+
+      try {
+        const response = await fetch(`http://localhost:3000/api/k8s/${targetId}/namespaces`, {
+          headers: { 'Authorization': 'Bearer ' + token }
+        });
+
+        const data = await response.json();
+        document.getElementById('namespacesResult').innerHTML = JSON.stringify(data, null, 2);
+
+        if (response.ok) {
+          document.getElementById('namespacesResult').className = 'success';
+        } else {
+          document.getElementById('namespacesResult').className = 'error';
+        }
+      } catch (error) {
+        document.getElementById('namespacesResult').className = 'error';
+        document.getElementById('namespacesResult').innerHTML = '❌ 错误: ' + error.message;
+      }
+    }
+
+    async function createNamespace() {
+      const targetId = document.getElementById('targetId').value;
+      const name = document.getElementById('nsName').value;
+
+      try {
+        const response = await fetch(`http://localhost:3000/api/k8s/${targetId}/namespaces`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': 'Bearer ' + token
+          },
+          body: JSON.stringify({ name })
+        });
+
+        const data = await response.json();
+        document.getElementById('createResult').innerHTML = JSON.stringify(data, null, 2);
+
+        if (response.ok) {
+          document.getElementById('createResult').className = 'success';
+        } else {
+          document.getElementById('createResult').className = 'error';
+        }
+      } catch (error) {
+        document.getElementById('createResult').className = 'error';
+        document.getElementById('createResult').innerHTML = '❌ 错误: ' + error.message;
+      }
+    }
+
+    // 页面加载时显示当前 token
+    window.onload = function() {
+      if (token) {
+        document.getElementById('loginResult').innerHTML = '已有 token: ' + token.substring(0, 20) + '...';
+      }
+    }
+  </script>
+</body>
+</html>

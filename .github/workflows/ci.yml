@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.19
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Generate Prisma client
+        run: npm run prisma:generate --workspace apps/api
+        env:
+          DATABASE_URL: postgresql://ci:ci@localhost:5432/ci
+      - name: API tests
+        run: npm test --workspace apps/api
+        env:
+          DATABASE_URL: postgresql://ci:ci@localhost:5432/ci
+      - name: Web production build
+        run: npm run build --workspace apps/web
+      - name: Helm chart lint
+        run: >-
+          docker run --rm -v "$PWD:/work" -w /work alpine/helm:3.17.3
+          lint deploy/helm/codegen
+          --set secrets.databaseUrl=postgresql://ci:ci@postgres:5432/ci
+          --set secrets.jwtSecret=01234567890123456789012345678901
+          --set secrets.credentialEncryptionKey=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+      - name: Validate Kubernetes manifests
+        run: |
+          docker run --rm -v "$PWD:/work" -w /work alpine/helm:3.17.3 \
+            template codegen deploy/helm/codegen \
+            --set secrets.existingSecret=ci-secrets \
+            --set runtime.dockerSocket.enabled=false \
+          | docker run --rm -i ghcr.io/yannh/kubeconform:v0.6.7 -strict -summary

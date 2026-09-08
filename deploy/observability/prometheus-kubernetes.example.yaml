@@ -1,0 +1,26 @@
+# Kubernetes 内 Prometheus 抓取示例。生产建议使用 kube-prometheus-stack；本文件展示 Pod 图表所需数据源。
+scrape_configs:
+  - job_name: kubernetes-kubelet-cadvisor
+    scheme: https
+    authorization:
+      credentials_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+    tls_config:
+      ca_file: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+    kubernetes_sd_configs:
+      - role: node
+    relabel_configs:
+      - target_label: __address__
+        replacement: kubernetes.default.svc:443
+      - source_labels: [__meta_kubernetes_node_name]
+        target_label: __metrics_path__
+        replacement: /api/v1/nodes/$1/proxy/metrics/cadvisor
+
+  # Ready、Phase、重启次数等状态指标由 kube-state-metrics 暴露。
+  - job_name: kube-state-metrics
+    kubernetes_sd_configs:
+      - role: endpoints
+    relabel_configs:
+      - source_labels: [__meta_kubernetes_service_label_app_kubernetes_io_name]
+        regex: kube-state-metrics
+        action: keep
+

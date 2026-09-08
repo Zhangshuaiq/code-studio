@@ -1,0 +1,133 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "codegen.fullname" . }}-api
+  labels:
+    {{- include "codegen.labels" . | nindent 4 }}
+    app.kubernetes.io/component: api
+spec:
+  revisionHistoryLimit: {{ .Values.api.revisionHistoryLimit }}
+  progressDeadlineSeconds: {{ .Values.api.progressDeadlineSeconds }}
+  {{- if not .Values.api.autoscaling.enabled }}
+  replicas: {{ .Values.api.replicaCount }}
+  {{- end }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: { maxUnavailable: 0, maxSurge: 1 }
+  selector:
+    matchLabels:
+      {{- include "codegen.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: api
+  template:
+    metadata:
+      labels:
+        {{- include "codegen.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: api
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- if not .Values.secrets.existingSecret }}
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+        {{- end }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "codegen.serviceAccountName" . }}
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 60
+      imagePullSecrets: {{ toYaml .Values.imagePullSecrets | nindent 8 }}
+      securityContext:
+        seccompProfile: { type: RuntimeDefault }
+        {{- if not .Values.runtime.dockerSocket.enabled }}
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        fsGroupChangePolicy: OnRootMismatch
+        {{- end }}
+      containers:
+        - name: api
+          image: "{{ .Values.api.image.repository }}:{{ .Values.api.image.tag }}"
+          imagePullPolicy: {{ .Values.api.image.pullPolicy }}
+          command: ["node", "--require", "./apps/api/dist/instrumentation.js", "apps/api/dist/main.js"]
+          envFrom:
+            - configMapRef: { name: {{ include "codegen.fullname" . }} }
+            - secretRef: { name: {{ include "codegen.secretName" . }} }
+          env:
+            - { name: PROCESS_ROLE, value: api }
+            - { name: BUILD_IMAGE, value: "{{ .Values.api.image.repository }}:{{ .Values.api.image.tag }}" }
+            - { name: API_PORT, value: {{ .Values.service.apiPort | quote }} }
+            - { name: OTEL_SERVICE_NAME, value: codegen-api }
+          ports:
+            - { name: http, containerPort: {{ .Values.service.apiPort }}, protocol: TCP }
+          startupProbe:
+            httpGet: { path: /api/health/live, port: http }
+            failureThreshold: 30
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /api/health/live, port: http }
+            periodSeconds: 15
+            timeoutSeconds: 3
+          readinessProbe:
+            httpGet: { path: /api/health/ready, port: http }
+            periodSeconds: 10
+            timeoutSeconds: 5
+          resources:
+            {{- toYaml .Values.api.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+            readOnlyRootFilesystem: false
+            {{- if not .Values.runtime.dockerSocket.enabled }}
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            {{- end }}
+          volumeMounts:
+            - { name: workspace, mountPath: /data }
+            {{- if .Values.runtime.dockerSocket.enabled }}
+            - { name: docker-socket, mountPath: /var/run/docker.sock }
+            {{- end }}
+      volumes:
+        - name: workspace
+          {{- if .Values.persistence.enabled }}
+          persistentVolumeClaim: { claimName: {{ include "codegen.workspaceClaim" . }} }
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+        {{- if .Values.runtime.dockerSocket.enabled }}
+        - name: docker-socket
+          hostPath: { path: {{ .Values.runtime.dockerSocket.path }}, type: Socket }
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector: {{ toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity: {{ toYaml . | nindent 8 }}
+      {{- else }}
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    {{- include "codegen.selectorLabels" . | nindent 20 }}
+                    app.kubernetes.io/component: api
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations: {{ toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.topologySpreadConstraints }}
+      topologySpreadConstraints: {{ toYaml . | nindent 8 }}
+      {{- else }}
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              {{- include "codegen.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: api
+      {{- end }}

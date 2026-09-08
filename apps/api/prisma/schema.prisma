@@ -1,0 +1,894 @@
+// Prisma schema for AI 代码生成平台
+// 第一期：Java 支持，多语言字段预留
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id           String   @id @default(uuid())
+  username     String   @unique
+  passwordHash String
+  createdAt    DateTime @default(now())
+
+  // 企业账户字段（邮箱作登录标识 / 对接公司人员；SSO 预留）
+  email       String? @unique
+  displayName String?
+  status      String  @default("active") // active | disabled
+  source      String  @default("local") // local | oidc
+  externalId  String? // IdP 侧用户 id（SSO 接入后用）
+
+  roles             Role[]             @relation("UserRoles")
+  gitProfile        UserGitProfile?
+  gitCredentials    GitCredential[]
+  projects          Project[]
+  modelConfigs      ModelConfig[]
+  deployTargets     DeployTarget[]
+  deploymentRecords DeploymentRecord[]
+  registries        Registry[]
+  teams             Team[]             @relation("TeamMembers") // 用户所属的项目组（多对多）
+  projectAccess     ProjectMember[] // 有权限的项目（多对多）
+  datasourceAccess  DatasourceMember[] // 有权限的数据源（多对多）
+  datasourceApprovals Datasource[] @relation("DatasourceApprovers") // 可审批的数据源
+  sessions          Session[]
+  createdRequirements Requirement[]        @relation("RequirementCreator")
+  ownedRequirements   Requirement[]        @relation("RequirementOwner")
+  requirementStages   RequirementStage[]   @relation("RequirementStageOwner")
+  requirementProjects RequirementProject[] @relation("RequirementDeveloper")
+  requirementRevisions RequirementRevision[]
+  requirementActivities RequirementActivity[]
+}
+
+model JavaTaskApplication {
+  id              String   @id @default(uuid())
+  name            String   @unique
+  baseUrl         String
+  encryptedToken  String
+  enabled         Boolean  @default(true)
+  lastRegisteredAt DateTime?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  handlers        JavaTaskHandler[]
+  tasks           ScheduledJavaTask[]
+}
+
+model JavaTaskHandler {
+  id              String   @id @default(uuid())
+  applicationId   String
+  application     JavaTaskApplication @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+  methodName      String
+  description     String?
+  parameterSchema Json?
+  riskLevel       String   @default("medium")
+  timeoutSeconds  Int      @default(300)
+  allowConcurrent Boolean  @default(false)
+  idempotent      Boolean  @default(false)
+  version         String?
+  enabled         Boolean  @default(true)
+  lastRegisteredAt DateTime @default(now())
+  tasks           ScheduledJavaTask[]
+
+  @@unique([applicationId, methodName])
+  @@index([applicationId, enabled])
+}
+
+model ScheduledJavaTask {
+  id                String   @id @default(uuid())
+  name              String
+  applicationId     String
+  application       JavaTaskApplication @relation(fields: [applicationId], references: [id], onDelete: Restrict)
+  handlerId         String
+  handler           JavaTaskHandler @relation(fields: [handlerId], references: [id], onDelete: Restrict)
+  parameters        Json
+  scheduleType      String   @default("immediate") // immediate | once | cron
+  cronExpression    String?
+  timezone          String   @default("Asia/Shanghai")
+  executeAt         DateTime?
+  nextRunAt         DateTime?
+  status            String   @default("pending_approval") // pending_approval | enabled | paused | completed | rejected
+  concurrencyPolicy String   @default("forbid") // forbid | allow
+  timeoutSeconds    Int
+  maxRetries        Int      @default(0)
+  createdById       String
+  createdByName     String
+  approvedById      String?
+  approvedByName    String?
+  approvedAt        DateTime?
+  expiresAt         DateTime?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+  executions        JavaTaskExecution[]
+
+  @@index([status, nextRunAt])
+  @@index([createdById, createdAt])
+}
+
+model JavaTaskExecution {
+  id                 String   @id @default(uuid())
+  taskId             String
+  task               ScheduledJavaTask @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  status             String   @default("queued") // queued | running | succeeded | failed | timed_out | cancelled
+  triggerType        String
+  attempt            Int      @default(1)
+  parametersSnapshot Json
+  handlerVersion     String?
+  scheduledAt        DateTime
+  startedAt          DateTime?
+  finishedAt         DateTime?
+  heartbeatAt        DateTime?
+  resultSummary      Json?
+  error              String?  @db.Text
+  traceId            String   @unique
+  createdAt          DateTime @default(now())
+
+  @@index([taskId, createdAt])
+  @@index([status, scheduledAt])
+}
+
+// 平台级系统配置。value 由对应业务模块做强类型校验，不在控制器中直接透传任意 key。
+model SystemSetting {
+  key         String   @id
+  value       Json
+  updatedById String?
+  updatedAt   DateTime @updatedAt
+}
+
+// MCP/Agent 的通用工具调用审批。只保存参数哈希和人工可读摘要，不保存原始工具参数。
+model McpToolApproval {
+  id                String   @id @default(uuid())
+  requesterId       String
+  requesterName     String
+  clientId          String
+  agentRunId        String?
+  toolName          String
+  riskLevel         String
+  requiredPermissions String[]
+  reviewerIds       String[]
+  environment       String?
+  resourceType      String?
+  resourceId        String?
+  resourceVersion   String?
+  argumentsHash     String
+  argumentsSummary Json
+  impactSummary     String
+  status            String   @default("requested") // requested | approved | rejected | cancelled | expired | revoked | consuming | consumed | execution_failed
+  reviewerId        String?
+  reviewerName      String?
+  decisionReason    String?
+  reviewedAt        DateTime?
+  expiresAt         DateTime
+  consumedAt        DateTime?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  @@index([requesterId, createdAt])
+  @@index([status, expiresAt])
+  @@index([toolName, argumentsHash, requesterId])
+  @@index([resourceType, resourceId])
+  @@index([reviewerIds], type: Gin)
+}
+
+// 角色（RBAC）。permissions 存权限字符串数组（如 admin:users、deploy:execute）。
+model Role {
+  id          String   @id @default(uuid())
+  name        String   @unique
+  description String?
+  permissions String[] // 权限键集合
+  builtin     Boolean  @default(false) // 内置角色不可删
+  createdAt   DateTime @default(now())
+
+  users User[] @relation("UserRoles")
+}
+
+// 操作日志（审计）。全文检索走 searchText 上的 pg_trgm GIN 索引（迁移里建）。
+// detail 里绝不落敏感字段（拦截器按键名脱敏）。
+model AuditLog {
+  id           String   @id @default(uuid())
+  createdAt    DateTime @default(now())
+  actorId      String? // 操作人（系统/匿名为空）
+  actorName    String   @default("system") // 快照，便于历史检索（用户删了也留痕）
+  action       String // 动作键，如 user.create / deploy.execute / auth.login
+  resourceType String? // user / role / project / deployment / deploy-target / registry ...
+  resourceId   String?
+  resourceName String?
+  result       String   @default("success") // success | failure
+  ip           String?
+  method       String?
+  path         String?
+  statusCode   Int?
+  detail       Json? // 脱敏后的参数/上下文
+  searchText   String   @default("") // 拼接可搜索文本（actor/action/resource/path/detail）
+
+  @@index([createdAt])
+  @@index([actorId])
+  @@index([action])
+  @@index([resourceType])
+  @@index([result])
+}
+
+// 部署目标（服务器/集群）。连接信息(SSH私钥/kubeconfig/token)加密存。
+model DeployTarget {
+  id                  String   @id @default(uuid())
+  userId              String
+  user                User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name                String
+  kind                String // local-docker | docker-ssh | k8s | server-artifact
+  encryptedConfig     String // AES(JSON) 连接配置
+  summary             String? // 非敏感摘要，用于列表展示（如 deploy@1.2.3.4）
+  scope               String   @default("personal") // personal | team | platform
+  teamId              String?
+  team                Team?    @relation(fields: [teamId], references: [id], onDelete: SetNull)
+  purposes            String[] @default(["deploy"]) // preview | deploy
+  labels              String[] @default([])
+  enabled             Boolean  @default(true)
+  maxPreviewInstances Int      @default(10)
+  capacityCpu         Float?
+  capacityMemoryMb    Int?
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  bindings  ProjectRuntimeBinding[]
+  sandboxes SandboxInstance[]
+
+  @@index([userId])
+  @@index([teamId])
+  @@index([scope])
+}
+
+// 镜像仓库（独立可插拔资源）。用户/密码等凭证加密存；k8s 目标按需引用其 id 推送镜像。
+// registry-agnostic：Harbor / 阿里云 ACR / Docker Hub / 自建 registry:2 同一套 Docker Registry v2。
+model Registry {
+  id              String   @id @default(uuid())
+  userId          String
+  user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name            String
+  encryptedConfig String // AES(JSON): { url, project, username, password, insecure }
+  summary         String? // 非敏感摘要（如 harbor.mycorp.com/codegen）
+  createdAt       DateTime @default(now())
+
+  @@index([userId])
+}
+
+// 每个账户自带的模型配置（BYOK）。key 加密存储，可存多套、按会话切换。
+model ModelConfig {
+  id           String   @id @default(uuid())
+  userId       String
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  label        String // 用户起的名字，如 "GLM Flash"
+  provider     String   @default("openai-compatible") // 凭证类型；现仅 openai-compatible
+  engine       String   @default("simple") // 生成引擎: simple(一把梭) | aider(智能体增量)
+  baseUrl      String
+  model        String
+  encryptedKey String // AES-256-GCM 加密后的 api key
+  isDefault    Boolean  @default(false) // 新会话默认用哪套
+  createdAt    DateTime @default(now())
+
+  sessions Session[]
+
+  @@index([userId])
+}
+
+// 用户自己的 Git 提交身份。提交时通过 git -c 显式注入，不写入项目共享配置，
+// 因而同一项目的不同成员会留下各自的 author / committer 信息。
+model UserGitProfile {
+  id          String   @id @default(uuid())
+  userId      String   @unique
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  authorName  String
+  authorEmail String
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+// 推送凭据属于用户，并按 Git 服务主机隔离（例如 github.com / git.company.com）。
+// 项目只保存仓库地址，不再保存团队共享 PAT。
+model GitCredential {
+  id             String   @id @default(uuid())
+  userId         String
+  user           User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  host           String
+  username       String?
+  authType       String   @default("token") // 当前支持 token；为 SSH/OAuth 预留
+  encryptedToken String
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@unique([userId, host])
+  @@index([userId])
+}
+
+model Project {
+  id         String   @id @default(uuid())
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name       String
+  language   String   @default("java") // 预留多语言
+  status     String   @default("active") // "active" | "archived"
+  volumePath String // 项目文件在宿主机上的挂载路径
+  createdAt  DateTime @default(now())
+  deletionStartedAt DateTime?
+  deletionError     String?  @db.Text
+  deletionAttempts  Int      @default(0)
+  deletionNextAttemptAt DateTime?
+  deletionAcknowledgedAt DateTime?
+  deletionAcknowledgedById String?
+  deletionAcknowledgedByName String?
+  deletionAcknowledgementNote String? @db.Text
+
+  teamId String? // 所属项目组（可选，为空则仅创建人可见）
+  team   Team?   @relation(fields: [teamId], references: [id], onDelete: SetNull)
+
+  sessions          Session[]
+  remote            ProjectRemote?
+  deployment        Deployment?
+  runtimeBindings   ProjectRuntimeBinding[]
+  deploymentRecords DeploymentRecord[]
+  members           ProjectMember[] // 被授权的用户（多对多）
+  logSources        BusinessLogSource[]
+  alertRules        MonitoringAlertRule[]
+  alertEvents       MonitoringAlertEvent[]
+  requirementLinks  RequirementProject[]
+
+  @@index([userId])
+  @@index([teamId])
+  @@index([status, deletionStartedAt])
+  @@index([status, deletionNextAttemptAt])
+}
+
+model MonitoringAlertRule {
+  id              String   @id @default(uuid())
+  projectId       String
+  project         Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  name            String
+  metric          String   // success_rate | p95_latency_ms | error_rate
+  operator        String   // lt | gt
+  threshold       Float
+  windowMinutes   Int      @default(5)
+  environment     String?
+  serviceName     String?
+  enabled         Boolean  @default(true)
+  cooldownMinutes Int      @default(15)
+  lastTriggeredAt DateTime?
+  state           String   @default("ok") // ok | firing
+  lastValue       Float?
+  lastEvaluatedAt DateTime?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  events          MonitoringAlertEvent[]
+
+  @@index([projectId])
+  @@index([enabled])
+}
+
+model MonitoringAlertEvent {
+  id         String              @id @default(uuid())
+  projectId  String
+  project    Project             @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  ruleId     String
+  rule       MonitoringAlertRule @relation(fields: [ruleId], references: [id], onDelete: Cascade)
+  metric     String
+  value      Float
+  threshold  Float
+  status     String              @default("firing") // firing | resolved
+  message    String
+  notificationStatus String      @default("pending") // pending | sent | failed | in_app
+  notificationError  String?
+  notifiedAt         DateTime?
+  createdAt  DateTime            @default(now())
+
+  @@index([projectId, createdAt])
+  @@index([ruleId, createdAt])
+}
+
+// 业务日志接入源。真实日志存入 OpenSearch；这里只保存项目归属、解析元数据和 token 哈希。
+model BusinessLogSource {
+  id             String    @id @default(uuid())
+  projectId      String
+  project        Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  name           String
+  environment    String
+  serviceName    String
+  format         String    @default("json") // json | log4j
+  status         String    @default("active") // active | disabled
+  tokenHash      String    @unique
+  tokenPrefix    String
+  lastIngestedAt DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  @@index([projectId])
+  @@index([status])
+}
+
+// D1：本机 Docker 部署实例（当前每项目一条，代表当前部署）。
+model Deployment {
+  id             String   @id @default(uuid())
+  projectId      String   @unique
+  project        Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  targetId       String? // 部署到的目标（null = 内置本机 Docker）
+  targetName     String? // 展示用
+  datasourceId   String? // 本次环境绑定的数据源快照
+  datasourceName String? // 展示用快照
+  environment    String   @default("default")
+  branch         String?
+  deployedById   String?
+  deployedByName String?
+  gitSha         String? // 部署的 commit
+  image          String? // 镜像 tag
+  status         String   @default("building") // building | running | failed | stopped
+  url            String?
+  hostPort       Int?
+  containerPort  Int?
+  containerId    String?
+  logsTail       String?  @db.Text
+  activeRecordId String?  // 当前部署对应的不可变记录；跨 Pod 共享，不使用进程内状态
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@index([activeRecordId])
+}
+
+// 项目对运行资源的绑定。连接凭据保存在 DeployTarget；这里仅保存项目级环境配置。
+model ProjectRuntimeBinding {
+  id            String       @id @default(uuid())
+  projectId     String
+  project       Project      @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  targetId      String
+  target        DeployTarget @relation(fields: [targetId], references: [id], onDelete: Restrict)
+  purpose       String // preview | deploy
+  environment   String // preview / test / staging / production
+  branchPattern String       @default("*")
+  config        Json?
+  enabled       Boolean      @default(true)
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
+
+  @@unique([projectId, purpose, environment])
+  @@index([projectId])
+  @@index([targetId])
+  @@index([purpose])
+}
+
+// 不可变部署记录；Deployment 继续保存项目当前状态，兼容原有状态轮询。
+model DeploymentRecord {
+  id             String   @id @default(uuid())
+  projectId      String
+  project        Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  targetId       String?
+  targetName     String?
+  datasourceId   String?
+  datasourceName String?
+  environment    String
+  branch         String
+  gitSha         String?
+  status         String
+  url            String?
+  logsTail       String?  @db.Text
+  deployedById   String
+  deployedBy     User     @relation(fields: [deployedById], references: [id], onDelete: Restrict)
+  deployedByName String
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@index([projectId, createdAt])
+  @@index([status])
+  @@index([deployedById])
+  @@index([datasourceId])
+}
+
+// 项目的远程 Git 仓库配置。这里只保存非敏感仓库元数据；
+// 推送时按当前登录用户和 remoteUrl 主机查找其个人 GitCredential。
+model ProjectRemote {
+  id        String   @id @default(uuid())
+  projectId String   @unique
+  project   Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  remoteUrl String // https://github.com/user/repo.git
+  branch    String   @default("main")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model Session {
+  id              String       @id @default(uuid())
+  projectId       String
+  project         Project      @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  userId          String
+  user            User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  workspacePath   String? // 当前用户在该项目中的独立 Git worktree
+  workspaceBranch String? // users/<username>-<shortId>；创建者通常为项目默认分支
+  agentContextId  String? // Claude Agent SDK 的会话/上下文标识，用于多轮对话延续
+  modelConfigId   String? // 本会话使用的模型配置（为空则取用户默认）
+  modelConfig     ModelConfig? @relation(fields: [modelConfigId], references: [id], onDelete: SetNull)
+  createdAt       DateTime     @default(now())
+
+  tasks   Task[]
+  sandbox SandboxInstance?
+  preview PreviewInstance?
+  requirementLinks RequirementProject[]
+  previewSourceSnapshots PreviewSourceSnapshot[]
+
+  @@unique([projectId, userId])
+  @@index([projectId])
+  @@index([userId])
+  @@index([modelConfigId])
+}
+
+model Task {
+  id                 String    @id @default(uuid())
+  sessionId          String
+  session            Session   @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  prompt             String    @db.Text
+  status             String    @default("queued") // queued | running | cancelling | succeeded | failed | cancelled | timed_out
+  resultLog          String?   @db.Text
+  executorKind       String?   // docker | kubernetes
+  executionNamespace String?
+  executionRef       String?   // Docker container id / Kubernetes Job name
+  failureCode        String?   // command_failed | image_pull | oom_killed | deadline_exceeded | cluster_error
+  priority           Int       @default(5) // 1 最高，10 最低
+  resourceWaitCount  Int       @default(0)
+  startedAt          DateTime?
+  createdAt          DateTime  @default(now())
+  finishedAt         DateTime?
+
+  @@index([sessionId])
+  @@index([executorKind, executionNamespace, executionRef])
+  @@index([failureCode])
+  @@index([status, priority, createdAt])
+}
+
+model SandboxInstance {
+  id           String        @id @default(uuid())
+  sessionId    String        @unique
+  session      Session       @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  containerId  String
+  image        String // 如 "sandbox-java:1.0"
+  targetId     String?
+  target       DeployTarget? @relation(fields: [targetId], references: [id], onDelete: SetNull)
+  targetName   String?
+  runtimeKind  String        @default("local-docker")
+  memoryMb     Int           @default(1024)
+  cpu          Float         @default(1)
+  status       String        @default("starting") // "starting" | "running" | "stopped"
+  lastActiveAt DateTime      @default(now())
+
+  @@index([targetId])
+}
+
+model PreviewInstance {
+  id            String   @id @default(uuid())
+  sessionId     String   @unique
+  session       Session  @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  kind          String // 'web-dev-server' 等
+  status        String   @default("starting") // "starting" | "ready" | "failed" | "stopped"
+  url           String? // 预览访问地址（本地阶段为 http://localhost:<hostPort>）
+  hostPort      Int?
+  containerPort Int?
+  targetId      String?
+  targetName    String?
+  logsTail      String?  @db.Text // dev server 最近日志
+
+  // 移动端模拟器预览（kind='emulator'）专属。web/http 预览这些列为空。
+  emulatorContainerId String? // 模拟器容器 id（停止预览时一并回收）
+  webrtcEndpoint      String? // 对外 gRPC-web URL（如 https://host:8443），供前端 <Emulator> 连接
+  webrtcTokenEnc      String? // 加密后的短期 WebRTC token（CryptoService 加密，DTO 不回明文）
+  extra               Json? // deviceProfile / bootMs / bundle 路径等非索引元数据
+  requirementId       String?
+  requirement         Requirement? @relation(fields: [requirementId], references: [id], onDelete: SetNull)
+  serviceKey          String? // 联调路由中的稳定服务标识
+  routeEndpoint       RequirementRouteEndpoint?
+
+  createdAt     DateTime @default(now())
+  lastActiveAt  DateTime @default(now())
+
+  @@index([requirementId])
+  @@index([requirementId, serviceKey])
+}
+
+model Requirement {
+  id              String   @id @default(uuid())
+  requirementNo   String   @unique
+  teamId          String
+  team            Team     @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  title           String
+  summary         String?
+  contentMarkdown String   @default("") @db.Text
+  documentVersion Int      @default(1)
+  status          String   @default("draft") // draft | active | completed | cancelled | archived
+  currentStage    String   @default("design") // design | development | testing | canary | release
+  progress        Int      @default(0)
+  plannedStartAt  DateTime?
+  plannedEndAt    DateTime?
+  ownerId         String
+  owner           User     @relation("RequirementOwner", fields: [ownerId], references: [id], onDelete: Restrict)
+  createdById     String
+  createdBy       User     @relation("RequirementCreator", fields: [createdById], references: [id], onDelete: Restrict)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  stages          RequirementStage[]
+  revisions       RequirementRevision[]
+  projects        RequirementProject[]
+  activities      RequirementActivity[]
+  previews        PreviewInstance[]
+  routeEndpoints  RequirementRouteEndpoint[]
+
+  @@index([teamId, status, updatedAt])
+  @@index([ownerId, status])
+}
+
+model RequirementStage {
+  id                  String   @id @default(uuid())
+  requirementId       String
+  requirement         Requirement @relation(fields: [requirementId], references: [id], onDelete: Cascade)
+  type                String // design | development | testing | canary | release
+  sortOrder           Int
+  ownerId             String?
+  owner               User?    @relation("RequirementStageOwner", fields: [ownerId], references: [id], onDelete: SetNull)
+  descriptionMarkdown String    @default("") @db.Text
+  status              String    @default("pending") // pending | in_progress | completed | blocked | skipped
+  progress            Int       @default(0)
+  blockedReason       String?   @db.Text
+  plannedStartAt      DateTime?
+  plannedEndAt        DateTime?
+  startedAt           DateTime?
+  completedAt         DateTime?
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+
+  @@unique([requirementId, type])
+  @@index([ownerId, status])
+  @@index([requirementId, sortOrder])
+}
+
+model RequirementRevision {
+  id              String      @id @default(uuid())
+  requirementId   String
+  requirement     Requirement @relation(fields: [requirementId], references: [id], onDelete: Cascade)
+  version         Int
+  contentMarkdown String      @db.Text
+  changeSummary   String?
+  createdById     String
+  createdBy       User        @relation(fields: [createdById], references: [id], onDelete: Restrict)
+  createdAt       DateTime    @default(now())
+
+  @@unique([requirementId, version])
+  @@index([requirementId, createdAt])
+}
+
+model RequirementProject {
+  id             String      @id @default(uuid())
+  requirementId  String
+  requirement    Requirement @relation(fields: [requirementId], references: [id], onDelete: Cascade)
+  projectId      String
+  project        Project     @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  serviceKey     String
+  developerId    String?
+  developer      User?       @relation("RequirementDeveloper", fields: [developerId], references: [id], onDelete: SetNull)
+  sessionId      String?
+  session        Session?    @relation(fields: [sessionId], references: [id], onDelete: SetNull)
+  branchName     String?
+  changeRequired Boolean     @default(true)
+  status         String      @default("pending") // pending | developing | preview | completed
+  createdAt      DateTime    @default(now())
+  updatedAt      DateTime    @updatedAt
+
+  @@unique([requirementId, projectId])
+  @@unique([requirementId, serviceKey])
+  @@index([projectId])
+  @@index([developerId, status])
+  @@index([sessionId])
+}
+
+model RequirementActivity {
+  id            String      @id @default(uuid())
+  requirementId String
+  requirement   Requirement @relation(fields: [requirementId], references: [id], onDelete: Cascade)
+  actorId       String?
+  actor         User?       @relation(fields: [actorId], references: [id], onDelete: SetNull)
+  action        String
+  detail        Json?
+  createdAt     DateTime    @default(now())
+
+  @@index([requirementId, createdAt])
+  @@index([actorId, createdAt])
+}
+
+// 只有 Kubernetes Ready 的需求预览实例才会出现在路由控制面中。
+model RequirementRouteEndpoint {
+  id                String          @id @default(uuid())
+  requirementId     String
+  requirement       Requirement     @relation(fields: [requirementId], references: [id], onDelete: Cascade)
+  previewInstanceId String          @unique
+  previewInstance   PreviewInstance @relation(fields: [previewInstanceId], references: [id], onDelete: Cascade)
+  serviceKey        String
+  targetId          String
+  namespace         String
+  serviceName       String
+  port              Int
+  endpointUrl       String
+  publicUrl         String?
+  readyAt           DateTime        @default(now())
+  leaseExpiresAt    DateTime
+  updatedAt         DateTime        @updatedAt
+
+  @@unique([requirementId, serviceKey])
+  @@index([targetId, namespace])
+  @@index([leaseExpiresAt])
+}
+
+// Kubernetes 预览镜像的不可变构建记录，用于成功率、耗时和故障追踪。
+model PreviewBuildRecord {
+  id          String    @id @default(uuid())
+  sessionId   String
+  projectId   String
+  userId      String
+  teamId      String
+  targetId    String
+  namespace   String
+  jobName     String    @unique
+  image       String
+  status      String    @default("queued") // queued | building | succeeded | failed | cancelled
+  logsTail    String?   @db.Text
+  queuedAt    DateTime  @default(now())
+  startedAt   DateTime?
+  finishedAt  DateTime?
+  durationMs  Int?
+  createdAt   DateTime  @default(now())
+
+  @@index([projectId, createdAt])
+  @@index([teamId, status, queuedAt])
+  @@index([userId, status, queuedAt])
+  @@index([status, createdAt])
+  @@index([sessionId, createdAt])
+}
+
+// 当前用户工作区的不可变、短期构建快照。归档位于平台共享卷，下载凭证只保存哈希。
+model PreviewSourceSnapshot {
+  id           String   @id @default(uuid())
+  sessionId    String
+  session      Session  @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  tokenHash    String   @unique
+  archivePath  String
+  sha256       String
+  sizeBytes    Int
+  status       String   @default("ready") // ready | deleted
+  expiresAt    DateTime
+  downloadedAt DateTime?
+  createdAt    DateTime @default(now())
+
+  @@index([sessionId, createdAt])
+  @@index([status, expiresAt])
+}
+
+// 项目组：人员、项目、数据源的所属组织单位。用户只能访问所属项目组的资源。
+model Team {
+  id          String   @id @default(uuid())
+  name        String   @unique
+  description String?
+  createdAt   DateTime @default(now())
+
+  members       User[]         @relation("TeamMembers")
+  projects      Project[]
+  datasources   Datasource[]
+  deployTargets DeployTarget[]
+  requirements  Requirement[]
+}
+
+// 数据源：MySQL/Redis/MongoDB 等外部数据库连接配置。凭证加密存储。
+model Datasource {
+  id              String             @id @default(uuid())
+  teamId          String // 所属项目组
+  team            Team               @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  name            String
+  type            String // 'mysql' | 'postgresql' | 'redis' | 'mongodb'
+  category        String // 'relational' | 'nosql'
+  encryptedConfig String // AES(JSON): { host, port, username, password, database, ... }
+  summary         String? // 非敏感摘要（如 mysql://prod-db-01:3306/myapp）
+  createdAt       DateTime           @default(now())
+  updatedAt       DateTime           @updatedAt
+  members         DatasourceMember[] // 被授权的用户（多对多）
+  approvers       User[]             @relation("DatasourceApprovers") // 任一审批人同意即通过
+  approvals       DatabaseApproval[]
+  sourceTransfers DatabaseTransfer[] @relation("TransferSource")
+  targetTransfers DatabaseTransfer[] @relation("TransferTarget")
+
+  @@index([teamId])
+  @@index([category])
+}
+
+// 项目成员（显式授权）：用户必须和项目同属一个项目组，才能被授权访问项目
+model ProjectMember {
+  id        String   @id @default(uuid())
+  projectId String
+  project   Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role      String   @default("developer") // maintainer | developer | viewer
+  createdAt DateTime @default(now())
+
+  @@unique([projectId, userId])
+  @@index([userId])
+  @@index([projectId])
+}
+
+// 数据源成员（显式授权）：用户必须和数据源同属一个项目组，才能被授权访问数据源
+model DatasourceMember {
+  id           String     @id @default(uuid())
+  datasourceId String
+  datasource   Datasource @relation(fields: [datasourceId], references: [id], onDelete: Cascade)
+  userId       String
+  user         User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt    DateTime   @default(now())
+
+  @@unique([datasourceId, userId])
+  @@index([userId])
+  @@index([datasourceId])
+}
+
+// 数据库写操作审批。SQL 仅在审批通过后由服务端使用原数据源凭据执行。
+model DatabaseApproval {
+  id             String    @id @default(uuid())
+  datasourceId   String
+  datasource     Datasource @relation(fields: [datasourceId], references: [id], onDelete: Cascade)
+  requesterId    String
+  requesterName  String
+  approverId     String?
+  approverName   String?
+  database       String?
+  sql            String    @db.Text
+  operation      String
+  status         String    @default("pending") // pending | executing | approved | rejected | failed | cancelled
+  resultSummary  Json?
+  planAnalysis   Json?
+  analyzedAt     DateTime?
+  error          String?   @db.Text
+  requestedAt    DateTime  @default(now())
+  reviewedAt     DateTime?
+  executedAt     DateTime?
+
+  @@index([status, requestedAt])
+  @@index([datasourceId, requestedAt])
+  @@index([requesterId, requestedAt])
+}
+
+model DatabaseTransfer {
+  id                   String     @id @default(uuid())
+  kind                 String     @default("migration") // backup | migration
+  sourceDatasourceId   String
+  sourceDatasource     Datasource @relation("TransferSource", fields: [sourceDatasourceId], references: [id], onDelete: Restrict)
+  targetDatasourceId   String?
+  targetDatasource     Datasource? @relation("TransferTarget", fields: [targetDatasourceId], references: [id], onDelete: Restrict)
+  requesterId          String
+  requesterName        String
+  approverId           String?
+  approverName         String?
+  sourceDatabase       String
+  targetDatabase       String?
+  tables               String[]
+  conflictStrategy     String     @default("fail") // fail | append | replace
+  preflight            Json?
+  checkpoints          Json?
+  cancelRequested      Boolean    @default(false)
+  leaseOwner           String?
+  heartbeatAt          DateTime?
+  status               String     @default("pending_approval") // pending_approval | queued | running | succeeded | failed | rejected | cancelled
+  currentTable         String?
+  totalTables          Int        @default(0)
+  completedTables      Int        @default(0)
+  totalRows            Int        @default(0)
+  migratedRows         Int        @default(0)
+  backupPath           String?
+  error                String?    @db.Text
+  requestedAt          DateTime   @default(now())
+  reviewedAt           DateTime?
+  startedAt            DateTime?
+  finishedAt           DateTime?
+
+  @@index([status, requestedAt])
+  @@index([requesterId, requestedAt])
+  @@index([sourceDatasourceId, requestedAt])
+}

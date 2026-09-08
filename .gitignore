@@ -1,0 +1,14 @@
+node_modules/
+dist/
+build/
+target/
+.env
+.env.local
+*.log
+.DS_Store
+apps/api/prisma/*.db
+apps/web/dist/
+coverage/
+*.tsbuildinfo
+.data/
+apps/api/.data/

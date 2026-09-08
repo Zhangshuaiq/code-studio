@@ -1,0 +1,15 @@
+{{- range $name, $component := dict "api" .Values.api "worker" .Values.worker "web" .Values.web }}
+{{- if $component.pdb.enabled }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "codegen.fullname" $ }}-{{ $name }}
+spec:
+  minAvailable: {{ $component.pdb.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "codegen.selectorLabels" $ | nindent 6 }}
+      app.kubernetes.io/component: {{ $name }}
+---
+{{- end }}
+{{- end }}

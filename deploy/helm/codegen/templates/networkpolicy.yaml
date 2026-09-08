@@ -1,0 +1,130 @@
+{{- if and (eq .Values.runtime.generationExecutor "kubernetes") (not .Values.networkPolicy.enabled) (not .Values.networkPolicy.allowUnrestrictedGenerationEgress) }}
+  {{- fail "Kubernetes 生成执行器必须启用 NetworkPolicy；如集群 CNI 不支持且确认接受风险，显式设置 networkPolicy.allowUnrestrictedGenerationEgress=true" }}
+{{- end }}
+{{- if .Values.networkPolicy.enabled }}
+{{- if and (eq .Values.runtime.generationExecutor "kubernetes") (not .Values.networkPolicy.allowUnrestrictedGenerationEgress) }}
+  {{- range .Values.networkPolicy.generationEgressCidrs }}
+    {{- if or (eq . "0.0.0.0/0") (eq . "::/0") }}
+      {{- fail "generationEgressCidrs 禁止配置全网段；如确认接受风险，显式设置 networkPolicy.allowUnrestrictedGenerationEgress=true" }}
+    {{- end }}
+  {{- end }}
+{{- end }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "codegen.fullname" . }}-default-deny
+  labels:
+    {{- include "codegen.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "codegen.selectorLabels" . | nindent 6 }}
+  policyTypes: [Ingress, Egress]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "codegen.fullname" . }}-public-ingress
+  labels:
+    {{- include "codegen.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchExpressions:
+      - key: app.kubernetes.io/name
+        operator: In
+        values: [{{ include "codegen.name" . }}]
+      - key: app.kubernetes.io/instance
+        operator: In
+        values: [{{ .Release.Name }}]
+      - key: app.kubernetes.io/component
+        operator: In
+        values: [api, web]
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            {{- toYaml .Values.networkPolicy.ingressController.namespaceSelector | nindent 12 }}
+          podSelector:
+            {{- toYaml .Values.networkPolicy.ingressController.podSelector | nindent 12 }}
+      ports:
+        - { protocol: TCP, port: {{ .Values.service.apiPort }} }
+        - { protocol: TCP, port: {{ .Values.service.webPort }} }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "codegen.fullname" . }}-service-egress
+  labels:
+    {{- include "codegen.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchExpressions:
+      - key: app.kubernetes.io/name
+        operator: In
+        values: [{{ include "codegen.name" . }}]
+      - key: app.kubernetes.io/instance
+        operator: In
+        values: [{{ .Release.Name }}]
+      - key: app.kubernetes.io/component
+        operator: In
+        values: [api, worker, migration]
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }
+    {{- if .Values.networkPolicy.allowSameNamespaceEgress }}
+    - to:
+        - podSelector: {}
+    {{- end }}
+    {{- range .Values.networkPolicy.externalEgressCidrs }}
+    - to:
+        - ipBlock: { cidr: {{ . | quote }} }
+    {{- end }}
+    {{- with .Values.networkPolicy.extraEgress }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+{{- if eq .Values.runtime.generationExecutor "kubernetes" }}
+---
+# 用户生成代码运行在独立 Job 中：默认无横向访问，仅允许 DNS 与配置的外部出口。
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "codegen.fullname" . }}-generation-job
+  namespace: {{ default .Release.Namespace .Values.runtime.kubernetes.namespace }}
+  labels:
+    {{- include "codegen.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: codegen-generation
+      app.kubernetes.io/instance: {{ .Release.Name | quote }}
+  policyTypes: [Ingress, Egress]
+  ingress: []
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }
+    {{- range .Values.networkPolicy.generationEgressCidrs }}
+    - to:
+        - ipBlock: { cidr: {{ . | quote }} }
+    {{- end }}
+    {{- with .Values.networkPolicy.generationExtraEgress }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+{{- end }}
+{{- end }}

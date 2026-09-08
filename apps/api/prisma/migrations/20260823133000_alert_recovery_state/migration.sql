@@ -1,0 +1,4 @@
+ALTER TABLE "MonitoringAlertRule"
+  ADD COLUMN "state" TEXT NOT NULL DEFAULT 'ok',
+  ADD COLUMN "lastValue" DOUBLE PRECISION,
+  ADD COLUMN "lastEvaluatedAt" TIMESTAMP(3);

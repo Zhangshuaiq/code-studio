@@ -1,0 +1,28 @@
+groups:
+  - name: code-studio-container-health
+    rules:
+      - alert: CodeStudioContainerCpuHigh
+        expr: sum by (container_label_com_docker_compose_service) (rate(container_cpu_usage_seconds_total{container_label_com_docker_compose_project="code-generator",container_label_com_docker_compose_service=~"api|worker"}[5m])) > 0.85
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.container_label_com_docker_compose_service }} CPU 持续偏高"
+          description: "容器 CPU 使用超过 0.85 核并持续 10 分钟。"
+      - alert: CodeStudioContainerMemoryHigh
+        expr: sum by (container_label_com_docker_compose_service) (container_memory_working_set_bytes{container_label_com_docker_compose_project="code-generator",container_label_com_docker_compose_service=~"api|worker"}) > 1073741824
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.container_label_com_docker_compose_service }} 内存持续偏高"
+          description: "容器工作集内存超过 1 GiB 并持续 10 分钟。"
+      - alert: CodeStudioContainerMissing
+        expr: absent(container_last_seen{container_label_com_docker_compose_project="code-generator",container_label_com_docker_compose_service="api"}) or absent(container_last_seen{container_label_com_docker_compose_project="code-generator",container_label_com_docker_compose_service="worker"})
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Code Studio 核心实例消失"
+          description: "API 或 Worker 容器超过 2 分钟未被采集。"
+

@@ -1,0 +1,5 @@
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { api } from '../lib/api';
+export interface DeadLetter { id: string; failedReason?: string; attemptsMade: number; finishedOn?: number; task: null | { id: string; status: string; prompt: string; session: { project: { id: string; name: string }; user: { username: string } } }; }
+export function useDeadLetters(page: number) { return useQuery<{ items: DeadLetter[]; total: number; pages: number }>({ queryKey: ['generation-dlq', page], queryFn: async () => (await api.get('/agent/dlq', { params: { page, limit: 20 } })).data, refetchInterval: 15_000 }); }
+export function useDeadLetterActions() { const qc = useQueryClient(); const refresh = () => qc.invalidateQueries({ queryKey: ['generation-dlq'] }); const replay = useMutation({ mutationFn: (id: string) => api.post(`/agent/dlq/${id}/replay`), onSuccess: refresh }); const remove = useMutation({ mutationFn: (id: string) => api.delete(`/agent/dlq/${id}`), onSuccess: refresh }); return { replay, remove }; }

@@ -1,0 +1,308 @@
+nameOverride: ""
+fullnameOverride: ""
+
+imagePullSecrets: []
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+api:
+  replicaCount: 2
+  revisionHistoryLimit: 5
+  progressDeadlineSeconds: 600
+  image:
+    repository: harbor.example.com/codegen/api
+    tag: "0.1.0"
+    pullPolicy: IfNotPresent
+  resources:
+    requests: { cpu: 250m, memory: 512Mi }
+    limits: { cpu: "2", memory: 2Gi }
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 70
+  pdb: { enabled: true, minAvailable: 1 }
+
+worker:
+  projectCleanupMaxAttempts: 10
+  replicaCount: 2
+  revisionHistoryLimit: 5
+  progressDeadlineSeconds: 1800
+  image:
+    repository: harbor.example.com/codegen/api
+    tag: "0.1.0"
+    pullPolicy: IfNotPresent
+  concurrency: 2
+  scheduling:
+    maxPerTeam: 4
+    maxPerUser: 2
+    resourceRetryMs: 5000
+  resources:
+    requests: { cpu: 500m, memory: 1Gi }
+    limits: { cpu: "4", memory: 4Gi }
+  autoscaling:
+    enabled: false
+    minReplicas: 2
+    maxReplicas: 20
+    targetCPUUtilizationPercentage: 70
+  pdb: { enabled: true, minAvailable: 1 }
+
+web:
+  replicaCount: 2
+  revisionHistoryLimit: 5
+  progressDeadlineSeconds: 300
+  image:
+    repository: harbor.example.com/codegen/web
+    tag: "0.1.0"
+    pullPolicy: IfNotPresent
+  resources:
+    requests: { cpu: 50m, memory: 64Mi }
+    limits: { cpu: 500m, memory: 256Mi }
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 70
+  pdb: { enabled: true, minAvailable: 1 }
+
+service:
+  apiPort: 3000
+  workerHealthPort: 3001
+  webPort: 8080
+
+build:
+  version: "0.1.0"
+  gitSha: ""
+  time: ""
+
+ingress:
+  enabled: true
+  className: nginx
+  annotations: {}
+  host: codegen.example.com
+  tls:
+    enabled: true
+    secretName: codegen-tls
+
+config:
+  nodeEnv: production
+  webOrigin: https://codegen.example.com
+  trustProxy: "1"
+  selfRegistrationEnabled: false
+  selfRegistrationRole: viewer
+  mcp:
+    enabled: false
+    readToolsEnabled: false
+    resultMaxBytes: 1048576
+    allowedHosts:
+      - codegen.example.com
+  lsp:
+    enabled: false
+    ticketTtlSeconds: 60
+    sessionTtlSeconds: 1800
+  dependencyProxy:
+    accessPolicy: proxy-upstream
+    npmRegistry: ""
+    pipIndexUrl: ""
+    mavenMirrorUrl: ""
+  workspace:
+    maxSourceFiles: 2000
+    maxFileBytes: 2097152
+    maxSourceBytes: 104857600
+    lockLeaseMs: 60000
+    lockWaitMs: 30000
+  gitCommandTimeoutMs: 600000
+  dbQuery:
+    timeoutMs: 15000
+    maxRows: 5000
+    maxResultBytes: 5242880
+    maxExportBytes: 52428800
+    maxBackupBytes: 10737418240
+  opensearchUrl: https://opensearch.example.com:9200
+  opensearchMaxResponseBytes: 20971520
+  tempoUrl: http://tempo.observability:3200
+  prometheusUrl: http://prometheus-server.observability:80
+  prometheusMaxResponseBytes: 10485760
+  redis:
+    mode: standalone
+    host: redis-master
+    port: 6379
+    db: 0
+    tls: false
+    clusterNodes: ""
+    clusterScaleReads: master
+  otel:
+    enabled: false
+    endpoint: http://otel-collector.observability:4318
+    resourceAttributes: deployment.environment.name=production,service.namespace=code-studio
+  kafka:
+    brokers: ""
+    clientId: codegen-console
+    inspectorGroupId: codegen-console-inspector
+    ssl: true
+    saslMechanism: scram-sha-512
+  extraEnv: {}
+
+secrets:
+  existingSecret: ""
+  databaseUrl: ""
+  jwtSecret: ""
+  jwtKeyId: primary
+  jwtPreviousSecrets: ""
+  initialAdminToken: ""
+  credentialEncryptionKey: ""
+  credentialEncryptionKeyId: primary
+  credentialEncryptionPreviousKeys: ""
+  redisUsername: ""
+  redisPassword: ""
+  opensearchUsername: ""
+  opensearchPassword: ""
+  otelHeaders: ""
+  prometheusUsername: ""
+  prometheusPassword: ""
+  prometheusBearerToken: ""
+  kafkaSaslUsername: ""
+  kafkaSaslPassword: ""
+  kafkaSslCa: ""
+  kafkaSslCert: ""
+  kafkaSslKey: ""
+  previewRoutingControlToken: ""
+
+# 可选：由 External Secrets Operator 从 Vault、云 KMS/Secrets Manager 等同步 Secret。
+# 启用后 Chart 不再渲染内置 Secret，远端对象需包含下列 dataMappings 中的所有键。
+externalSecrets:
+  enabled: false
+  apiVersion: external-secrets.io/v1beta1
+  refreshInterval: 1h
+  targetSecretName: ""
+  secretStoreRef:
+    name: ""
+    kind: ClusterSecretStore
+  remoteKey: codegen/production
+  dataMappings:
+    DATABASE_URL: DATABASE_URL
+    JWT_SECRET: JWT_SECRET
+    JWT_KEY_ID: JWT_KEY_ID
+    JWT_PREVIOUS_SECRETS: JWT_PREVIOUS_SECRETS
+    INITIAL_ADMIN_TOKEN: INITIAL_ADMIN_TOKEN
+    CRED_ENCRYPTION_KEY: CRED_ENCRYPTION_KEY
+    CRED_ENCRYPTION_KEY_ID: CRED_ENCRYPTION_KEY_ID
+    CRED_ENCRYPTION_PREVIOUS_KEYS: CRED_ENCRYPTION_PREVIOUS_KEYS
+    REDIS_USERNAME: REDIS_USERNAME
+    REDIS_PASSWORD: REDIS_PASSWORD
+    OPENSEARCH_USERNAME: OPENSEARCH_USERNAME
+    OPENSEARCH_PASSWORD: OPENSEARCH_PASSWORD
+    OTEL_EXPORTER_OTLP_HEADERS: OTEL_EXPORTER_OTLP_HEADERS
+    PROMETHEUS_USERNAME: PROMETHEUS_USERNAME
+    PROMETHEUS_PASSWORD: PROMETHEUS_PASSWORD
+    PROMETHEUS_BEARER_TOKEN: PROMETHEUS_BEARER_TOKEN
+    KAFKA_SASL_USERNAME: KAFKA_SASL_USERNAME
+    KAFKA_SASL_PASSWORD: KAFKA_SASL_PASSWORD
+    KAFKA_SSL_CA: KAFKA_SSL_CA
+    KAFKA_SSL_CERT: KAFKA_SSL_CERT
+    KAFKA_SSL_KEY: KAFKA_SSL_KEY
+    PREVIEW_ROUTING_CONTROL_TOKEN: PREVIEW_ROUTING_CONTROL_TOKEN
+
+persistence:
+  enabled: true
+  existingClaim: ""
+  storageClass: ""
+  accessModes: [ReadWriteMany]
+  # Chart 无法可靠判断 existingClaim 后端的文件锁/Git语义，生产多副本部署前必须人工验证后显式开启。
+  rwxVerified: false
+  size: 100Gi
+
+runtime:
+  # 平台生产运行统一使用 Kubernetes Job；旧 Docker 驱动不再作为默认部署路径。
+  generationExecutor: kubernetes
+  localPreviewEnabled: false
+  images:
+    node: sandbox-node:1.0
+    java: sandbox-java:1.0
+    python: sandbox-python:1.0
+    reactNative: sandbox-react-native:1.0
+  dockerSocket:
+    enabled: false
+    path: /var/run/docker.sock
+  dockerSandbox:
+    pidsLimit: 256
+    tmpfsBytes: 536870912
+    execMaxOutputBytes: 2097152
+  kubernetes:
+    requireImageDigest: true
+    requireDependencyProxy: true # 旧配置兼容项；新部署使用 config.dependencyProxy.accessPolicy
+    namespace: "" # 空值表示 Helm release namespace；PVC 与 Job 必须同 namespace
+    workspaceRoot: /data
+    workspaceClaim: "" # 空值复用 persistence.existingClaim 或 Chart 创建的 PVC
+    jobServiceAccountName: "" # 空值由 Chart 创建最小权限、无 token 的 SA
+    imagePullSecrets: []
+    nodeSelector: {}
+    tolerations: []
+    jobTimeoutSeconds: 1800
+    jobTtlSeconds: 300
+    logMaxBytes: 2097152
+    buildSizeLimit: 2Gi
+    tmpSizeLimit: 512Mi
+    resources:
+      requests: { cpu: 250m, memory: 512Mi, ephemeralStorage: 512Mi }
+      limits: { cpu: "2", memory: 2Gi, ephemeralStorage: 2Gi }
+
+migration:
+  enabled: true
+  backoffLimit: 3
+
+networkPolicy:
+  enabled: true
+  ingressController:
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: ingress-nginx
+    podSelector:
+      matchLabels:
+        app.kubernetes.io/name: ingress-nginx
+  # API/Worker 需要访问模型 API、Git、数据库、Redis、OpenSearch、OTLP 等外部服务。
+  # 默认保持兼容；生产环境应替换为企业出口网关或具体服务 CIDR。
+  externalEgressCidrs:
+    - 0.0.0.0/0
+    - ::/0
+  allowSameNamespaceEgress: true
+  extraEgress: []
+  # 用户构建 Job 默认只能访问 DNS。生产应仅填写依赖镜像/制品代理或受控出口网关 CIDR。
+  generationEgressCidrs: []
+  generationExtraEgress: []
+  allowUnrestrictedGenerationEgress: false
+
+# ResourceQuota/LimitRange 作用于整个 Namespace，只应在 codegen 独占 Namespace 中启用。
+namespaceGovernance:
+  enabled: false
+  resourceQuota:
+    pods: "100"
+    requestsCpu: "32"
+    requestsMemory: 64Gi
+    requestsEphemeralStorage: 128Gi
+    limitsCpu: "128"
+    limitsMemory: 256Gi
+    limitsEphemeralStorage: 512Gi
+    persistentVolumeClaims: "10"
+    requestsStorage: 2Ti
+  limitRange:
+    default:
+      cpu: "2"
+      memory: 2Gi
+      ephemeral-storage: 2Gi
+    defaultRequest:
+      cpu: 100m
+      memory: 128Mi
+      ephemeral-storage: 128Mi
+    max:
+      cpu: "8"
+      memory: 16Gi
+      ephemeral-storage: 16Gi
+
+podAnnotations: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}
+topologySpreadConstraints: []

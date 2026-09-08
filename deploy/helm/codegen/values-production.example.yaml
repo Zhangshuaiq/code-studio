@@ -1,0 +1,120 @@
+imagePullSecrets:
+  - name: harbor-pull
+
+api:
+  image: { repository: harbor.example.com/codegen/api, tag: "2026.08.23" }
+worker:
+  image: { repository: harbor.example.com/codegen/api, tag: "2026.08.23" }
+  concurrency: 8
+  scheduling:
+    maxPerTeam: 4
+    maxPerUser: 2
+    resourceRetryMs: 5000
+web:
+  image: { repository: harbor.example.com/codegen/web, tag: "2026.08.23" }
+
+ingress:
+  host: codegen.example.com
+  tls: { enabled: true, secretName: codegen-tls }
+
+config:
+  webOrigin: https://codegen.example.com
+  dependencyProxy:
+    accessPolicy: proxy-upstream
+    npmRegistry: https://packages.example.com/repository/npm/
+    pipIndexUrl: https://packages.example.com/repository/pypi/simple/
+    mavenMirrorUrl: https://packages.example.com/repository/maven-public/
+  workspace:
+    maxSourceFiles: 2000
+    maxFileBytes: 2097152
+    maxSourceBytes: 104857600
+  dbQuery:
+    timeoutMs: 15000
+    maxRows: 5000
+    maxResultBytes: 5242880
+    maxExportBytes: 52428800
+    maxBackupBytes: 10737418240
+  opensearchUrl: https://opensearch.logging.svc:9200
+  tempoUrl: http://tempo.observability:3200
+  prometheusUrl: http://prometheus-server.observability:80
+  prometheusMaxResponseBytes: 10485760
+  redis:
+    mode: cluster
+    clusterNodes: redis-0.redis:6379,redis-1.redis:6379,redis-2.redis:6379
+    tls: true
+  otel:
+    enabled: true
+    endpoint: http://otel-collector.observability:4318
+    resourceAttributes: deployment.environment.name=production,service.namespace=code-studio
+
+secrets:
+  existingSecret: codegen-production-secrets
+
+# 已安装 External Secrets Operator 时，可替代上面的 existingSecret：
+# secrets:
+#   existingSecret: ""
+# externalSecrets:
+#   enabled: true
+#   secretStoreRef: { name: company-vault, kind: ClusterSecretStore }
+#   remoteKey: codegen/production
+
+persistence:
+  existingClaim: codegen-workspace-rwx
+  # 已确认该 PVC 支持跨节点 RWX、原子 rename、文件锁及 Git worktree 语义后才能设为 true。
+  rwxVerified: true
+
+runtime:
+  generationExecutor: kubernetes
+  # 必须替换为企业仓库中实际存在、已扫描并签名的不可变摘要；零摘要会安全地拉取失败。
+  images:
+    node: harbor.example.com/codegen/sandbox-node@sha256:0000000000000000000000000000000000000000000000000000000000000000
+    java: harbor.example.com/codegen/sandbox-java@sha256:0000000000000000000000000000000000000000000000000000000000000000
+    python: harbor.example.com/codegen/sandbox-python@sha256:0000000000000000000000000000000000000000000000000000000000000000
+    reactNative: harbor.example.com/codegen/sandbox-react-native@sha256:0000000000000000000000000000000000000000000000000000000000000000
+  dockerSocket:
+    enabled: false
+  dockerSandbox:
+    pidsLimit: 256
+    tmpfsBytes: 536870912
+    execMaxOutputBytes: 2097152
+  kubernetes:
+    requireImageDigest: true
+    requireDependencyProxy: true
+    workspaceClaim: codegen-workspace-rwx
+    imagePullSecrets: [harbor-pull]
+    nodeSelector: { codegen.io/executor: "true" }
+    tolerations:
+      - { key: codegen.io/executor, operator: Equal, value: "true", effect: NoSchedule }
+    jobTimeoutSeconds: 1800
+    logMaxBytes: 2097152
+    buildSizeLimit: 2Gi
+    tmpSizeLimit: 512Mi
+    resources:
+      requests: { cpu: 500m, memory: 1Gi, ephemeralStorage: 512Mi }
+      limits: { cpu: "2", memory: 2Gi, ephemeralStorage: 2Gi }
+
+networkPolicy:
+  enabled: true
+  # 上线前替换为 NAT/egress gateway、数据库及可观测性服务的实际 CIDR。
+  externalEgressCidrs:
+    - 10.0.0.0/8
+  # 构建脚本不继承平台服务的宽出口；按实际环境填写制品代理或 egress gateway 的精确 CIDR。
+  generationEgressCidrs: []
+  allowUnrestrictedGenerationEgress: false
+  ingressController:
+    namespaceSelector:
+      matchLabels: { kubernetes.io/metadata.name: ingress-nginx }
+    podSelector:
+      matchLabels: { app.kubernetes.io/name: ingress-nginx }
+
+# codegen 使用独占 Namespace 时启用；共享 Namespace 请保持关闭。
+namespaceGovernance:
+  enabled: true
+
+nodeSelector:
+  codegen.io/executor: "true"
+tolerations:
+  - key: codegen.io/executor
+    operator: Equal
+    value: "true"
+    effect: NoSchedule
