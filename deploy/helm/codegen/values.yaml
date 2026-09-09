@@ -114,6 +114,7 @@ config:
     lockLeaseMs: 60000
     lockWaitMs: 30000
   gitCommandTimeoutMs: 600000
+  projectImportLeaseMs: 1800000
   dbQuery:
     timeoutMs: 15000
     maxRows: 5000

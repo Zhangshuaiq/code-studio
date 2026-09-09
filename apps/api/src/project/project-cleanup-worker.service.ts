@@ -34,15 +34,6 @@ export class ProjectCleanupWorkerService implements OnModuleInit, OnModuleDestro
     if (this.running) return;
     this.running = true;
     try {
-      const interruptedImportBefore = new Date(Date.now() - 30 * 60_000);
-      await this.prisma.project.updateMany({
-        where: { status: 'importing', createdAt: { lt: interruptedImportBefore } },
-        data: {
-          status: 'deleting',
-          deletionNextAttemptAt: new Date(),
-          deletionError: 'Git 导入超过 30 分钟未完成，已转入资源回收',
-        },
-      });
       const staleBefore = new Date(Date.now() - 10 * 60_000);
       await this.prisma.project.updateMany({
         where: { status: 'deleting_cleanup', deletionStartedAt: { lt: staleBefore } },

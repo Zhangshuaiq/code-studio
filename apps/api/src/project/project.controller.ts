@@ -37,6 +37,13 @@ export class ProjectController {
     return this.projects.create(user.id, dto);
   }
 
+  @Post(':id/import/retry')
+  @RequirePermissions(PERMISSIONS.PROJECT_WRITE)
+  @Audit('project.git-import.retry', 'project')
+  retryImport(@CurrentUser() user: AuthUser, @Param('id') id: string) {
+    return this.projects.retryImport(user.id, id);
+  }
+
   @Get()
   findAll(@CurrentUser() user: AuthUser, @Query() query: PageQueryDto) {
     return this.projects.findAll(user.id, query);

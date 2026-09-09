@@ -37,6 +37,7 @@ export class ProjectAccessService {
     });
     if (!project) throw new NotFoundException({ code: 'PROJECT_NOT_FOUND', message: '项目不存在' });
     if (project.status.startsWith('deleting') || project.status === 'deletion_failed') throw new ConflictException({ code: 'PROJECT_DELETING', message: '项目正在删除或等待资源回收' });
+    if (['import_queued', 'importing'].includes(project.status)) throw new ConflictException({ code: 'PROJECT_IMPORT_IN_PROGRESS', message: '项目代码正在导入，完成后才能操作工作区' });
     const role: ProjectRole | null =
       project.userId === userId
         ? 'owner'
@@ -50,6 +51,7 @@ export class ProjectAccessService {
     userId: string,
     sessionId: string,
     capability: ProjectCapability = 'read',
+    options: { allowProjectImport?: boolean } = {},
   ) {
     const session = await this.prisma.session.findFirst({
       where: { id: sessionId, userId },
@@ -68,6 +70,7 @@ export class ProjectAccessService {
     });
     if (!session) throw new NotFoundException({ code: 'SESSION_NOT_FOUND_OR_INACCESSIBLE', message: '会话不存在或不属于当前用户' });
     if (session.project.status.startsWith('deleting') || session.project.status === 'deletion_failed') throw new ConflictException({ code: 'PROJECT_DELETING', message: '项目正在删除或等待资源回收' });
+    if (!options.allowProjectImport && ['import_queued', 'importing'].includes(session.project.status)) throw new ConflictException({ code: 'PROJECT_IMPORT_IN_PROGRESS', message: '项目代码正在导入，完成后才能操作工作区' });
     const role: ProjectRole | null =
       session.project.userId === userId
         ? 'owner'

@@ -8,6 +8,8 @@ export interface Project {
   name: string;
   language: string;
   status: string;
+  importError?: string | null;
+  importAttempts?: number;
   accessRole: 'owner' | 'maintainer' | 'developer' | 'viewer';
   createdAt: string;
   teamId?: string;
@@ -30,6 +32,12 @@ export function useProjects() {
     queryKey: ['projects'],
     enabled: !!token,
     queryFn: async () => (await api.get('/projects', { params: { pageSize: 200 } })).data.items,
+    refetchInterval: (query) =>
+      query.state.data?.some((project) =>
+        ['import_queued', 'importing'].includes(project.status),
+      )
+        ? 3_000
+        : false,
   });
 }
 
@@ -70,7 +78,11 @@ export function useProjectMutations() {
     mutationFn: (id: string) => api.delete(`/projects/${id}`),
     onSuccess: invalidate,
   });
-  return { create, update, remove };
+  const retryImport = useMutation({
+    mutationFn: (id: string) => api.post(`/projects/${id}/import/retry`),
+    onSuccess: invalidate,
+  });
+  return { create, update, remove, retryImport };
 }
 
 export interface ProjectRepository {

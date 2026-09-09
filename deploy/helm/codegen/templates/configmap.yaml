@@ -63,6 +63,7 @@ data:
   WORKSPACE_LOCK_LEASE_MS: {{ .Values.config.workspace.lockLeaseMs | quote }}
   WORKSPACE_LOCK_WAIT_MS: {{ .Values.config.workspace.lockWaitMs | quote }}
   GIT_COMMAND_TIMEOUT_MS: {{ .Values.config.gitCommandTimeoutMs | quote }}
+  PROJECT_IMPORT_LEASE_MS: {{ .Values.config.projectImportLeaseMs | quote }}
   SANDBOX_PIDS_LIMIT: {{ .Values.runtime.dockerSandbox.pidsLimit | quote }}
   SANDBOX_TMPFS_BYTES: {{ .Values.runtime.dockerSandbox.tmpfsBytes | quote }}
   SANDBOX_EXEC_MAX_OUTPUT_BYTES: {{ .Values.runtime.dockerSandbox.execMaxOutputBytes | quote }}

@@ -20,6 +20,7 @@ import { PageQueryDto, pageArgs, pageResult } from '../common/dto/page-query.dto
 import { WorkspaceService } from '../workspace/workspace.service';
 import { GitService } from '../git/git.service';
 import { GitSettingsService } from '../git/git-settings.service';
+import { diagnosticMessage } from '../common/redact-diagnostic';
 
 @Injectable()
 export class ProjectService {
@@ -56,95 +57,126 @@ export class ProjectService {
 
     // 前端优先：默认 react-vite
     const language = dto.language ?? 'react-vite';
-    const project = await this.prisma.project.create({
-      data: {
-        userId,
-        name: dto.name,
-        language,
-        status: source === 'git' ? 'importing' : 'active',
-        teamId: dto.teamId,
-        // 占位路径，阶段 2 由 SandboxModule 落地真实卷路径
-        volumePath: '',
-        // 创建者自动授权（如果指定了项目组）
-        ...(dto.teamId
-          ? {
-              members: {
-                create: { userId },
-              },
-            }
-          : {}),
-        ...(source === 'git' && dto.repositoryUrl
-          ? {
-              remote: {
-                create: {
-                  remoteUrl: assertRepositoryUrl(dto.repositoryUrl),
-                  branch: dto.defaultBranch?.trim() || 'main',
-                },
-              },
-            }
-          : {}),
-      },
-    });
-
-    // 用项目 id 生成宿主机挂载路径（沙箱首次启动时由 SandboxService 创建目录）
+    const repositoryUrl = source === 'git'
+      ? assertRepositoryUrl(dto.repositoryUrl!)
+      : undefined;
     const projectsRoot = resolve(
       this.config.get<string>('SANDBOX_PROJECTS_ROOT', '.data/projects'),
     );
-    const volumePath = join(projectsRoot, project.id);
-    const ready = await this.prisma.project.update({
-      where: { id: project.id },
-      data: { volumePath },
+    const ready = await this.prisma.$transaction(async (tx) => {
+      const project = await tx.project.create({
+        data: {
+          userId,
+          name: dto.name,
+          language,
+          status: source === 'git' ? 'import_queued' : 'active',
+          teamId: dto.teamId,
+          // 先写占位值，取得 id 后再生成最终卷路径。
+          volumePath: '',
+          ...(dto.teamId
+            ? { members: { create: { userId } } }
+            : {}),
+          ...(repositoryUrl
+            ? {
+                remote: {
+                  create: {
+                    remoteUrl: repositoryUrl,
+                    branch: dto.defaultBranch?.trim() || '',
+                  },
+                },
+              }
+            : {}),
+        },
+      });
+      const result = await tx.project.update({
+        where: { id: project.id },
+        data: { volumePath: join(projectsRoot, project.id) },
+      });
+      if (source === 'git') {
+        await tx.session.create({ data: { projectId: project.id, userId } });
+      }
+      return result;
     });
     if (source === 'blank') return ready;
+    return this.findOne(userId, ready.id);
+  }
 
+  /** 仅由独立 Worker 对已 claim 的项目调用。 */
+  async executeImport(projectId: string) {
+    const project = await this.prisma.project.findFirst({
+      where: { id: projectId, status: 'importing' },
+      include: { remote: true },
+    });
+    if (!project?.remote) {
+      await this.failImport(projectId, 'Git 导入任务缺少远程仓库配置');
+      return;
+    }
+    const userId = project.userId;
+    const session = await this.prisma.session.findUnique({
+      where: { projectId_userId: { projectId, userId } },
+    });
+    if (!session) {
+      await this.failImport(projectId, 'Git 导入任务缺少项目创建者会话');
+      return;
+    }
     try {
-      const session = await this.prisma.session.create({ data: { projectId: project.id, userId } });
-      const workspace = await this.workspaces.ensureForSession(userId, session.id);
-      const credential = await this.gitSettings.optionalCredentialForRemote(userId, dto.repositoryUrl!);
-      const branch = dto.defaultBranch?.trim() || await this.git.detectDefaultBranch(workspace.path, {
-        remoteUrl: assertRepositoryUrl(dto.repositoryUrl!),
+      const workspace = await this.workspaces.ensureForSession(userId, session.id, true);
+      const remoteUrl = assertRepositoryUrl(project.remote.remoteUrl);
+      const credential = await this.gitSettings.optionalCredentialForRemote(userId, remoteUrl);
+      const configuredBranch = project.remote.branch.trim();
+      const branch = configuredBranch || await this.git.detectDefaultBranch(workspace.path, {
+        remoteUrl,
         username: credential?.username,
         token: credential?.token || '',
       });
       await this.git.importRemote(workspace.path, {
-        remoteUrl: assertRepositoryUrl(dto.repositoryUrl!),
+        remoteUrl,
         branch,
         username: credential?.username,
         token: credential?.token || '',
       });
       await this.prisma.$transaction([
-        this.prisma.projectRemote.update({ where: { projectId: project.id }, data: { branch } }),
+        this.prisma.projectRemote.update({ where: { projectId }, data: { branch } }),
         this.prisma.session.update({ where: { id: session.id }, data: { workspaceBranch: branch } }),
-        this.prisma.project.update({ where: { id: project.id }, data: { status: 'active' } }),
+        this.prisma.project.update({ where: { id: projectId }, data: { status: 'active', importFinishedAt: new Date(), importLeaseUntil: null, importError: null } }),
       ]);
-      return this.prisma.project.findUniqueOrThrow({
-        where: { id: project.id },
-        include: {
-          remote: { select: { remoteUrl: true, branch: true } },
-          team: { select: { id: true, name: true } },
-        },
-      });
     } catch (error) {
-      await this.workspaces.removeProjectFiles(project.id, volumePath).catch(() => undefined);
-      await this.prisma.project.deleteMany({ where: { id: project.id } }).catch(() => undefined);
-      if (
-        error instanceof BadRequestException
-        && (error.getResponse() as { code?: string }).code === 'GIT_DEFAULT_BRANCH_UNRESOLVED'
-      ) {
-        throw error;
-      }
-      throw new BadRequestException({
-        code: 'PROJECT_GIT_IMPORT_FAILED',
-        message: `Git 项目导入失败：${error instanceof Error ? error.message : String(error)}`,
-      });
+      const message = diagnosticMessage(error).slice(0, 10_000);
+      await this.workspaces.removeProjectFiles(projectId, project.volumePath).catch(() => undefined);
+      await this.prisma.$transaction([
+        this.prisma.session.updateMany({ where: { projectId }, data: { workspacePath: null, workspaceBranch: null } }),
+        this.prisma.project.updateMany({ where: { id: projectId, status: 'importing' }, data: { status: 'import_failed', importError: message, importFinishedAt: new Date(), importLeaseUntil: null } }),
+      ]);
     }
+  }
+
+  async retryImport(userId: string, projectId: string) {
+    await this.ensureOwner(userId, projectId);
+    const updated = await this.prisma.project.updateMany({
+      where: { id: projectId, status: 'import_failed', remote: { isNot: null } },
+      data: { status: 'import_queued', importError: null, importStartedAt: null, importFinishedAt: null, importLeaseUntil: null },
+    });
+    if (!updated.count) throw new ConflictException({ code: 'PROJECT_IMPORT_RETRY_NOT_ALLOWED', message: '只有导入失败的 Git 项目可以重试' });
+    return { id: projectId, status: 'import_queued' };
+  }
+
+  private async failImport(projectId: string, message: string) {
+    await this.prisma.project.updateMany({
+      where: { id: projectId, status: 'importing' },
+      data: {
+        status: 'import_failed',
+        importError: message,
+        importFinishedAt: new Date(),
+        importLeaseUntil: null,
+      },
+    });
   }
 
   async findAll(userId: string, query: PageQueryDto) {
     // 用户可见的项目：自己创建的 OR 被授权的（通过 ProjectMember）
     const where = {
       ...this.access.visibleWhere(userId),
-      status: { notIn: ['importing', 'deleting', 'deleting_cleanup', 'deletion_failed'] },
+      status: { notIn: ['deleting', 'deleting_cleanup', 'deletion_failed'] },
     };
     const [projects, total] = await this.prisma.$transaction([
       this.prisma.project.findMany({
@@ -173,7 +205,7 @@ export class ProjectService {
     const project = await this.prisma.project.findFirst({
       where: {
         id,
-        status: { notIn: ['importing', 'deleting', 'deleting_cleanup', 'deletion_failed'] },
+        status: { notIn: ['deleting', 'deleting_cleanup', 'deletion_failed'] },
         OR: [
           { userId }, // 创建人
           { members: { some: { userId } } }, // 被授权的成员
@@ -218,6 +250,9 @@ export class ProjectService {
 
   async remove(userId: string, id: string) {
     const project = await this.ensureOwner(userId, id);
+    if (['import_queued', 'importing'].includes(project.status)) {
+      throw new ConflictException({ code: 'PROJECT_DELETE_BLOCKED', message: '项目正在导入，完成或失败后才能删除' });
+    }
     if (project.status === 'deleting_cleanup') {
       return { ok: true, status: 'deleting' };
     }
@@ -266,7 +301,8 @@ export class ProjectService {
     projectId: string,
     dto: SetProjectRepositoryDto,
   ) {
-    await this.access.requireProject(userId, projectId, 'manage');
+    const project = await this.access.requireProject(userId, projectId, 'manage');
+    this.assertImportIdle(project.status);
     const data = {
       remoteUrl: assertRepositoryUrl(dto.remoteUrl),
       branch: dto.branch?.trim() || 'main',
@@ -280,7 +316,8 @@ export class ProjectService {
   }
 
   async removeRepository(userId: string, projectId: string) {
-    await this.access.requireProject(userId, projectId, 'manage');
+    const project = await this.access.requireProject(userId, projectId, 'manage');
+    this.assertImportIdle(project.status);
     await this.prisma.projectRemote.deleteMany({ where: { projectId } });
     return { ok: true };
   }
@@ -377,5 +414,14 @@ export class ProjectService {
       throw new BadRequestException('项目成员角色不正确');
     }
     return normalizeProjectRole(role);
+  }
+
+  private assertImportIdle(status: string) {
+    if (['import_queued', 'importing'].includes(status)) {
+      throw new ConflictException({
+        code: 'PROJECT_IMPORT_IN_PROGRESS',
+        message: '项目正在导入，暂时不能修改仓库配置',
+      });
+    }
   }
 }

@@ -319,6 +319,11 @@ model Project {
   deletionAcknowledgedById String?
   deletionAcknowledgedByName String?
   deletionAcknowledgementNote String? @db.Text
+  importStartedAt DateTime?
+  importFinishedAt DateTime?
+  importLeaseUntil DateTime?
+  importError     String?  @db.Text
+  importAttempts  Int      @default(0)
 
   teamId String? // 所属项目组（可选，为空则仅创建人可见）
   team   Team?   @relation(fields: [teamId], references: [id], onDelete: SetNull)
@@ -338,6 +343,7 @@ model Project {
   @@index([teamId])
   @@index([status, deletionStartedAt])
   @@index([status, deletionNextAttemptAt])
+  @@index([status, importLeaseUntil])
 }
 
 model MonitoringAlertRule {

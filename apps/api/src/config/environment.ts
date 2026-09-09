@@ -55,6 +55,7 @@ const integerRules: Record<string, { min: number; max: number }> = {
   DB_EXPORT_MAX_BYTES: { min: 1_024, max: 536_870_912 },
   DB_BACKUP_MAX_BYTES: { min: 1_048_576, max: 1_099_511_627_776 },
   PROJECT_CLEANUP_MAX_ATTEMPTS: { min: 1, max: 100 },
+  PROJECT_IMPORT_LEASE_MS: { min: 60_000, max: 7_200_000 },
   MCP_RESULT_MAX_BYTES: { min: 1_024, max: 10_485_760 },
   LSP_TICKET_TTL_SECONDS: { min: 10, max: 300 },
   LSP_SESSION_TTL_SECONDS: { min: 60, max: 86_400 },
