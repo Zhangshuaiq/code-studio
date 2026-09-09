@@ -140,7 +140,8 @@ export function ChatPanel({
             ? "✅ 完成，正在启动预览…\n\n"
             : "❌ 生成失败\n\n";
         replaceMessage(pendingId, {
-          content: head + (acc || r.log || ""),
+          // 断线恢复后中间增量可能不完整，最终持久化日志才是权威结果。
+          content: head + (r.log || acc || ""),
           pending: false,
           taskId: r.taskId,
           taskStatus: r.status,

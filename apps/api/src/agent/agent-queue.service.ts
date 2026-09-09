@@ -62,6 +62,7 @@ export class AgentQueueService implements OnModuleInit, OnModuleDestroy {
   async waitFor(
     job: Job<GenerationJob, RunResult>,
     onEvent?: (event: AgentEvent) => void,
+    signal?: AbortSignal,
   ) {
     const progress = ({ jobId, data }: { jobId: string; data: unknown }) => {
       if (jobId === job.id && data && typeof data === 'object') {
@@ -75,18 +76,57 @@ export class AgentQueueService implements OnModuleInit, OnModuleDestroy {
     const removed = ({ jobId }: { jobId: string }) => {
       if (jobId === job.id) removedReject(new Error('任务已取消'));
     };
+    let abortReject: (error: Error) => void = () => undefined;
+    const abortedPromise = new Promise<never>((_, reject) => {
+      abortReject = reject;
+    });
+    const aborted = () => {
+      const error = new Error('客户端流式连接已断开，任务继续在后台执行');
+      error.name = 'GenerationStreamDisconnectedError';
+      abortReject(error);
+    };
     this.events.on('progress', progress);
     this.events.on('removed', removed);
+    signal?.addEventListener('abort', aborted, { once: true });
+    if (signal?.aborted) aborted();
     try {
       const timeout = Number(this.config.get('AGENT_JOB_TIMEOUT_MS', 30 * 60_000));
       return await Promise.race([
         job.waitUntilFinished(this.events, timeout),
         removedPromise,
+        abortedPromise,
       ]);
     } finally {
       this.events.off('progress', progress);
       this.events.off('removed', removed);
+      signal?.removeEventListener('abort', aborted);
     }
+  }
+
+  /** 连接中断后按持久化 taskId 恢复等待；任务不依赖原 HTTP 连接存活。 */
+  async resume(
+    userId: string,
+    taskId: string,
+    onEvent?: (event: AgentEvent) => void,
+    signal?: AbortSignal,
+  ): Promise<RunResult> {
+    const task = await this.agent.getTask(userId, taskId);
+    if (['succeeded', 'failed', 'cancelled', 'timed_out'].includes(task.status)) {
+      return {
+        taskId: task.id,
+        status: task.status === 'succeeded' ? 'succeeded' : 'failed',
+        log: task.resultLog ?? '',
+        events: [],
+      };
+    }
+    const job = await this.queue.getJob(taskId);
+    if (!job) {
+      throw new ConflictException({
+        code: 'GENERATION_JOB_MISSING',
+        message: '任务仍未结束，但执行队列中已找不到对应任务',
+      });
+    }
+    return this.waitFor(job, onEvent, signal);
   }
 
   async cancel(userId: string, taskId: string) {
