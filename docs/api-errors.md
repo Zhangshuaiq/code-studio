@@ -18,8 +18,9 @@
 | 项目 | `PROJECT_DELETING` | 项目正在删除或等待资源回收 |
 | 项目 | `PROJECT_CAPABILITY_DENIED` | 当前项目角色缺少所需能力 |
 | 项目 | `PROJECT_REPOSITORY_REQUIRED` | Git 导入模式没有提供仓库地址 |
+| 项目 | `PROJECT_IMPORT_IN_PROGRESS` | Git 导入进行中，工作区及项目操作暂不可用 |
+| 项目 | `PROJECT_IMPORT_RETRY_NOT_ALLOWED` | 当前项目状态不允许重试 Git 导入 |
 | 项目 | `PROJECT_SOURCE_CONFLICT` | 空白项目模式错误地提交了仓库地址 |
-| 项目 | `PROJECT_GIT_IMPORT_FAILED` | 仓库拉取或工作区初始化失败，半成品项目会被清理 |
 | Git | `GIT_DEFAULT_BRANCH_UNRESOLVED` | 远程 HEAD 不可识别，需要手动填写默认分支 |
 | 会话 | `SESSION_NOT_FOUND_OR_INACCESSIBLE` | 会话不存在或不属于调用方 |
 | 定时任务 | `JAVA_TASK_REGISTRATION_INVALID` | Java 应用注册凭据无效 |

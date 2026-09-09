@@ -57,8 +57,9 @@ export class WorkspaceService {
   async ensureForSession(
     userId: string,
     sessionId: string,
+    allowProjectImport = false,
   ): Promise<UserWorkspace> {
-    let session = await this.access.requireSession(userId, sessionId, "read");
+    let session = await this.access.requireSession(userId, sessionId, "read", { allowProjectImport });
     if (session.workspacePath && existsSync(session.workspacePath)) {
       const current = await this.currentBranch(session.workspacePath);
       const branch =
@@ -78,7 +79,7 @@ export class WorkspaceService {
 
     return this.workspaceLock.runExclusive(`repository:${session.projectId}`, async () => {
     // 获取仓库锁后重新检查，另一个 Pod 可能已经创建好该 worktree。
-    session = await this.access.requireSession(userId, sessionId, "read");
+    session = await this.access.requireSession(userId, sessionId, "read", { allowProjectImport });
     if (session.workspacePath && existsSync(session.workspacePath)) {
       const current = await this.currentBranch(session.workspacePath);
       const branch = current || session.workspaceBranch || session.project.remote?.branch || "main";

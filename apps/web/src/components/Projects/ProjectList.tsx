@@ -75,6 +75,7 @@ export function ProjectList({ onOpen }: { onOpen: (p: Project) => void }) {
   const [managingRepositoryId, setManagingRepositoryId] = useState<
     string | undefined
   >();
+  const { toast } = useFeedback();
 
   return (
     <div className="page-shell max-w-7xl">
@@ -156,7 +157,8 @@ export function ProjectList({ onOpen }: { onOpen: (p: Project) => void }) {
           onClose={() => setShowNew(false)}
           onCreated={(p) => {
             setShowNew(false);
-            onOpen(p);
+            if (p.status === 'active') onOpen(p);
+            else toast('项目已创建，代码仓库正在后台导入，完成后即可打开。', { title: '已进入导入队列', tone: 'success' });
           }}
         />
       )}
@@ -189,8 +191,8 @@ function ProjectCard({
   onManageMembers: () => void;
   onManageRepository: () => void;
 }) {
-  const { remove } = useProjectMutations();
-  const { confirm: askConfirm } = useFeedback();
+  const { remove, retryImport } = useProjectMutations();
+  const { confirm: askConfirm, toast } = useFeedback();
   const Icon = LANG_ICON[project.language] ?? Terminal;
   const tile =
     LANG_TILE[project.language] ??
@@ -201,12 +203,15 @@ function ProjectCard({
   const createdLabel = Number.isNaN(createdAt.getTime())
     ? "最近创建"
     : createdAt.toLocaleDateString("zh-CN", { month: "short", day: "numeric" });
+  const importing = ['import_queued', 'importing'].includes(project.status);
+  const importFailed = project.status === 'import_failed';
 
   return (
     <div className="group relative min-w-0">
       <button
-        onClick={() => onOpen(project)}
-        className="card relative flex h-[178px] w-full flex-col items-stretch overflow-hidden p-5 text-left transition-all duration-300 hover:-translate-y-1 hover:border-indigo-200 hover:shadow-[0_20px_45px_-24px_rgba(79,70,229,0.4)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/40 dark:hover:border-indigo-500/30"
+        onClick={() => project.status === 'active' && onOpen(project)}
+        disabled={project.status !== 'active'}
+        className="card relative flex h-[178px] w-full flex-col items-stretch overflow-hidden p-5 text-left transition-all duration-300 enabled:hover:-translate-y-1 enabled:hover:border-indigo-200 enabled:hover:shadow-[0_20px_45px_-24px_rgba(79,70,229,0.4)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/40 disabled:cursor-default dark:enabled:hover:border-indigo-500/30"
       >
         <span className="pointer-events-none absolute -right-12 -top-16 h-36 w-36 rounded-full bg-indigo-400/0 blur-2xl transition-colors duration-300 group-hover:bg-indigo-400/10" />
         <div className="flex items-start justify-between">
@@ -215,8 +220,11 @@ function ProjectCard({
           >
             <Icon size={22} strokeWidth={2} />
           </span>
-          <span className="mt-1 inline-flex items-center gap-1 text-[10px] font-semibold text-slate-400 transition group-hover:text-indigo-500">
-            打开 <ArrowUpRight size={13} />
+          <span
+            className={`mt-1 inline-flex items-center gap-1 text-[10px] font-semibold ${importFailed ? 'text-red-500' : importing ? 'text-amber-500' : 'text-slate-400 transition group-hover:text-indigo-500'}`}
+            title={importFailed && project.accessRole === 'owner' ? project.importError || '导入失败' : undefined}
+          >
+            {importFailed ? '导入失败' : importing ? (project.status === 'importing' ? '正在导入' : '等待导入') : <>打开 <ArrowUpRight size={13} /></>}
           </span>
         </div>
         <div className="mt-4 min-w-0">
@@ -240,7 +248,7 @@ function ProjectCard({
                 className="inline-flex min-w-0 items-center gap-1 truncate text-indigo-500 dark:text-indigo-400"
                 title={project.remote.remoteUrl}
               >
-                <GitBranch size={11} /> {project.remote.branch}
+                <GitBranch size={11} /> {project.remote.branch || '自动识别'}
               </span>
             )}
             <span className="ml-auto inline-flex shrink-0 items-center gap-1">
@@ -250,7 +258,20 @@ function ProjectCard({
         </div>
       </button>
       <div className="absolute right-3 top-3 flex gap-1 rounded-xl border border-slate-200/80 bg-white/90 p-1 opacity-0 shadow-md backdrop-blur transition group-hover:opacity-100 group-focus-within:opacity-100 dark:border-slate-700 dark:bg-slate-900/90">
-        {canManage && <button
+        {importFailed && project.accessRole === 'owner' && <button
+          onClick={async (event) => {
+            event.stopPropagation();
+            try {
+              await retryImport.mutateAsync(project.id);
+              toast('项目已重新进入导入队列', { tone: 'success' });
+            } catch (error: any) {
+              toast(error?.response?.data?.message ?? '重新导入失败', { tone: 'error' });
+            }
+          }}
+          className="rounded-lg px-2 py-1 text-[10px] font-semibold text-amber-600 hover:bg-amber-50 dark:hover:bg-amber-500/10"
+          title={project.importError || '重新导入'}
+        >重试导入</button>}
+        {canManage && !importing && <button
           onClick={(e) => {
             e.stopPropagation();
             onManageRepository();
@@ -260,7 +281,7 @@ function ProjectCard({
         >
           <Link2 size={14} />
         </button>}
-        {project.team && canManage && (
+        {project.team && canManage && !importing && (
           <button
             onClick={(e) => {
               e.stopPropagation();
@@ -272,7 +293,7 @@ function ProjectCard({
             <UserPlus size={14} />
           </button>
         )}
-        {project.accessRole === "owner" && <button
+        {project.accessRole === "owner" && !importing && <button
           onClick={async (e) => {
             e.stopPropagation();
             if (
@@ -388,7 +409,7 @@ function NewProjectModal({
               <button type="button" onClick={() => setSource("git")} className={`rounded-2xl border p-4 text-left transition ${source === "git" ? "border-indigo-400 bg-indigo-50 ring-2 ring-indigo-500/10 dark:bg-indigo-500/10" : "border-slate-200 dark:border-slate-700"}`}>
                 <GitBranch size={18} className="text-indigo-500" />
                 <span className="mt-2 block text-sm font-bold">从 Git 导入</span>
-                <span className="mt-1 block text-[11px] text-muted">拉取已有仓库并直接进入工作区</span>
+                <span className="mt-1 block text-[11px] text-muted">后台拉取已有仓库，完成后进入工作区</span>
               </button>
             </div>
           </div>
@@ -495,7 +516,7 @@ function NewProjectModal({
             disabled={!name.trim() || (source === "git" && !repositoryUrl.trim()) || create.isPending}
             className="btn btn-primary"
           >
-            {create.isPending ? (source === "git" ? "正在拉取…" : "创建中…") : (source === "git" ? "导入项目" : "创建项目")}
+            {create.isPending ? "提交中…" : (source === "git" ? "开始后台导入" : "创建项目")}
           </button>
         </div>
       </div>

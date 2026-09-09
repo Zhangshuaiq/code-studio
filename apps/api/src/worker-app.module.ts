@@ -16,6 +16,8 @@ import { DatabaseTransferDispatcherService } from './db-query/database-transfer-
 import { ProjectCleanupWorkerService } from './project/project-cleanup-worker.service';
 import { BusinessLogModule } from './business-log/business-log.module';
 import { PreviewModule } from './preview/preview.module';
+import { ProjectModule } from './project/project.module';
+import { ProjectImportWorkerService } from './project/project-import-worker.service';
 
 @Module({
   imports: [
@@ -30,7 +32,8 @@ import { PreviewModule } from './preview/preview.module';
     DbQueryModule,
     BusinessLogModule,
     PreviewModule,
+    ProjectModule,
   ],
-  providers: [AgentWorkerService, ScheduledTaskWorkerService, ScheduledTaskDispatcherService, DatabaseTransferDispatcherService, ProjectCleanupWorkerService],
+  providers: [AgentWorkerService, ScheduledTaskWorkerService, ScheduledTaskDispatcherService, DatabaseTransferDispatcherService, ProjectCleanupWorkerService, ProjectImportWorkerService],
 })
 export class WorkerAppModule {}
