@@ -25,6 +25,7 @@ export class ProjectAccessService {
     userId: string,
     projectId: string,
     capability: ProjectCapability = 'read',
+    options: { allowImportFailed?: boolean } = {},
   ) {
     const project = await this.prisma.project.findUnique({
       where: { id: projectId },
@@ -36,13 +37,14 @@ export class ProjectAccessService {
       },
     });
     if (!project) throw new NotFoundException({ code: 'PROJECT_NOT_FOUND', message: '项目不存在' });
-    if (project.status.startsWith('deleting') || project.status === 'deletion_failed') throw new ConflictException({ code: 'PROJECT_DELETING', message: '项目正在删除或等待资源回收' });
-    if (['import_queued', 'importing'].includes(project.status)) throw new ConflictException({ code: 'PROJECT_IMPORT_IN_PROGRESS', message: '项目代码正在导入，完成后才能操作工作区' });
     const role: ProjectRole | null =
       project.userId === userId
         ? 'owner'
         : normalizeRole(project.members[0]?.role);
     if (!role) throw new NotFoundException({ code: 'PROJECT_NOT_FOUND_OR_INACCESSIBLE', message: '项目不存在或无权访问' });
+    if (project.status.startsWith('deleting') || project.status === 'deletion_failed') throw new ConflictException({ code: 'PROJECT_DELETING', message: '项目正在删除或等待资源回收' });
+    if (['import_queued', 'importing'].includes(project.status)) throw new ConflictException({ code: 'PROJECT_IMPORT_IN_PROGRESS', message: '项目代码正在导入，完成后才能操作工作区' });
+    if (project.status === 'import_failed' && !options.allowImportFailed) throw new ConflictException({ code: 'PROJECT_IMPORT_FAILED', message: '项目代码导入失败，请先修正仓库配置并重新导入' });
     this.assertCapability(role, capability);
     return { ...project, accessRole: role };
   }
@@ -71,6 +73,7 @@ export class ProjectAccessService {
     if (!session) throw new NotFoundException({ code: 'SESSION_NOT_FOUND_OR_INACCESSIBLE', message: '会话不存在或不属于当前用户' });
     if (session.project.status.startsWith('deleting') || session.project.status === 'deletion_failed') throw new ConflictException({ code: 'PROJECT_DELETING', message: '项目正在删除或等待资源回收' });
     if (!options.allowProjectImport && ['import_queued', 'importing'].includes(session.project.status)) throw new ConflictException({ code: 'PROJECT_IMPORT_IN_PROGRESS', message: '项目代码正在导入，完成后才能操作工作区' });
+    if (session.project.status === 'import_failed') throw new ConflictException({ code: 'PROJECT_IMPORT_FAILED', message: '项目代码导入失败，请先修正仓库配置并重新导入' });
     const role: ProjectRole | null =
       session.project.userId === userId
         ? 'owner'

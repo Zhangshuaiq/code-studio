@@ -289,7 +289,7 @@ export class ProjectService {
   }
 
   async getRepository(userId: string, projectId: string) {
-    await this.ensureAccess(userId, projectId);
+    await this.access.requireProject(userId, projectId, 'read', { allowImportFailed: true });
     return this.prisma.projectRemote.findUnique({
       where: { projectId },
       select: { remoteUrl: true, branch: true, updatedAt: true },
@@ -301,7 +301,7 @@ export class ProjectService {
     projectId: string,
     dto: SetProjectRepositoryDto,
   ) {
-    const project = await this.access.requireProject(userId, projectId, 'manage');
+    const project = await this.access.requireProject(userId, projectId, 'manage', { allowImportFailed: true });
     this.assertImportIdle(project.status);
     const data = {
       remoteUrl: assertRepositoryUrl(dto.remoteUrl),
@@ -316,7 +316,7 @@ export class ProjectService {
   }
 
   async removeRepository(userId: string, projectId: string) {
-    const project = await this.access.requireProject(userId, projectId, 'manage');
+    const project = await this.access.requireProject(userId, projectId, 'manage', { allowImportFailed: true });
     this.assertImportIdle(project.status);
     await this.prisma.projectRemote.deleteMany({ where: { projectId } });
     return { ok: true };

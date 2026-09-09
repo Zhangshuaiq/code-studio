@@ -20,7 +20,7 @@ function routeTitle(path: string) {
     ["/resources/targets", "部署目标"], ["/resources/registries", "镜像仓库"],
     ["/settings/models", "模型配置"], ["/settings/account", "账户设置"],
     ["/admin/users", "用户管理"], ["/admin/roles", "角色权限"], ["/admin/audit", "审计日志"],
-    ["/admin/project-cleanups", "资源回收"],
+    ["/admin/project-cleanups", "项目任务"],
     ["/admin/task-dlq", "失败任务"], ["/admin/generation-queue", "生成队列"],
     ["/requirements", "需求管理"], ["/admin/preview-builds", "预览构建"], ["/admin/teams", "项目组"],
     ["/admin/datasources/relational", "关系型数据库"], ["/admin/datasources/nosql", "非关系型数据库"],

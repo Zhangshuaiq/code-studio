@@ -126,7 +126,7 @@ const NAV: NavItem[] = [
       { to: "/admin/audit", icon: ScrollText, label: "操作日志", anyOf: [ACCESS.audit] },
       { to: "/admin/task-dlq", icon: AlertTriangle, label: "任务死信", anyOf: [ACCESS.systemSettings] },
       { to: "/admin/generation-queue", icon: ListChecks, label: "生成队列", anyOf: [ACCESS.systemSettings] },
-      { to: "/admin/project-cleanups", icon: RotateCcw, label: "资源回收", anyOf: [ACCESS.systemSettings] },
+      { to: "/admin/project-cleanups", icon: RotateCcw, label: "项目任务", anyOf: [ACCESS.systemSettings] },
       { to: "/admin/preview-builds", icon: Hammer, label: "预览构建", anyOf: [ACCESS.systemSettings] },
       { to: "/admin/teams", icon: Users, label: "项目组", anyOf: [ACCESS.teams] },
       {

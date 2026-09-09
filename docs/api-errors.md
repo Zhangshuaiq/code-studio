@@ -19,6 +19,7 @@
 | 项目 | `PROJECT_CAPABILITY_DENIED` | 当前项目角色缺少所需能力 |
 | 项目 | `PROJECT_REPOSITORY_REQUIRED` | Git 导入模式没有提供仓库地址 |
 | 项目 | `PROJECT_IMPORT_IN_PROGRESS` | Git 导入进行中，工作区及项目操作暂不可用 |
+| 项目 | `PROJECT_IMPORT_FAILED` | Git 导入失败，工作区操作被阻止，需修正配置后重试 |
 | 项目 | `PROJECT_IMPORT_RETRY_NOT_ALLOWED` | 当前项目状态不允许重试 Git 导入 |
 | 项目 | `PROJECT_SOURCE_CONFLICT` | 空白项目模式错误地提交了仓库地址 |
 | Git | `GIT_DEFAULT_BRANCH_UNRESOLVED` | 远程 HEAD 不可识别，需要手动填写默认分支 |

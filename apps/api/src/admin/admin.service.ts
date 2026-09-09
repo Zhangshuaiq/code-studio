@@ -13,7 +13,7 @@ import {
   PERMISSION_LABELS,
 } from '../auth/permissions';
 import { PageQueryDto, pageArgs, pageResult } from '../common/dto/page-query.dto';
-import { ProjectCleanupListQueryDto } from './dto/admin.dto';
+import { ProjectCleanupListQueryDto, ProjectImportListQueryDto } from './dto/admin.dto';
 import type { AuthUser } from '../auth/jwt.strategy';
 
 export interface CreateUserInput {
@@ -247,6 +247,52 @@ export class AdminService {
     });
     if (!result.count) throw new ConflictException({ code: 'PROJECT_CLEANUP_NOT_FAILED', message: '只能确认处于最终失败状态的回收任务' });
     return { ok: true };
+  }
+
+  async listProjectImports(query: ProjectImportListQueryDto) {
+    const where: Prisma.ProjectWhereInput = {
+      status: query.status
+        ? query.status
+        : { in: ['import_queued', 'importing', 'import_failed'] },
+    };
+    const [items, total] = await this.prisma.$transaction([
+      this.prisma.project.findMany({
+        where,
+        ...pageArgs(query),
+        orderBy: [{ status: 'asc' }, { createdAt: 'asc' }],
+        select: {
+          id: true,
+          name: true,
+          status: true,
+          importStartedAt: true,
+          importFinishedAt: true,
+          importLeaseUntil: true,
+          importAttempts: true,
+          importError: true,
+          createdAt: true,
+          remote: { select: { remoteUrl: true, branch: true } },
+          user: { select: { id: true, username: true, displayName: true } },
+          team: { select: { id: true, name: true } },
+        },
+      }),
+      this.prisma.project.count({ where }),
+    ]);
+    return pageResult(items, total, query);
+  }
+
+  async retryProjectImport(id: string) {
+    const result = await this.prisma.project.updateMany({
+      where: { id, status: 'import_failed', remote: { isNot: null } },
+      data: {
+        status: 'import_queued',
+        importStartedAt: null,
+        importFinishedAt: null,
+        importLeaseUntil: null,
+        importError: null,
+      },
+    });
+    if (!result.count) throw new ConflictException({ code: 'PROJECT_IMPORT_RETRY_NOT_ALLOWED', message: '只有导入失败且保留仓库配置的项目可以重新排队' });
+    return { ok: true, status: 'import_queued' };
   }
 
   async createRole(input: {
