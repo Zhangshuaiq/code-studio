@@ -5,6 +5,7 @@ import {
   Route,
   Navigate,
   useNavigate,
+  useLocation,
   useParams,
 } from "react-router-dom";
 import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
@@ -75,8 +76,13 @@ type RightTab = "code" | "preview" | "history";
 
 export default function App() {
   const token = useAuth((s) => s.token);
+  const location = useLocation();
 
   if (!token) return <LoginForm />;
+
+  if (/^\/requirements\/[^/]+\/document\/?$/.test(location.pathname)) {
+    return <Suspense fallback={<div className="grid h-screen place-items-center text-sm text-muted">正在加载文档…</div>}><PermissionGate anyOf={[ACCESS.requirements]}><RequirementDocumentPage /></PermissionGate></Suspense>;
+  }
 
   return (
     <AppShell>
@@ -86,7 +92,6 @@ export default function App() {
         <Route path="/tasks" element={<PermissionGate anyOf={[ACCESS.projectRead]}><TaskCenterPage /></PermissionGate>} />
         <Route path="/requirements" element={<PermissionGate anyOf={[ACCESS.requirements]}><RequirementsPage /></PermissionGate>} />
         <Route path="/requirements/:id" element={<PermissionGate anyOf={[ACCESS.requirements]}><RequirementDetailPage /></PermissionGate>} />
-        <Route path="/requirements/:id/document" element={<PermissionGate anyOf={[ACCESS.requirements]}><RequirementDocumentPage /></PermissionGate>} />
         <Route path="/logs" element={<PermissionGate anyOf={[ACCESS.observability]}><BusinessLogsPage /></PermissionGate>} />
         <Route path="/monitoring" element={<PermissionGate anyOf={[ACCESS.observability]}><ApplicationMonitoringPage /></PermissionGate>} />
         <Route path="/monitoring/traces" element={<PermissionGate anyOf={[ACCESS.observability]}><TraceExplorerPage /></PermissionGate>} />
