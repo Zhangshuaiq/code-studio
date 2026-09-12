@@ -30,6 +30,7 @@ import {
   Waypoints,
   RadioTower,
   ClipboardList,
+  BookOpenText,
 } from "lucide-react";
 import { ThemeToggle } from "../ThemeToggle";
 import { useAuth } from "../../store/auth";
@@ -53,6 +54,7 @@ interface NavItem {
 const NAV: NavItem[] = [
   { to: "/", icon: FolderKanban, label: "项目", section: "工作空间", anyOf: [ACCESS.projectRead] },
   { to: "/requirements", icon: ClipboardList, label: "需求管理", anyOf: [ACCESS.requirements] },
+  { to: "/knowledge", icon: BookOpenText, label: "知识库" },
   { to: "/tasks", icon: ListChecks, label: "生成任务", anyOf: [ACCESS.projectRead] },
   {
     to: "/monitoring",
