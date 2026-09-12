@@ -5,6 +5,7 @@ import {
   Route,
   Navigate,
   useNavigate,
+  useLocation,
   useParams,
 } from "react-router-dom";
 import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
@@ -67,14 +68,24 @@ const ExceptionCenterPage = lazy(() => import("./components/Monitoring/Exception
 const PodMonitoringPage = lazy(() => import("./components/Monitoring/PodMonitoringPage").then((m) => ({ default: m.PodMonitoringPage })));
 const KafkaConsolePage = lazy(() => import("./components/Kafka/KafkaConsolePage").then((m) => ({ default: m.KafkaConsolePage })));
 const RequirementsPage = lazy(() => import("./components/Requirements/RequirementsPage").then((m) => ({ default: m.RequirementsPage })));
+const RequirementDetailPage = lazy(() => import("./components/Requirements/RequirementsPage").then((m) => ({ default: m.RequirementDetailPage })));
+const RequirementDocumentPage = lazy(() => import("./components/Requirements/RequirementDocumentPage").then((m) => ({ default: m.RequirementDocumentPage })));
+const KnowledgeBasePage = lazy(() => import("./components/Knowledge/KnowledgeBasePage").then((m) => ({ default: m.KnowledgeBasePage })));
+const KnowledgeDocumentPage = lazy(() => import("./components/Knowledge/KnowledgeDocumentPage").then((m) => ({ default: m.KnowledgeDocumentPage })));
 const McpApprovalsPage = lazy(() => import("./components/Approvals/McpApprovalsPage").then((m) => ({ default: m.McpApprovalsPage })));
 
 type RightTab = "code" | "preview" | "history";
 
 export default function App() {
   const token = useAuth((s) => s.token);
+  const location = useLocation();
 
   if (!token) return <LoginForm />;
+
+  if (/^\/requirements\/[^/]+\/document\/?$/.test(location.pathname)) {
+    return <Suspense fallback={<div className="grid h-screen place-items-center text-sm text-muted">正在加载文档…</div>}><Routes><Route path="/requirements/:id/document" element={<PermissionGate anyOf={[ACCESS.requirements]}><RequirementDocumentPage /></PermissionGate>} /></Routes></Suspense>;
+  }
+  if (/^\/knowledge\/documents\/[^/]+\/?$/.test(location.pathname)) return <Suspense fallback={<div className="grid h-screen place-items-center text-sm text-muted">正在加载文档…</div>}><Routes><Route path="/knowledge/documents/:id" element={<KnowledgeDocumentPage/>}/></Routes></Suspense>;
 
   return (
     <AppShell>
@@ -83,6 +94,8 @@ export default function App() {
         <Route path="/projects/:id" element={<PermissionGate anyOf={[ACCESS.projectRead]}><WorkspacePage /></PermissionGate>} />
         <Route path="/tasks" element={<PermissionGate anyOf={[ACCESS.projectRead]}><TaskCenterPage /></PermissionGate>} />
         <Route path="/requirements" element={<PermissionGate anyOf={[ACCESS.requirements]}><RequirementsPage /></PermissionGate>} />
+        <Route path="/requirements/:id" element={<PermissionGate anyOf={[ACCESS.requirements]}><RequirementDetailPage /></PermissionGate>} />
+        <Route path="/knowledge" element={<KnowledgeBasePage />} />
         <Route path="/logs" element={<PermissionGate anyOf={[ACCESS.observability]}><BusinessLogsPage /></PermissionGate>} />
         <Route path="/monitoring" element={<PermissionGate anyOf={[ACCESS.observability]}><ApplicationMonitoringPage /></PermissionGate>} />
         <Route path="/monitoring/traces" element={<PermissionGate anyOf={[ACCESS.observability]}><TraceExplorerPage /></PermissionGate>} />

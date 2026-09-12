@@ -9,7 +9,7 @@ export interface RequirementRouteEndpoint { id: string; serviceKey: string; targ
 export interface RequirementActivity { id: string; action: string; detail?: Record<string, unknown> | null; actor?: RequirementUser | null; createdAt: string }
 export interface RequirementRevision { id: string; version: number; changeSummary?: string | null; createdBy: RequirementUser; createdAt: string }
 export interface Requirement {
-  id: string; requirementNo: string; teamId: string; title: string; summary?: string | null; status: string; currentStage: string; progress: number; updatedAt: string;
+  id: string; requirementNo: string; teamId: string; title: string; summary?: string | null; status: string; currentStage: string; progress: number; createdAt: string; updatedAt: string; createdBy: RequirementUser;
   ownerId: string; owner: RequirementUser; contentMarkdown: string; documentVersion: number; plannedStartAt?: string | null; plannedEndAt?: string | null;
   team: { id: string; name: string; members: RequirementUser[] }; stages: RequirementStage[]; projects: RequirementProject[]; previews: RequirementPreview[]; routeEndpoints: RequirementRouteEndpoint[]; activities: RequirementActivity[];
   _count?: { projects: number; previews: number };

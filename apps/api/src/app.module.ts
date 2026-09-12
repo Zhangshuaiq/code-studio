@@ -34,6 +34,7 @@ import { RequirementModule } from "./requirement/requirement.module";
 import { McpModule } from "./mcp/mcp.module";
 import { McpApprovalModule } from "./mcp-approval/mcp-approval.module";
 import { LspModule } from "./lsp/lsp.module";
+import { KnowledgeModule } from "./knowledge/knowledge.module";
 
 @Module({
   imports: [
@@ -70,6 +71,7 @@ import { LspModule } from "./lsp/lsp.module";
     McpApprovalModule,
     McpModule,
     LspModule,
+    KnowledgeModule,
   ],
 })
 export class AppModule implements NestModule {
