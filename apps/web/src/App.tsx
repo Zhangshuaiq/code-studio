@@ -67,6 +67,8 @@ const ExceptionCenterPage = lazy(() => import("./components/Monitoring/Exception
 const PodMonitoringPage = lazy(() => import("./components/Monitoring/PodMonitoringPage").then((m) => ({ default: m.PodMonitoringPage })));
 const KafkaConsolePage = lazy(() => import("./components/Kafka/KafkaConsolePage").then((m) => ({ default: m.KafkaConsolePage })));
 const RequirementsPage = lazy(() => import("./components/Requirements/RequirementsPage").then((m) => ({ default: m.RequirementsPage })));
+const RequirementDetailPage = lazy(() => import("./components/Requirements/RequirementsPage").then((m) => ({ default: m.RequirementDetailPage })));
+const RequirementDocumentPage = lazy(() => import("./components/Requirements/RequirementDocumentPage").then((m) => ({ default: m.RequirementDocumentPage })));
 const McpApprovalsPage = lazy(() => import("./components/Approvals/McpApprovalsPage").then((m) => ({ default: m.McpApprovalsPage })));
 
 type RightTab = "code" | "preview" | "history";
@@ -83,6 +85,8 @@ export default function App() {
         <Route path="/projects/:id" element={<PermissionGate anyOf={[ACCESS.projectRead]}><WorkspacePage /></PermissionGate>} />
         <Route path="/tasks" element={<PermissionGate anyOf={[ACCESS.projectRead]}><TaskCenterPage /></PermissionGate>} />
         <Route path="/requirements" element={<PermissionGate anyOf={[ACCESS.requirements]}><RequirementsPage /></PermissionGate>} />
+        <Route path="/requirements/:id" element={<PermissionGate anyOf={[ACCESS.requirements]}><RequirementDetailPage /></PermissionGate>} />
+        <Route path="/requirements/:id/document" element={<PermissionGate anyOf={[ACCESS.requirements]}><RequirementDocumentPage /></PermissionGate>} />
         <Route path="/logs" element={<PermissionGate anyOf={[ACCESS.observability]}><BusinessLogsPage /></PermissionGate>} />
         <Route path="/monitoring" element={<PermissionGate anyOf={[ACCESS.observability]}><ApplicationMonitoringPage /></PermissionGate>} />
         <Route path="/monitoring/traces" element={<PermissionGate anyOf={[ACCESS.observability]}><TraceExplorerPage /></PermissionGate>} />
