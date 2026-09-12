@@ -10,14 +10,14 @@
   .yuque-editor ul { @apply my-3 list-disc pl-7; }
   .yuque-editor ol { @apply my-3 list-decimal pl-7; }
   .yuque-editor blockquote { @apply my-4 border-l-4 border-indigo-300 bg-indigo-50/60 px-4 py-1 text-slate-600 dark:bg-indigo-500/10 dark:text-slate-300; }
-  .yuque-editor table { @apply my-5 w-full table-fixed border-collapse text-sm; }
-  .yuque-editor th { @apply border border-slate-300 bg-slate-50 px-3 py-2 text-left font-semibold dark:border-slate-700 dark:bg-slate-900; }
-  .yuque-editor td { @apply border border-slate-300 px-3 py-2 align-top dark:border-slate-700; }
+  .yuque-editor .tableWrapper { @apply my-5 overflow-x-auto; }
+  .yuque-editor table { @apply w-full table-fixed border-collapse text-sm; }
+  .yuque-editor th, .yuque-editor td { @apply relative min-w-20 border border-slate-300 px-3 py-2 align-top dark:border-slate-700; min-height: 42px; resize: vertical; overflow: auto; }
+  .yuque-editor th { @apply bg-slate-50 text-left font-semibold dark:bg-slate-900; }
   .yuque-editor .selectedCell { @apply bg-indigo-50 dark:bg-indigo-500/10; }
+  .yuque-editor .column-resize-handle { @apply pointer-events-none absolute -right-0.5 bottom-0 top-0 z-20 w-1 bg-indigo-500; }
+  .resize-cursor, .resize-cursor * { cursor: col-resize !important; }
   .yuque-editor pre { @apply my-4 overflow-x-auto rounded-xl bg-slate-950 p-4 text-slate-100; }
-  .yuque-editor table { @apply my-5 w-full border-collapse text-sm; }
-  .yuque-editor th { @apply border border-slate-300 bg-slate-50 px-3 py-2 text-left dark:border-slate-700 dark:bg-slate-900; }
-  .yuque-editor td { @apply border border-slate-300 px-3 py-2 dark:border-slate-700; }
   .yuque-editor .is-editor-empty:first-child::before { @apply pointer-events-none float-left h-0 text-slate-400; content: attr(data-placeholder); }
 }
 

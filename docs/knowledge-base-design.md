@@ -25,6 +25,7 @@ Markdown 文档是团队知识资产，不从属于需求。每个团队天然�
 
 - `id`、`teamId`、`folderId`、`requirementId?`；
 - `title`、`contentMarkdown`、`version`；
+- `layoutJson`：保存表格列宽、行高等 Markdown 无法表达的排版元数据；
 - `createdById`、`updatedById`、`createdAt`、`updatedAt`；
 - `requirementId` 唯一，确保一个需求只有一份权威详细文档；
 - 文档移动只能选择同团队文件夹，需求文档不能移动到其他团队知识库。
