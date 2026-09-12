@@ -97,9 +97,11 @@ export class K8sController {
     @Param('namespace') namespace: string,
     @Param('name') name: string,
     @Query('tail') tail: string,
+    @Query('container') container: string,
+    @Query('previous') previous: string,
     @CurrentUser() user: { id: string },
   ) {
-    return this.k8s.getPodLogs(targetId, user.id, namespace, name, tail ? parseInt(tail) : 200);
+    return this.k8s.getPodLogs(targetId, user.id, namespace, name, tail ? parseInt(tail) : 200, container, previous === 'true');
   }
 
   // 删除 Pod

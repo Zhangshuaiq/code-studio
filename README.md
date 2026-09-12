@@ -260,6 +260,8 @@ API 错误统一包含 `statusCode`、`code`、`message`、`requestId`、`timest
 
 Kubernetes 运行状态以目标集群 API Server 的实时结果为准，数据库部署记录只用于定位集群、Namespace 和工作负载，不作为当前状态来源。运行资源详情每 5 秒读取一次集群全部 Namespace 下的 Pod；连接失败统一展示 `K8S_CLUSTER_UNREACHABLE`，不会用历史数据库状态伪装在线。Pod 删除要求同时具备运行资源和 Namespace 管理权限，并写入审计日志；受 Deployment、StatefulSet 等控制器管理的 Pod 删除后通常会被集群自动重建。
 
+Pod 行可展开实时详情，包括容器镜像、Ready、重启次数、当前/上次状态、Pod Conditions、最近 50 条 Kubernetes Event，以及按容器读取的末尾日志。详情每 5 秒更新，日志支持手动刷新和多容器切换；服务端限制单次最多读取 5000 行，避免无界日志响应。
+
 ### 业务日志接入
 
 在左侧“业务日志 → 接入管理”中为项目服务创建接入源。Token 只展示一次，平台只保存 SHA-256 哈希。采集端可一次提交最多 200 条日志：

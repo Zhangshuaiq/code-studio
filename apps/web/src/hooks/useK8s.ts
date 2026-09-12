@@ -24,6 +24,21 @@ export interface ClusterOverview {
   pods: ClusterPod[];
 }
 
+export interface PodDetail {
+  name: string;
+  namespace: string;
+  status: string;
+  ready: string;
+  restarts: number;
+  age: string | null;
+  ip: string | null;
+  node: string | null;
+  labels: Record<string, string>;
+  containers: Array<{ name: string; image: string; ports?: number[]; ready: boolean; restartCount: number; state: Record<string, unknown>; lastState: Record<string, unknown> }>;
+  conditions: Array<{ type: string; status: string; reason?: string; message?: string; lastTransitionTime?: string }>;
+  events: Array<{ type: string; reason: string | null; message: string | null; count: number; firstAt: string | null; lastAt: string | null; source: string | null }>;
+}
+
 export function useClusterOverview(targetId: string | undefined) {
   return useQuery<ClusterOverview>({
     queryKey: ['k8s-cluster-overview', targetId],
@@ -134,7 +149,7 @@ export function usePod(
   namespace: string | undefined,
   name: string | undefined,
 ) {
-  return useQuery({
+  return useQuery<PodDetail | null>({
     queryKey: ['pod', targetId, namespace, name],
     queryFn: async () => {
       if (!targetId || !namespace || !name) return null;
@@ -142,6 +157,8 @@ export function usePod(
       return res.data;
     },
     enabled: !!targetId && !!namespace && !!name,
+    retry: false,
+    refetchInterval: 5_000,
   });
 }
 
@@ -150,15 +167,18 @@ export function usePodLogs(
   targetId: string | undefined,
   namespace: string | undefined,
   name: string | undefined,
+  container?: string,
+  previous = false,
 ) {
   return useQuery({
-    queryKey: ['pod-logs', targetId, namespace, name],
+    queryKey: ['pod-logs', targetId, namespace, name, container, previous],
     queryFn: async () => {
       if (!targetId || !namespace || !name) return { logs: '' };
-      const res = await api.get(`/k8s/${targetId}/namespaces/${namespace}/pods/${name}/logs`);
+      const res = await api.get(`/k8s/${targetId}/namespaces/${namespace}/pods/${name}/logs`, { params: { container, previous, tail: 500 } });
       return res.data as { logs: string };
     },
     enabled: !!targetId && !!namespace && !!name,
+    retry: false,
   });
 }
 

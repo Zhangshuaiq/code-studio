@@ -293,7 +293,11 @@ export class K8sService {
   // 获取 Pod 详情
   async getPod(targetId: string, userId: string, namespace: string, name: string) {
     const { coreApi } = await this.getAuthorizedClients(targetId, userId);
-    const pod = await coreApi.readNamespacedPod({ name, namespace });
+    const [pod, eventList] = await Promise.all([
+      coreApi.readNamespacedPod({ name, namespace }),
+      coreApi.listNamespacedEvent({ namespace, fieldSelector: `involvedObject.kind=Pod,involvedObject.name=${name}` }),
+    ]);
+    const statuses = new Map((pod.status?.containerStatuses || []).map((status) => [status.name, status]));
 
     return {
       name: pod.metadata?.name,
@@ -309,8 +313,24 @@ export class K8sService {
         name: c.name,
         image: c.image,
         ports: c.ports?.map((p) => p.containerPort),
+        ready: statuses.get(c.name)?.ready || false,
+        restartCount: statuses.get(c.name)?.restartCount || 0,
+        state: this.containerState(statuses.get(c.name)?.state),
+        lastState: this.containerState(statuses.get(c.name)?.lastState),
       })),
       conditions: pod.status?.conditions,
+      events: eventList.items
+        .sort((left, right) => String(right.lastTimestamp || right.eventTime || '').localeCompare(String(left.lastTimestamp || left.eventTime || '')))
+        .slice(0, 50)
+        .map((event) => ({
+          type: event.type || 'Normal',
+          reason: event.reason || null,
+          message: event.message || null,
+          count: event.count || 1,
+          firstAt: event.firstTimestamp || null,
+          lastAt: event.lastTimestamp || event.eventTime || null,
+          source: event.source?.component || null,
+        })),
     };
   }
 
@@ -321,6 +341,8 @@ export class K8sService {
     namespace: string,
     name: string,
     tailLines: number = 200,
+    container?: string,
+    previous = false,
   ) {
     const { coreApi } = await this.getAuthorizedClients(targetId, userId);
 
@@ -328,9 +350,10 @@ export class K8sService {
       const res = await coreApi.readNamespacedPodLog({
         name,
         namespace,
+        container: container || undefined,
         follow: false,
-        previous: false,
-        tailLines,
+        previous,
+        tailLines: Math.max(1, Math.min(5000, tailLines || 200)),
       });
 
       return { logs: typeof res === 'string' ? res : String(res ?? '') };
@@ -436,5 +459,12 @@ export class K8sService {
     return (
       pod.status?.containerStatuses?.reduce((sum, c) => sum + c.restartCount, 0) || 0
     );
+  }
+
+  private containerState(state?: k8s.V1ContainerState) {
+    if (state?.running) return { type: 'running', startedAt: state.running.startedAt || null };
+    if (state?.waiting) return { type: 'waiting', reason: state.waiting.reason || null, message: state.waiting.message || null };
+    if (state?.terminated) return { type: 'terminated', reason: state.terminated.reason || null, message: state.terminated.message || null, exitCode: state.terminated.exitCode, startedAt: state.terminated.startedAt || null, finishedAt: state.terminated.finishedAt || null };
+    return { type: 'unknown' };
   }
 }
