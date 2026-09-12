@@ -264,6 +264,8 @@ Pod 行可展开实时详情，包括容器镜像、Ready、重启次数、当�
 
 同一集群详情还会跨 Namespace 实时列出 Deployment 的期望、当前、Ready、Available 和已更新副本数、更新策略及镜像，并提供扩缩容（0–1000）、滚动重启和前台级联删除。三类写操作均要求运行资源管理与 Namespace 管理权限，具有风险确认并写入审计日志。
 
+运行资源详情支持按 Namespace 统一筛选 Pod、Deployment、Service 和 Ingress。Service 展示类型、ClusterIP、端口映射和 Selector；Ingress 展示 IngressClass、Hosts、TLS Hosts 与负载均衡地址。Service/Ingress 删除均直接提交到 Kubernetes API，要求同时具备运行资源管理与 Namespace 管理权限，执行前二次确认并写入审计日志；平台不会把数据库中的历史值作为这些资源的实时状态。
+
 ### 业务日志接入
 
 在左侧“业务日志 → 接入管理”中为项目服务创建接入源。Token 只展示一次，平台只保存 SHA-256 哈希。采集端可一次提交最多 200 条日志：
