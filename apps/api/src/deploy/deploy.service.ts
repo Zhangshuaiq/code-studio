@@ -3,6 +3,7 @@ import {
   Injectable,
   Logger,
   NotFoundException,
+  ServiceUnavailableException,
 } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import type { Dirent } from "fs";
@@ -336,33 +337,30 @@ export class DeployService {
     }
 
     // k8s 部署：走 apiserver 查状态（Pod 就绪/拉取失败/崩溃循环）
-    if (
-      d.containerId?.startsWith("k8s://") &&
-      (d.status === "running" || d.status === "building")
-    ) {
+    if (d.containerId?.startsWith("k8s://")) {
       const [namespace, name] = d.containerId.slice(6).split("/");
       const target = d.targetId
-        ? await this.targets.resolveConfig(userId, d.targetId).catch(() => null)
+        ? await this.targets.resolveConfig(userId, d.targetId)
         : null;
-      if (!target) return { ...d };
-      const st = await new K8sDriver(target.config.kubeconfig)
-        .status(namespace, name)
-        .catch(() => null);
-      if (!st) return { ...d };
-      if (d.status === "running" && st.phase === "failed") {
-        await this.prisma.deployment
-          .update({
-            where: { projectId: project.id },
-            data: {
-              status: "failed",
-              logsTail: `${st.message ?? "k8s 运行异常"}\n${st.logs ?? ""}`,
-            },
-          })
-          .catch(() => undefined);
-        await this.mirrorRecord(project.id);
-        return { ...d, status: "failed", runtimeLogs: st.logs, runtimeEvents: st.events };
+      if (!target) throw new ServiceUnavailableException({ code: 'K8S_TARGET_MISSING', message: '部署记录缺少 Kubernetes 集群目标' });
+      let st;
+      try {
+        st = await new K8sDriver(target.config.kubeconfig).status(namespace, name);
+      } catch (error) {
+        throw new ServiceUnavailableException({
+          code: 'K8S_CLUSTER_UNREACHABLE',
+          message: `集群不可达/无法连接：${diagnosticMessage(error)}`,
+        });
       }
-      return { ...d, runtimeLogs: st.logs, runtimeEvents: st.events };
+      return {
+        ...d,
+        status: st.phase,
+        observedFrom: 'kubernetes',
+        observedAt: new Date().toISOString(),
+        statusMessage: st.message,
+        runtimeLogs: st.logs,
+        runtimeEvents: st.events,
+      };
     }
 
     // 运行中的部署：实时查容器状态 + 抓运行日志，崩了就纠正为 failed

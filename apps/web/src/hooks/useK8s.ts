@@ -1,6 +1,48 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '../lib/api';
 
+export interface ClusterPod {
+  name: string;
+  namespace: string;
+  phase: string;
+  ready: string;
+  restarts: number;
+  node: string | null;
+  podIP: string | null;
+  hostIP: string | null;
+  images: string[];
+  workloadKind: string | null;
+  workloadName: string | null;
+  createdAt: string | null;
+}
+
+export interface ClusterOverview {
+  reachable: true;
+  observedAt: string;
+  target: { id: string; name: string };
+  namespaces: string[];
+  pods: ClusterPod[];
+}
+
+export function useClusterOverview(targetId: string | undefined) {
+  return useQuery<ClusterOverview>({
+    queryKey: ['k8s-cluster-overview', targetId],
+    enabled: !!targetId,
+    retry: false,
+    refetchInterval: 5_000,
+    queryFn: async () => (await api.get(`/k8s/${targetId}/overview`)).data,
+  });
+}
+
+export function useDeleteClusterPod(targetId: string | undefined) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ namespace, name }: { namespace: string; name: string }) =>
+      api.delete(`/k8s/${targetId}/namespaces/${encodeURIComponent(namespace)}/pods/${encodeURIComponent(name)}`),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['k8s-cluster-overview', targetId] }),
+  });
+}
+
 // K8s 部署目标
 export function useK8sTargets() {
   return useQuery({

@@ -1,9 +1,10 @@
-import { BadRequestException, Injectable, NotFoundException, ForbiddenException } from '@nestjs/common';
+import { BadRequestException, Injectable, NotFoundException, ForbiddenException, ServiceUnavailableException } from '@nestjs/common';
 import * as k8s from '@kubernetes/client-node';
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../prisma/prisma.service';
 import { CryptoService } from '../crypto/crypto.service';
 import { assertSafeKubeconfig } from './kubeconfig-policy';
+import { diagnosticMessage } from '../common/redact-diagnostic';
 
 interface K8sTargetConfig {
   kubeconfig: string; // kubeconfig YAML 内容
@@ -250,6 +251,43 @@ export class K8sService {
       ip: pod.status?.podIP,
       node: pod.spec?.nodeName,
     }));
+  }
+
+  /** 直接读取 API Server，返回集群全部 Namespace 下的 Pod；不使用数据库运行状态。 */
+  async clusterOverview(targetId: string, userId: string) {
+    try {
+      const { coreApi, target } = await this.getAuthorizedClients(targetId, userId);
+      const [pods, namespaces] = await Promise.all([
+        coreApi.listPodForAllNamespaces(),
+        coreApi.listNamespace(),
+      ]);
+      return {
+        reachable: true,
+        observedAt: new Date().toISOString(),
+        target: { id: target.id, name: target.name },
+        namespaces: namespaces.items.map((item) => item.metadata?.name).filter(Boolean),
+        pods: pods.items.map((pod) => ({
+          name: pod.metadata?.name,
+          namespace: pod.metadata?.namespace,
+          phase: pod.status?.phase || 'Unknown',
+          ready: this.getPodReadyStatus(pod),
+          restarts: this.getPodRestarts(pod),
+          node: pod.spec?.nodeName || null,
+          podIP: pod.status?.podIP || null,
+          hostIP: pod.status?.hostIP || null,
+          images: pod.spec?.containers.map((container) => container.image),
+          workloadKind: pod.metadata?.ownerReferences?.[0]?.kind || null,
+          workloadName: pod.metadata?.ownerReferences?.[0]?.name || null,
+          createdAt: pod.metadata?.creationTimestamp || null,
+        })),
+      };
+    } catch (error) {
+      if (error instanceof BadRequestException || error instanceof NotFoundException || error instanceof ForbiddenException) throw error;
+      throw new ServiceUnavailableException({
+        code: 'K8S_CLUSTER_UNREACHABLE',
+        message: `集群不可达/无法连接：${diagnosticMessage(error)}`,
+      });
+    }
   }
 
   // 获取 Pod 详情

@@ -135,13 +135,15 @@ export class K8sDriver {
   async status(namespace: string, name: string): Promise<K8sStatus> {
     const dep = await this.apps
       .readNamespacedDeployment({ name, namespace })
-      .catch(() => null);
+      .catch((error) => {
+        if (is404(error)) return null;
+        throw error;
+      });
     if (!dep) return { phase: 'failed', message: 'Deployment 不存在' };
 
     const pods = await this.core
       .listNamespacedPod({ namespace, labelSelector: `app=${name}` })
-      .then((r) => r.items)
-      .catch(() => []);
+      .then((r) => r.items);
     const events = await this.events(namespace, name, pods.map((pod) => pod.metadata?.name).filter(Boolean) as string[]);
     const deadlineExceeded = dep.status?.conditions?.find((condition) => condition.type === 'Progressing' && condition.status === 'False' && condition.reason === 'ProgressDeadlineExceeded');
     if (deadlineExceeded) return { phase: 'failed', message: deadlineExceeded.message || 'Deployment 就绪超时', events };

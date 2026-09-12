@@ -20,6 +20,14 @@ export class K8sController {
     return this.k8s.getK8sTargets(user.id);
   }
 
+  @Get(':targetId/overview')
+  async clusterOverview(
+    @Param('targetId') targetId: string,
+    @CurrentUser() user: { id: string },
+  ) {
+    return this.k8s.clusterOverview(targetId, user.id);
+  }
+
   // 获取指定目标的 Namespace 列表
   @Get(':targetId/namespaces')
   async listNamespaces(@Param('targetId') targetId: string, @CurrentUser() user: { id: string }) {
