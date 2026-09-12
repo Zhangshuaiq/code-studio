@@ -39,3 +39,8 @@ export class ProjectCleanupListQueryDto extends PageQueryDto {
 export class AcknowledgeProjectCleanupDto {
   @IsString() @MinLength(1) @MaxLength(2000) note!: string;
 }
+
+export class ForceProjectCleanupDto {
+  @IsString() @MinLength(1) @MaxLength(200) projectName!: string;
+  @IsString() @MinLength(10) @MaxLength(2000) note!: string;
+}

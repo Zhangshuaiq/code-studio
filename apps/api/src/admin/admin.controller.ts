@@ -17,7 +17,7 @@ import { AuthUser } from '../auth/jwt.strategy';
 import { PERMISSIONS } from '../auth/permissions';
 import { Audit } from '../audit/audit.decorator';
 import { AdminService } from './admin.service';
-import { AcknowledgeProjectCleanupDto, CreateAdminUserDto, CreateRoleDto, ProjectCleanupListQueryDto, ResetPasswordDto, UpdateAdminUserDto, UpdateRoleDto } from './dto/admin.dto';
+import { AcknowledgeProjectCleanupDto, CreateAdminUserDto, CreateRoleDto, ForceProjectCleanupDto, ProjectCleanupListQueryDto, ResetPasswordDto, UpdateAdminUserDto, UpdateRoleDto } from './dto/admin.dto';
 import { PageQueryDto } from '../common/dto/page-query.dto';
 
 @UseGuards(JwtAuthGuard, PermissionsGuard)
@@ -114,6 +114,17 @@ export class AdminController {
   @Audit('project.cleanup.retry', 'project')
   retryProjectCleanup(@Param('id') id: string) {
     return this.admin.retryProjectCleanup(id);
+  }
+
+  @Post('project-cleanups/:id/force-retry')
+  @RequirePermissions(PERMISSIONS.SYSTEM_SETTING_MANAGE)
+  @Audit('project.cleanup.force_retry', 'project')
+  forceRetryProjectCleanup(
+    @CurrentUser() actor: AuthUser,
+    @Param('id') id: string,
+    @Body() body: ForceProjectCleanupDto,
+  ) {
+    return this.admin.forceRetryProjectCleanup(actor, id, body.projectName, body.note);
   }
 
   @Patch('project-cleanups/:id/acknowledge')

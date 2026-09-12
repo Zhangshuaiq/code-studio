@@ -319,6 +319,10 @@ model Project {
   deletionAcknowledgedById String?
   deletionAcknowledgedByName String?
   deletionAcknowledgementNote String? @db.Text
+  deletionDeploymentSkipAt DateTime?
+  deletionDeploymentSkipById String?
+  deletionDeploymentSkipByName String?
+  deletionDeploymentSkipNote String? @db.Text
   importStartedAt DateTime?
   importFinishedAt DateTime?
   importLeaseUntil DateTime?

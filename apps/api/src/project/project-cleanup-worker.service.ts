@@ -51,7 +51,7 @@ export class ProjectCleanupWorkerService implements OnModuleInit, OnModuleDestro
           OR: [{ deletionNextAttemptAt: null }, { deletionNextAttemptAt: { lte: new Date() } }],
         },
         orderBy: { deletionNextAttemptAt: 'asc' },
-        select: { id: true, userId: true, volumePath: true, deletionAttempts: true },
+        select: { id: true, userId: true, volumePath: true, deletionAttempts: true, deletionDeploymentSkipAt: true },
       });
       if (!candidate) return;
       const claimed = await this.prisma.project.updateMany({
@@ -65,18 +65,20 @@ export class ProjectCleanupWorkerService implements OnModuleInit, OnModuleDestro
       });
       if (!claimed.count) return;
       try {
-        const deployment = await this.prisma.deployment.findUnique({
-          where: { projectId: candidate.id },
-          select: { status: true },
-        });
-        if (deployment && ['running', 'building'].includes(deployment.status)) {
-          await this.deploy.stopProjectForCleanup(candidate.userId, candidate.id);
-          const remaining = await this.prisma.deployment.findUnique({
+        if (!candidate.deletionDeploymentSkipAt) {
+          const deployment = await this.prisma.deployment.findUnique({
             where: { projectId: candidate.id },
             select: { status: true },
           });
-          if (remaining && ['running', 'building'].includes(remaining.status)) {
-            throw new Error(`部署停止后状态仍为 ${remaining.status}`);
+          if (deployment && ['running', 'building'].includes(deployment.status)) {
+            await this.deploy.stopProjectForCleanup(candidate.userId, candidate.id);
+            const remaining = await this.prisma.deployment.findUnique({
+              where: { projectId: candidate.id },
+              select: { status: true },
+            });
+            if (remaining && ['running', 'building'].includes(remaining.status)) {
+              throw new Error(`部署停止后状态仍为 ${remaining.status}`);
+            }
           }
         }
         await this.workspaces.removeProjectFiles(candidate.id, candidate.volumePath);

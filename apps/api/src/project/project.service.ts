@@ -306,6 +306,10 @@ export class ProjectService {
         deletionAcknowledgedById: null,
         deletionAcknowledgedByName: null,
         deletionAcknowledgementNote: null,
+        deletionDeploymentSkipAt: null,
+        deletionDeploymentSkipById: null,
+        deletionDeploymentSkipByName: null,
+        deletionDeploymentSkipNote: null,
       },
     });
     return { ok: true, status: 'deleting' };
