@@ -16,6 +16,7 @@
 | 项目 | `PROJECT_NOT_FOUND` | 项目不存在 |
 | 项目 | `PROJECT_NOT_FOUND_OR_INACCESSIBLE` | 项目不存在或调用方不可见 |
 | 项目 | `PROJECT_DELETING` | 项目正在删除或等待资源回收 |
+| 项目 | `PROJECT_DEPLOYMENT_STOP_FAILED` | 删除项目前自动停止当前部署失败，项目保持原状态 |
 | 项目 | `PROJECT_CAPABILITY_DENIED` | 当前项目角色缺少所需能力 |
 | 项目 | `PROJECT_REPOSITORY_REQUIRED` | Git 导入模式没有提供仓库地址 |
 | 项目 | `PROJECT_IMPORT_IN_PROGRESS` | Git 导入进行中，工作区及项目操作暂不可用 |

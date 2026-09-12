@@ -232,14 +232,14 @@ export class K8sDriver {
   async remove(namespace: string, name: string): Promise<void> {
     await this.apps
       .deleteNamespacedDeployment({ name, namespace })
-      .catch(() => undefined);
+      .catch((error) => is404(error) ? undefined : Promise.reject(error));
     await this.core
       .deleteNamespacedService({ name, namespace })
-      .catch(() => undefined);
+      .catch((error) => is404(error) ? undefined : Promise.reject(error));
     await this.core
       .deleteNamespacedSecret({ name: `${name}-pull`, namespace })
-      .catch(() => undefined);
-    await this.core.deleteNamespacedSecret({ name: `${name}-database`, namespace }).catch(() => undefined);
+      .catch((error) => is404(error) ? undefined : Promise.reject(error));
+    await this.core.deleteNamespacedSecret({ name: `${name}-database`, namespace }).catch((error) => is404(error) ? undefined : Promise.reject(error));
   }
 
   private async podLogs(namespace: string, pod: string): Promise<string> {

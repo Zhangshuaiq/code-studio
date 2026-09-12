@@ -21,6 +21,7 @@ import { WorkspaceService } from '../workspace/workspace.service';
 import { GitService } from '../git/git.service';
 import { GitSettingsService } from '../git/git-settings.service';
 import { diagnosticMessage } from '../common/redact-diagnostic';
+import { DeployService } from '../deploy/deploy.service';
 
 @Injectable()
 export class ProjectService {
@@ -31,6 +32,7 @@ export class ProjectService {
     private readonly workspaces: WorkspaceService,
     private readonly git: GitService,
     private readonly gitSettings: GitSettingsService,
+    private readonly deploy: DeployService,
   ) {}
 
   async create(userId: string, dto: CreateProjectDto) {
@@ -256,17 +258,36 @@ export class ProjectService {
     if (project.status === 'deleting_cleanup') {
       return { ok: true, status: 'deleting' };
     }
-    const [activeTasks, activeSandboxes, activePreviews, deployment] = await Promise.all([
+    const [activeTasks, activeSandboxes, activePreviews] = await Promise.all([
       this.prisma.task.count({ where: { session: { projectId: id }, status: { in: ['queued', 'running', 'cancelling'] } } }),
       this.prisma.sandboxInstance.count({ where: { session: { projectId: id }, status: { in: ['starting', 'running'] } } }),
       this.prisma.previewInstance.count({ where: { session: { projectId: id }, status: { in: ['starting', 'ready'] } } }),
-      this.prisma.deployment.findUnique({ where: { projectId: id }, select: { status: true } }),
     ]);
+    let deployment = await this.prisma.deployment.findUnique({
+      where: { projectId: id },
+      select: { status: true },
+    });
+    if (deployment?.status === 'running') {
+      try {
+        await this.deploy.stopProject(userId, id);
+      } catch (error) {
+        throw new ConflictException({
+          code: 'PROJECT_DEPLOYMENT_STOP_FAILED',
+          message: `删除项目前自动停止部署失败：${diagnosticMessage(error)}`,
+        });
+      }
+      deployment = await this.prisma.deployment.findUnique({
+        where: { projectId: id },
+        select: { status: true },
+      });
+    }
     const blockers = [
       activeTasks ? `${activeTasks} 个生成任务` : null,
       activeSandboxes ? `${activeSandboxes} 个沙箱` : null,
       activePreviews ? `${activePreviews} 个预览` : null,
-      deployment && ['building', 'running'].includes(deployment.status) ? `状态为 ${deployment.status} 的部署` : null,
+      deployment && ['building', 'running'].includes(deployment.status)
+        ? `状态为 ${deployment.status} 的部署`
+        : null,
     ].filter(Boolean);
     if (blockers.length) {
       throw new ConflictException({ code: 'PROJECT_DELETE_BLOCKED', message: `删除项目前必须先停止：${blockers.join('、')}`, blockers });

@@ -434,34 +434,40 @@ export class DeployService {
   }
 
   async stop(userId: string, sessionId: string) {
-    const project = await this.project(userId, sessionId, "read");
+    const session = await this.access.requireSession(userId, sessionId, 'read');
+    return this.stopDeployment(userId, session.projectId);
+  }
+
+  /** 项目删除前调用；不创建发布会话，也不初始化代码工作区。 */
+  async stopProject(userId: string, projectId: string) {
+    await this.access.requireProject(userId, projectId, 'manage');
+    return this.stopDeployment(userId, projectId);
+  }
+
+  private async stopDeployment(userId: string, projectId: string) {
     const d = await this.prisma.deployment.findUnique({
-      where: { projectId: project.id },
+      where: { projectId },
     });
     if (d?.containerId?.startsWith("artifact://")) {
       // 上传产物本身不是常驻进程；“停止”只结束平台侧状态，不删除远端文件。
     } else if (d?.containerId?.startsWith("k8s://")) {
       const [namespace, name] = d.containerId.slice(6).split("/");
       const target = d.targetId
-        ? await this.targets.resolveConfig(userId, d.targetId).catch(() => null)
+        ? await this.targets.resolveConfig(userId, d.targetId)
         : null;
-      if (target)
-        await new K8sDriver(target.config.kubeconfig)
-          .remove(namespace, name)
-          .catch(() => undefined);
+      if (!target) throw new BadRequestException('Kubernetes 部署缺少运行目标，无法确认资源已停止');
+      await new K8sDriver(target.config.kubeconfig).remove(namespace, name);
     } else if (d?.containerId) {
-      const { docker } = await this.clientFor(userId, d.targetId).catch(() => ({
-        docker: this.docker,
-      }));
+      const { docker } = await this.clientFor(userId, d.targetId);
       await this.removeContainer(docker, d.containerId);
     }
-    await this.prisma.deployment
-      .update({
-        where: { projectId: project.id },
+    if (d) {
+      await this.prisma.deployment.update({
+        where: { projectId },
         data: { status: "stopped", url: null },
-      })
-      .catch(() => undefined);
-    await this.mirrorRecord(project.id);
+      });
+      await this.mirrorRecord(projectId);
+    }
     return { status: "stopped" };
   }
 
@@ -982,8 +988,8 @@ export class DeployService {
   private async removeContainer(docker: Docker, id: string) {
     try {
       await docker.getContainer(id).remove({ force: true });
-    } catch {
-      /* 已不存在 */
+    } catch (error) {
+      if (!isRuntimeNotFound(error)) throw error;
     }
   }
 
@@ -998,6 +1004,11 @@ export class DeployService {
       /* 忽略 */
     }
   }
+}
+
+function isRuntimeNotFound(error: unknown) {
+  const value = error as { statusCode?: number; response?: { statusCode?: number } };
+  return value?.statusCode === 404 || value?.response?.statusCode === 404;
 }
 
 function sleep(ms: number): Promise<void> {

@@ -247,14 +247,16 @@ Kubernetes 部署在 API 所在 Docker daemon 构建镜像；配置镜像仓库�
 | `/api/admin`、`/api/admin/audit`             | 用户、角色、权限和审计                   |
 | `/api/admin/teams`、`/api/admin/datasources` | 团队、数据源和成员授权                   |
 | `/api/db-query`                              | 数据源查询                               |
+| `/api/k8s`                                   | Namespace、Pod、Deployment、Service 管理 |
+| `/api/business-logs`                         | 业务日志接入源、检索、集群状态和保留策略 |
 
 项目、用户、角色、团队、数据源、生成任务、部署记录、预览构建记录和数据库审批/传输列表接受 `page`、`pageSize`，统一返回 `{ items, page, pageSize, total, hasNext, pages }`。通用页大小上限为 500，预览构建记录因日志字段较大限制为 100；管理端预览队列已提供翻页控件。
 
 API 错误统一包含 `statusCode`、`code`、`message`、`requestId`、`timestamp` 和 `path`。客户端报障时应携带 `requestId`；未知异常和 5xx 底层细节只写服务端日志。
 
 资源回收达到最大重试次数后进入 `deletion_failed`，管理员可在 `/admin/project-cleanups` 查看错误、填写确认备注并重新入队。确认会记录操作者和时间，并消除“未确认失败”健康告警；历史失败记录仍保留。平台不会提供静默忽略，避免残留资源失去追踪。
-| `/api/k8s`                                   | Namespace、Pod、Deployment、Service 管理 |
-| `/api/business-logs`                         | 业务日志接入源、检索、集群状态和保留策略 |
+
+删除项目时若数据库仍记录部署为 `running`，平台会先幂等停止实际运行资源并复核数据库状态，再进入资源回收，而不是要求用户依赖可能延迟的状态页面手工停止。Kubernetes/Docker 资源已经不存在按停止成功处理；连接目标失败或删除资源失败时返回 `PROJECT_DEPLOYMENT_STOP_FAILED`，项目保持可见，避免把未确认停止的运行资源变成孤儿。仍在 `building` 的部署继续阻止删除，防止构建完成后重新写回运行状态。
 
 ### 业务日志接入
 
