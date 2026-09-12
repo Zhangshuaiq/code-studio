@@ -7,6 +7,7 @@ import {
   Patch,
   Post,
   Put,
+  Query,
   UseGuards,
 } from "@nestjs/common";
 import { JwtAuthGuard } from "../auth/jwt-auth.guard";
@@ -33,6 +34,10 @@ export class KnowledgeController {
     @Param("teamId") teamId: string,
   ) {
     return this.knowledge.tree(user.id, teamId);
+  }
+  @Get("search")
+  search(@CurrentUser() user: AuthUser, @Query("q") query = "") {
+    return this.knowledge.search(user.id, query);
   }
   @Post("folders") @Audit("knowledge.folder.create", "knowledge-folder") folder(
     @CurrentUser() user: AuthUser,

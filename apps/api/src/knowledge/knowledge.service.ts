@@ -89,6 +89,30 @@ export class KnowledgeService {
     ]);
     return { team, folders, documents };
   }
+  async search(userId: string, query: string) {
+    const term = query.trim().slice(0, 100);
+    if (term.length < 2) return [];
+    return this.prisma.knowledgeDocument.findMany({
+      where: {
+        team: { members: { some: { id: userId, status: "active" } } },
+        OR: [
+          { title: { contains: term, mode: "insensitive" } },
+          { contentMarkdown: { contains: term, mode: "insensitive" } },
+        ],
+      },
+      select: {
+        id: true,
+        title: true,
+        updatedAt: true,
+        requirementId: true,
+        team: { select: { id: true, name: true } },
+        folder: { select: { id: true, name: true } },
+        updatedBy: { select: userSelect },
+      },
+      orderBy: { updatedAt: "desc" },
+      take: 50,
+    });
+  }
   async createFolder(userId: string, input: CreateFolderDto) {
     await this.member(userId, input.teamId);
     const name = input.name.trim();

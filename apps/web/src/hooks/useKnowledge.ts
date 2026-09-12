@@ -51,6 +51,15 @@ export const useKnowledgeDocument = (id?: string) =>
     enabled: !!id,
     queryFn: async () => (await api.get(`/knowledge/documents/${id}`)).data,
   });
+export const useKnowledgeSearch = (query: string) =>
+  useQuery<KnowledgeDocument[]>({
+    queryKey: ["knowledge-search", query],
+    enabled: query.trim().length >= 2,
+    queryFn: async () =>
+      (await api.get("/knowledge/search", { params: { q: query.trim() } }))
+        .data,
+    staleTime: 10_000,
+  });
 export function useKnowledgeMutations(teamId?: string) {
   const qc = useQueryClient();
   const refresh = () =>
