@@ -251,7 +251,7 @@ export class ProjectService {
   }
 
   async remove(userId: string, id: string, cleanupDeployment = false) {
-    await this.ensureOwner(userId, id);
+    const project = await this.ensureOwner(userId, id);
     if (project.status === 'deleting_cleanup') {
       return { ok: true, status: 'deleting' };
     }
