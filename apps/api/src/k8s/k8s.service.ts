@@ -256,16 +256,36 @@ export class K8sService {
   /** 直接读取 API Server，返回集群全部 Namespace 下的 Pod；不使用数据库运行状态。 */
   async clusterOverview(targetId: string, userId: string) {
     try {
-      const { coreApi, target } = await this.getAuthorizedClients(targetId, userId);
-      const [pods, namespaces] = await Promise.all([
+      const { coreApi, appsApi, target } = await this.getAuthorizedClients(targetId, userId);
+      const [pods, namespaces, deployments] = await Promise.all([
         coreApi.listPodForAllNamespaces(),
         coreApi.listNamespace(),
+        appsApi.listDeploymentForAllNamespaces(),
       ]);
       return {
         reachable: true,
         observedAt: new Date().toISOString(),
         target: { id: target.id, name: target.name },
         namespaces: namespaces.items.map((item) => item.metadata?.name).filter(Boolean),
+        deployments: deployments.items.map((deployment) => ({
+          name: deployment.metadata?.name,
+          namespace: deployment.metadata?.namespace,
+          desired: deployment.spec?.replicas || 0,
+          current: deployment.status?.replicas || 0,
+          ready: deployment.status?.readyReplicas || 0,
+          available: deployment.status?.availableReplicas || 0,
+          updated: deployment.status?.updatedReplicas || 0,
+          images: deployment.spec?.template.spec?.containers.map((container) => container.image) || [],
+          strategy: deployment.spec?.strategy?.type || 'RollingUpdate',
+          createdAt: deployment.metadata?.creationTimestamp || null,
+          conditions: (deployment.status?.conditions || []).map((condition) => ({
+            type: condition.type,
+            status: condition.status,
+            reason: condition.reason || null,
+            message: condition.message || null,
+            updatedAt: condition.lastUpdateTime || condition.lastTransitionTime || null,
+          })),
+        })),
         pods: pods.items.map((pod) => ({
           name: pod.metadata?.name,
           namespace: pod.metadata?.namespace,
@@ -429,6 +449,12 @@ export class K8sService {
     );
 
     return { restarted: true };
+  }
+
+  async deleteDeployment(targetId: string, userId: string, namespace: string, name: string) {
+    const { appsApi } = await this.getAuthorizedClients(targetId, userId);
+    await appsApi.deleteNamespacedDeployment({ name, namespace, propagationPolicy: 'Foreground' });
+    return { deleted: true };
   }
 
   // 列出 Services

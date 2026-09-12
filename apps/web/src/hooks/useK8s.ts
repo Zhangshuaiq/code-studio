@@ -22,6 +22,21 @@ export interface ClusterOverview {
   target: { id: string; name: string };
   namespaces: string[];
   pods: ClusterPod[];
+  deployments: ClusterDeployment[];
+}
+
+export interface ClusterDeployment {
+  name: string;
+  namespace: string;
+  desired: number;
+  current: number;
+  ready: number;
+  available: number;
+  updated: number;
+  images: string[];
+  strategy: string;
+  createdAt: string | null;
+  conditions: Array<{ type: string; status: string; reason: string | null; message: string | null; updatedAt: string | null }>;
 }
 
 export interface PodDetail {
@@ -56,6 +71,27 @@ export function useDeleteClusterPod(targetId: string | undefined) {
       api.delete(`/k8s/${targetId}/namespaces/${encodeURIComponent(namespace)}/pods/${encodeURIComponent(name)}`),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['k8s-cluster-overview', targetId] }),
   });
+}
+
+export function useClusterDeploymentActions(targetId: string | undefined) {
+  const qc = useQueryClient();
+  const refresh = () => qc.invalidateQueries({ queryKey: ['k8s-cluster-overview', targetId] });
+  const scale = useMutation({
+    mutationFn: ({ namespace, name, replicas }: { namespace: string; name: string; replicas: number }) =>
+      api.post(`/k8s/${targetId}/namespaces/${encodeURIComponent(namespace)}/deployments/${encodeURIComponent(name)}/scale`, { replicas }),
+    onSuccess: refresh,
+  });
+  const restart = useMutation({
+    mutationFn: ({ namespace, name }: { namespace: string; name: string }) =>
+      api.post(`/k8s/${targetId}/namespaces/${encodeURIComponent(namespace)}/deployments/${encodeURIComponent(name)}/restart`),
+    onSuccess: refresh,
+  });
+  const remove = useMutation({
+    mutationFn: ({ namespace, name }: { namespace: string; name: string }) =>
+      api.delete(`/k8s/${targetId}/namespaces/${encodeURIComponent(namespace)}/deployments/${encodeURIComponent(name)}`),
+    onSuccess: refresh,
+  });
+  return { scale, restart, remove };
 }
 
 // K8s 部署目标

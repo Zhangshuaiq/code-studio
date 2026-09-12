@@ -17,6 +17,7 @@ import {
   TriangleAlert,
   Power,
   RefreshCw,
+  RotateCcw,
 } from "lucide-react";
 import {
   type DeployTarget,
@@ -29,7 +30,7 @@ import { PageHeader, EmptyState, Card, Field, errText } from "./ui";
 import { Select } from "../common/Select";
 import { useFeedback } from "../common/FeedbackProvider";
 import { useDeploymentProjects } from "../../hooks/useDeploymentCenter";
-import { useClusterOverview, useDeleteClusterPod, usePod, usePodLogs } from "../../hooks/useK8s";
+import { useClusterDeploymentActions, useClusterOverview, useDeleteClusterPod, usePod, usePodLogs } from "../../hooks/useK8s";
 
 const KIND_LABEL: Record<string, string> = {
   "local-docker": "平台本机 Docker",
@@ -851,7 +852,8 @@ function TargetDetailModal({
   const config = target?.config;
   const cluster = useClusterOverview(target?.kind === "k8s" ? targetId : undefined);
   const deletePod = useDeleteClusterPod(target?.kind === "k8s" ? targetId : undefined);
-  const { confirm: askConfirm, toast } = useFeedback();
+  const deploymentActions = useClusterDeploymentActions(target?.kind === "k8s" ? targetId : undefined);
+  const { confirm: askConfirm, prompt: askPrompt, toast } = useFeedback();
   const [selectedPod, setSelectedPod] = useState<{ namespace: string; name: string }>();
   const [selectedContainer, setSelectedContainer] = useState("");
   const podDetail = usePod(target?.kind === "k8s" ? targetId : undefined, selectedPod?.namespace, selectedPod?.name);
@@ -999,13 +1001,25 @@ function TargetDetailModal({
 
               {target.kind === "k8s" && <section className="overflow-hidden rounded-2xl border border-slate-200/80 dark:border-slate-800">
                 <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200/80 px-4 py-3 dark:border-slate-800">
-                  <div><h3 className="text-sm font-semibold">集群 Pod</h3><p className="mt-0.5 text-[10px] text-muted">直接读取 Kubernetes API，每 5 秒刷新 · 全部 Namespace</p></div>
+                  <div><h3 className="text-sm font-semibold">集群工作负载</h3><p className="mt-0.5 text-[10px] text-muted">直接读取 Kubernetes API，每 5 秒刷新 · 全部 Namespace</p></div>
                   <button className="btn btn-ghost btn-sm" disabled={cluster.isFetching} onClick={() => cluster.refetch()}><RefreshCw size={13} className={cluster.isFetching ? "animate-spin" : ""} />刷新</button>
                 </div>
                 {cluster.isLoading && <div className="p-8 text-center text-xs text-muted">正在连接集群并读取 Pod…</div>}
                 {cluster.isError && <div className="m-4 rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-700 dark:border-red-500/20 dark:bg-red-500/10 dark:text-red-300"><div className="font-semibold">集群不可达/无法连接</div><p className="mt-1 break-all text-xs">{errText(cluster.error)}</p></div>}
                 {cluster.data && <>
-                  <div className="flex flex-wrap gap-3 bg-slate-50/70 px-4 py-2 text-[10px] text-muted dark:bg-slate-950/30"><span>Pod {cluster.data.pods.length}</span><span>Namespace {cluster.data.namespaces.length}</span><span>采集时间 {new Date(cluster.data.observedAt).toLocaleTimeString("zh-CN")}</span></div>
+                  <div className="flex flex-wrap gap-3 bg-slate-50/70 px-4 py-2 text-[10px] text-muted dark:bg-slate-950/30"><span>Deployment {cluster.data.deployments.length}</span><span>Pod {cluster.data.pods.length}</span><span>Namespace {cluster.data.namespaces.length}</span><span>采集时间 {new Date(cluster.data.observedAt).toLocaleTimeString("zh-CN")}</span></div>
+                  <div className="border-t border-slate-200/70 dark:border-slate-800"><div className="px-4 py-3 text-xs font-semibold">Deployments</div><div className="max-h-72 overflow-auto"><table className="w-full min-w-[900px] text-left text-xs"><thead className="sticky top-0 bg-white text-muted dark:bg-slate-900"><tr><th className="px-4 py-3">Deployment</th><th>Namespace</th><th>Ready</th><th>当前/期望</th><th>策略</th><th>镜像</th><th className="pr-4 text-right">操作</th></tr></thead><tbody>{cluster.data.deployments.map((deployment) => <tr key={`${deployment.namespace}/${deployment.name}`} className="border-t border-slate-200/70 dark:border-slate-800"><td className="px-4 py-3 font-semibold">{deployment.name}</td><td className="font-mono text-[10px]">{deployment.namespace}</td><td><span className={`rounded-full px-2 py-1 text-[9px] font-semibold ${deployment.ready === deployment.desired ? "bg-emerald-50 text-emerald-600" : "bg-amber-50 text-amber-600"}`}>{deployment.ready}/{deployment.desired}</span></td><td>{deployment.current}/{deployment.desired}</td><td>{deployment.strategy}</td><td className="max-w-52 truncate text-[10px]" title={deployment.images.join("\n")}>{deployment.images.join(", ") || "—"}</td><td className="pr-4"><div className="flex justify-end gap-1"><button className="btn btn-ghost btn-sm" disabled={deploymentActions.scale.isPending} onClick={async () => {
+                    const value = await askPrompt({ title: "扩缩容 Deployment", message: `${deployment.namespace}/${deployment.name} 当前期望副本数为 ${deployment.desired}`, initialValue: String(deployment.desired), inputType: "number", confirmText: "应用", validate: (input) => Number.isInteger(Number(input)) && Number(input) >= 0 && Number(input) <= 1000 ? undefined : "请输入 0 到 1000 的整数" });
+                    if (value == null) return;
+                    try { await deploymentActions.scale.mutateAsync({ namespace: deployment.namespace, name: deployment.name, replicas: Number(value) }); toast("副本数更新请求已提交", { tone: "success" }); } catch (error) { toast(errText(error), { title: "扩缩容失败", tone: "error" }); }
+                  }}>扩缩容</button><button className="btn btn-ghost btn-sm" disabled={deploymentActions.restart.isPending} onClick={async () => {
+                    if (!(await askConfirm({ title: "滚动重启", message: `确认滚动重启 ${deployment.namespace}/${deployment.name}？`, confirmText: "重启", tone: "danger" }))) return;
+                    try { await deploymentActions.restart.mutateAsync({ namespace: deployment.namespace, name: deployment.name }); toast("滚动重启请求已提交", { tone: "success" }); } catch (error) { toast(errText(error), { title: "重启失败", tone: "error" }); }
+                  }}><RotateCcw size={12} />重启</button><button className="btn btn-ghost btn-sm text-red-500" disabled={deploymentActions.remove.isPending} onClick={async () => {
+                    if (!(await askConfirm({ title: "删除 Deployment", message: `确认删除 ${deployment.namespace}/${deployment.name}？其管理的 Pod 也会被级联删除。`, confirmText: "删除 Deployment", tone: "danger" }))) return;
+                    try { await deploymentActions.remove.mutateAsync({ namespace: deployment.namespace, name: deployment.name }); toast("Deployment 删除请求已提交", { tone: "success" }); } catch (error) { toast(errText(error), { title: "删除失败", tone: "error" }); }
+                  }}><Trash2 size={12} />删除</button></div></td></tr>)}{!cluster.data.deployments.length && <tr><td colSpan={7} className="px-4 py-8 text-center text-muted">集群当前没有 Deployment</td></tr>}</tbody></table></div></div>
+                  <div className="border-t border-slate-200/70 px-4 py-3 text-xs font-semibold dark:border-slate-800">Pods</div>
                   <div className="max-h-[420px] overflow-auto"><table className="w-full min-w-[900px] text-left text-xs"><thead className="sticky top-0 bg-white text-muted dark:bg-slate-900"><tr><th className="px-4 py-3">Pod / 工作负载</th><th>Namespace</th><th>状态</th><th>Ready</th><th>重启</th><th>节点 / Pod IP</th><th>镜像</th><th className="pr-4 text-right">操作</th></tr></thead><tbody>{cluster.data.pods.map((pod) => <tr key={`${pod.namespace}/${pod.name}`} onClick={() => { setSelectedPod({ namespace: pod.namespace, name: pod.name }); setSelectedContainer(""); }} className={`cursor-pointer border-t border-slate-200/70 dark:border-slate-800 ${selectedPod?.namespace === pod.namespace && selectedPod.name === pod.name ? "bg-indigo-50 dark:bg-indigo-500/10" : "hover:bg-slate-50 dark:hover:bg-slate-800/40"}`}><td className="max-w-56 px-4 py-3"><div className="truncate font-semibold" title={pod.name}>{pod.name}</div><div className="mt-1 text-[9px] text-muted">{pod.workloadKind && pod.workloadName ? `${pod.workloadKind}/${pod.workloadName}` : "独立 Pod"}</div></td><td className="font-mono text-[10px]">{pod.namespace}</td><td><span className={`rounded-full px-2 py-1 text-[9px] font-semibold ${pod.phase === "Running" ? "bg-emerald-50 text-emerald-600" : pod.phase === "Pending" ? "bg-amber-50 text-amber-600" : "bg-red-50 text-red-600"}`}>{pod.phase}</span></td><td>{pod.ready}</td><td>{pod.restarts}</td><td><div>{pod.node || "—"}</div><div className="mt-1 font-mono text-[9px] text-muted">{pod.podIP || "—"}</div></td><td className="max-w-52 truncate text-[10px]" title={pod.images.join("\n")}>{pod.images.join(", ") || "—"}</td><td className="pr-4 text-right"><button className="btn btn-ghost btn-sm text-red-500" disabled={deletePod.isPending} onClick={async (event) => {
                     event.stopPropagation();
                     if (!(await askConfirm({ title: "删除 Pod", message: `确认删除 ${pod.namespace}/${pod.name}？如果它由 Deployment 等控制器管理，集群通常会自动创建替代 Pod。`, confirmText: "删除 Pod", tone: "danger" }))) return;

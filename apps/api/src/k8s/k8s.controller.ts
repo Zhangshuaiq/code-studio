@@ -154,6 +154,18 @@ export class K8sController {
     return this.k8s.restartDeployment(targetId, user.id, namespace, name);
   }
 
+  @Delete(':targetId/namespaces/:namespace/deployments/:name')
+  @RequirePermissions(PERMISSIONS.DEPLOY_TARGET_MANAGE, PERMISSIONS.NAMESPACE_MANAGE)
+  @Audit('k8s.deployment.delete', 'deployment')
+  deleteDeployment(
+    @Param('targetId') targetId: string,
+    @Param('namespace') namespace: string,
+    @Param('name') name: string,
+    @CurrentUser() user: { id: string },
+  ) {
+    return this.k8s.deleteDeployment(targetId, user.id, namespace, name);
+  }
+
   // 获取 Services
   @Get(':targetId/namespaces/:namespace/services')
   async listServices(
