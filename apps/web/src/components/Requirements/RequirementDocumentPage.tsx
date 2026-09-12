@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState } from "react";
-import { ArrowLeft, Bold, Code2, Eye, Heading1, Heading2, Heading3, Italic, Link2, List, ListChecks, ListOrdered, PanelLeft, Quote, Save } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { ArrowLeft, Bold, Code2, Eye, Heading1, Heading2, Heading3, Italic, Link2, List, ListChecks, ListOrdered, PanelLeft, Quote, Save, Table2 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { Link, useParams } from "react-router-dom";
@@ -28,6 +28,10 @@ export function RequirementDocumentPage() {
   const editable = !!data && isOwner && !!me.data?.permissions.includes(ACCESS.requirementManage) && ["draft", "active"].includes(data.status);
   const mutations = useRequirementMutations(id, data?.updatedAt);
   const latestRevision = revisions.data?.items[0];
+  const outline = useMemo(() => content.split("\n").flatMap((line, index) => {
+    const match = /^(#{1,6})\s+(.+)$/.exec(line);
+    return match ? [{ level: match[1].length, title: match[2].replace(/[*_`]/g, ""), line: index }] : [];
+  }), [content]);
 
   const insert = (prefix: string, suffix = "", placeholder = "文字") => {
     const node = textarea.current;
@@ -54,11 +58,14 @@ export function RequirementDocumentPage() {
       <div className="mt-3 flex flex-wrap gap-x-5 gap-y-1 border-t border-slate-100 pt-3 text-[11px] text-muted dark:border-slate-800"><span>创建人：{displayUser(data.createdBy)}</span><span>最后更新人：{displayUser(latestRevision?.createdBy || data.createdBy)}</span><span>创建时间：{formatTime(data.createdAt)}</span><span>最后更新时间：{formatTime(latestRevision?.createdAt || data.updatedAt)}</span><span>版本：v{data.documentVersion}</span></div>
     </header>
     {mode !== "preview" && <div className="flex shrink-0 flex-wrap items-center gap-1 border-b border-slate-200 bg-slate-50 px-4 py-2 dark:border-slate-800 dark:bg-slate-900/70">{[
-      [Heading1, "一级标题", () => insert("# ", "", "一级标题")], [Heading2, "二级标题", () => insert("## ", "", "二级标题")], [Heading3, "三级标题", () => insert("### ", "", "三级标题")], [Bold, "粗体", () => insert("**", "**")], [Italic, "斜体", () => insert("*", "*")], [Quote, "引用", () => insert("> ")], [List, "无序列表", () => insert("- ", "", "列表项")], [ListOrdered, "有序列表", () => insert("1. ", "", "列表项")], [ListChecks, "任务清单", () => insert("- [ ] ", "", "待办事项")], [Link2, "链接", () => insert("[", "](https://)", "链接文字")], [Code2, "代码块", () => insert("```\n", "\n```", "代码")],
+      [Heading1, "一级标题", () => insert("# ", "", "一级标题")], [Heading2, "二级标题", () => insert("## ", "", "二级标题")], [Heading3, "三级标题", () => insert("### ", "", "三级标题")], [Bold, "粗体", () => insert("**", "**")], [Italic, "斜体", () => insert("*", "*")], [Quote, "引用", () => insert("> ")], [List, "无序列表", () => insert("- ", "", "列表项")], [ListOrdered, "有序列表", () => insert("1. ", "", "列表项")], [ListChecks, "任务清单", () => insert("- [ ] ", "", "待办事项")], [Table2, "表格", () => insert("| 列 1 | 列 2 | 列 3 |\n| --- | --- | --- |\n| 内容 | 内容 | 内容 |\n", "", "")], [Link2, "链接", () => insert("[", "](https://)", "链接文字")], [Code2, "代码块", () => insert("```\n", "\n```", "代码")],
     ].map(([Icon, label, action]) => { const ToolIcon = Icon as typeof Bold; return <button key={label as string} className="icon-btn" title={label as string} aria-label={label as string} onClick={action as () => void}><ToolIcon size={15}/></button>; })}<span className="ml-2 text-[10px] text-muted">支持表格、任务清单、删除线、链接与代码块</span></div>}
-    <div className={`grid min-h-0 flex-1 ${mode === "split" ? "lg:grid-cols-2" : "grid-cols-1"}`}>
-      {mode !== "preview" && <section className="flex min-h-0 flex-col border-r border-slate-200 dark:border-slate-800"><textarea ref={textarea} value={content} readOnly={!editable} onChange={(event) => setContent(event.target.value)} spellCheck={false} placeholder="# 需求背景\n\n在这里编写详细需求文档…" className="min-h-0 flex-1 resize-none bg-white p-6 font-mono text-sm leading-7 outline-none dark:bg-slate-950"/>{editable && <div className="shrink-0 border-t border-slate-200 p-3 dark:border-slate-800"><input className="input w-full" maxLength={200} value={changeSummary} onChange={(event) => setChangeSummary(event.target.value)} placeholder="本次修改说明（可选）"/></div>}</section>}
-      {mode !== "edit" && <section className="min-h-0 overflow-y-auto bg-white dark:bg-slate-950"><MarkdownArticle source={content}/></section>}
+    <div className="grid min-h-0 flex-1 grid-cols-[220px_minmax(0,1fr)]">
+      <aside className="min-h-0 overflow-y-auto border-r border-slate-200 bg-slate-50/60 p-4 dark:border-slate-800 dark:bg-slate-900/40"><div className="mb-3 text-xs font-semibold">文档大纲</div>{outline.map((item) => <button key={`${item.line}-${item.title}`} onClick={() => { const node = textarea.current; if (!node) return; const position = content.split("\n").slice(0, item.line).reduce((sum, line) => sum + line.length + 1, 0); node.focus(); node.setSelectionRange(position, position); }} className="block w-full truncate rounded-md py-1.5 pr-2 text-left text-xs text-muted hover:bg-white hover:text-indigo-600 dark:hover:bg-slate-800" style={{ paddingLeft: `${Math.max(0, item.level - 1) * 12 + 8}px` }} title={item.title}>{item.title}</button>)}{!outline.length && <p className="text-[11px] leading-5 text-muted">添加 Markdown 标题后自动生成大纲。</p>}</aside>
+      <div className={`grid min-h-0 ${mode === "split" ? "lg:grid-cols-2" : "grid-cols-1"}`}>
+        {mode !== "preview" && <section className="flex min-h-0 flex-col border-r border-slate-200 dark:border-slate-800"><textarea ref={textarea} value={content} readOnly={!editable} onChange={(event) => setContent(event.target.value)} spellCheck={false} placeholder="# 需求背景\n\n在这里编写详细需求文档…" className="min-h-0 flex-1 resize-none bg-white p-6 font-mono text-sm leading-7 outline-none dark:bg-slate-950"/>{editable && <div className="shrink-0 border-t border-slate-200 p-3 dark:border-slate-800"><input className="input w-full" maxLength={200} value={changeSummary} onChange={(event) => setChangeSummary(event.target.value)} placeholder="本次修改说明（可选）"/></div>}</section>}
+        {mode !== "edit" && <section className="min-h-0 overflow-y-auto bg-white dark:bg-slate-950"><MarkdownArticle source={content}/></section>}
+      </div>
     </div>
   </main>;
 }
