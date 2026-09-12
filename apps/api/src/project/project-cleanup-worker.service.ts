@@ -2,7 +2,6 @@ import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/commo
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../prisma/prisma.service';
 import { WorkspaceService } from '../workspace/workspace.service';
-import { DeployService } from '../deploy/deploy.service';
 
 /** 仅由 Worker 装载；通过数据库状态 claim 项目资源回收任务。 */
 @Injectable()
@@ -15,7 +14,6 @@ export class ProjectCleanupWorkerService implements OnModuleInit, OnModuleDestro
   constructor(
     private readonly prisma: PrismaService,
     private readonly workspaces: WorkspaceService,
-    private readonly deploy: DeployService,
     private readonly config: ConfigService,
   ) {
     this.maxAttempts = Number(this.config.get('PROJECT_CLEANUP_MAX_ATTEMPTS', 10));
@@ -51,7 +49,7 @@ export class ProjectCleanupWorkerService implements OnModuleInit, OnModuleDestro
           OR: [{ deletionNextAttemptAt: null }, { deletionNextAttemptAt: { lte: new Date() } }],
         },
         orderBy: { deletionNextAttemptAt: 'asc' },
-        select: { id: true, userId: true, volumePath: true, deletionAttempts: true, deletionDeploymentSkipAt: true },
+        select: { id: true, volumePath: true, deletionAttempts: true },
       });
       if (!candidate) return;
       const claimed = await this.prisma.project.updateMany({
@@ -65,22 +63,6 @@ export class ProjectCleanupWorkerService implements OnModuleInit, OnModuleDestro
       });
       if (!claimed.count) return;
       try {
-        if (!candidate.deletionDeploymentSkipAt) {
-          const deployment = await this.prisma.deployment.findUnique({
-            where: { projectId: candidate.id },
-            select: { status: true },
-          });
-          if (deployment && ['running', 'building'].includes(deployment.status)) {
-            await this.deploy.stopProjectForCleanup(candidate.userId, candidate.id);
-            const remaining = await this.prisma.deployment.findUnique({
-              where: { projectId: candidate.id },
-              select: { status: true },
-            });
-            if (remaining && ['running', 'building'].includes(remaining.status)) {
-              throw new Error(`部署停止后状态仍为 ${remaining.status}`);
-            }
-          }
-        }
         await this.workspaces.removeProjectFiles(candidate.id, candidate.volumePath);
         await this.prisma.project.delete({ where: { id: candidate.id } });
         this.logger.log(`项目资源回收完成 project=${candidate.id}`);

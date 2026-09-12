@@ -206,9 +206,6 @@ export class AdminService {
           deletionAcknowledgedById: true,
           deletionAcknowledgedByName: true,
           deletionAcknowledgementNote: true,
-          deletionDeploymentSkipAt: true,
-          deletionDeploymentSkipByName: true,
-          deletionDeploymentSkipNote: true,
           createdAt: true,
           user: { select: { id: true, username: true, displayName: true } },
           team: { select: { id: true, name: true } },
@@ -232,40 +229,10 @@ export class AdminService {
         deletionAcknowledgedById: null,
         deletionAcknowledgedByName: null,
         deletionAcknowledgementNote: null,
-        deletionDeploymentSkipAt: null,
-        deletionDeploymentSkipById: null,
-        deletionDeploymentSkipByName: null,
-        deletionDeploymentSkipNote: null,
       },
     });
     if (!result.count) throw new ConflictException({ code: 'PROJECT_CLEANUP_NOT_FAILED', message: '项目不处于资源回收失败状态' });
     return { ok: true, status: 'deleting' };
-  }
-
-  async forceRetryProjectCleanup(actor: AuthUser, id: string, projectName: string, note: string) {
-    const project = await this.prisma.project.findFirst({
-      where: { id, status: 'deletion_failed' },
-      select: { name: true },
-    });
-    if (!project) throw new ConflictException({ code: 'PROJECT_CLEANUP_NOT_FAILED', message: '项目不处于资源回收失败状态' });
-    if (projectName.trim() !== project.name) {
-      throw new BadRequestException({ code: 'PROJECT_CLEANUP_NAME_MISMATCH', message: '输入的项目名称不匹配' });
-    }
-    await this.prisma.project.update({
-      where: { id },
-      data: {
-        status: 'deleting',
-        deletionAttempts: 0,
-        deletionError: '管理员已确认运行目标永久不可用；后续回收将跳过远端部署停止',
-        deletionStartedAt: null,
-        deletionNextAttemptAt: new Date(),
-        deletionDeploymentSkipAt: new Date(),
-        deletionDeploymentSkipById: actor.id,
-        deletionDeploymentSkipByName: actor.username,
-        deletionDeploymentSkipNote: note.trim(),
-      },
-    });
-    return { ok: true, status: 'deleting', deploymentCleanupSkipped: true };
   }
 
   async acknowledgeProjectCleanup(actor: AuthUser, id: string, note: string) {
