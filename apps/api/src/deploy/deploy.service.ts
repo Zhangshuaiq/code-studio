@@ -444,6 +444,16 @@ export class DeployService {
     return this.stopDeployment(userId, projectId);
   }
 
+  /** 仅供资源回收 Worker 使用；删除态项目无法经过常规访问门禁。 */
+  async stopProjectForCleanup(ownerId: string, projectId: string) {
+    const owned = await this.prisma.project.findFirst({
+      where: { id: projectId, userId: ownerId },
+      select: { id: true },
+    });
+    if (!owned) throw new NotFoundException('待回收项目不存在或创建者不匹配');
+    return this.stopDeployment(ownerId, projectId);
+  }
+
   private async stopDeployment(userId: string, projectId: string) {
     const d = await this.prisma.deployment.findUnique({
       where: { projectId },

@@ -267,25 +267,25 @@ export class ProjectService {
       where: { projectId: id },
       select: { status: true },
     });
+    let deploymentStopError: string | null = null;
     if (deployment?.status === 'running') {
       try {
         await this.deploy.stopProject(userId, id);
       } catch (error) {
-        throw new ConflictException({
-          code: 'PROJECT_DEPLOYMENT_STOP_FAILED',
-          message: `删除项目前自动停止部署失败：${diagnosticMessage(error)}`,
+        deploymentStopError = diagnosticMessage(error).slice(0, 10_000);
+      }
+      if (!deploymentStopError) {
+        deployment = await this.prisma.deployment.findUnique({
+          where: { projectId: id },
+          select: { status: true },
         });
       }
-      deployment = await this.prisma.deployment.findUnique({
-        where: { projectId: id },
-        select: { status: true },
-      });
     }
     const blockers = [
       activeTasks ? `${activeTasks} 个生成任务` : null,
       activeSandboxes ? `${activeSandboxes} 个沙箱` : null,
       activePreviews ? `${activePreviews} 个预览` : null,
-      deployment && ['building', 'running'].includes(deployment.status)
+      deployment?.status === 'building'
         ? `状态为 ${deployment.status} 的部署`
         : null,
     ].filter(Boolean);
@@ -299,7 +299,9 @@ export class ProjectService {
         deletionStartedAt: null,
         deletionNextAttemptAt: new Date(),
         deletionAttempts: 0,
-        deletionError: null,
+        deletionError: deploymentStopError
+          ? `首次停止部署失败，已交由资源回收 Worker 重试：${deploymentStopError}`
+          : null,
         deletionAcknowledgedAt: null,
         deletionAcknowledgedById: null,
         deletionAcknowledgedByName: null,

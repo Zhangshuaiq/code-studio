@@ -18,6 +18,7 @@ import { BusinessLogModule } from './business-log/business-log.module';
 import { PreviewModule } from './preview/preview.module';
 import { ProjectModule } from './project/project.module';
 import { ProjectImportWorkerService } from './project/project-import-worker.service';
+import { DeployModule } from './deploy/deploy.module';
 
 @Module({
   imports: [
@@ -33,6 +34,7 @@ import { ProjectImportWorkerService } from './project/project-import-worker.serv
     BusinessLogModule,
     PreviewModule,
     ProjectModule,
+    DeployModule,
   ],
   providers: [AgentWorkerService, ScheduledTaskWorkerService, ScheduledTaskDispatcherService, DatabaseTransferDispatcherService, ProjectCleanupWorkerService, ProjectImportWorkerService],
 })
