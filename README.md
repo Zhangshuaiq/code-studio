@@ -70,6 +70,8 @@ Topic 配置区展示 Broker 返回的当前有效值、默认/覆盖来源、�
 
 ## 快速开始
 
+机器资源有限或只验证核心流程时，请优先使用[本地最小启动指南](./docs/minimal-local-startup.md)，仅启动 PostgreSQL、Redis、API、Worker 和 Web；无需启动可观测性、Kafka、MySQL 或 Kubernetes 组件。
+
 ### 1. 环境要求
 
 - Node.js 22.19+
