@@ -75,7 +75,8 @@ export function useProjectMutations() {
     },
   });
   const remove = useMutation({
-    mutationFn: (id: string) => api.delete(`/projects/${id}`),
+    mutationFn: ({ id, cleanupDeployment }: { id: string; cleanupDeployment: boolean }) =>
+      api.delete(`/projects/${id}`, { data: { cleanupDeployment } }).then((response) => response.data),
     onSuccess: invalidate,
   });
   const retryImport = useMutation({

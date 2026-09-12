@@ -20,6 +20,14 @@ export class K8sController {
     return this.k8s.getK8sTargets(user.id);
   }
 
+  @Get(':targetId/overview')
+  async clusterOverview(
+    @Param('targetId') targetId: string,
+    @CurrentUser() user: { id: string },
+  ) {
+    return this.k8s.clusterOverview(targetId, user.id);
+  }
+
   // 获取指定目标的 Namespace 列表
   @Get(':targetId/namespaces')
   async listNamespaces(@Param('targetId') targetId: string, @CurrentUser() user: { id: string }) {
@@ -89,9 +97,11 @@ export class K8sController {
     @Param('namespace') namespace: string,
     @Param('name') name: string,
     @Query('tail') tail: string,
+    @Query('container') container: string,
+    @Query('previous') previous: string,
     @CurrentUser() user: { id: string },
   ) {
-    return this.k8s.getPodLogs(targetId, user.id, namespace, name, tail ? parseInt(tail) : 200);
+    return this.k8s.getPodLogs(targetId, user.id, namespace, name, tail ? parseInt(tail) : 200, container, previous === 'true');
   }
 
   // 删除 Pod
@@ -142,6 +152,18 @@ export class K8sController {
     @CurrentUser() user: { id: string },
   ) {
     return this.k8s.restartDeployment(targetId, user.id, namespace, name);
+  }
+
+  @Delete(':targetId/namespaces/:namespace/deployments/:name')
+  @RequirePermissions(PERMISSIONS.DEPLOY_TARGET_MANAGE, PERMISSIONS.NAMESPACE_MANAGE)
+  @Audit('k8s.deployment.delete', 'deployment')
+  deleteDeployment(
+    @Param('targetId') targetId: string,
+    @Param('namespace') namespace: string,
+    @Param('name') name: string,
+    @CurrentUser() user: { id: string },
+  ) {
+    return this.k8s.deleteDeployment(targetId, user.id, namespace, name);
   }
 
   // 获取 Services

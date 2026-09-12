@@ -62,6 +62,7 @@ export function DeploymentCenterPage() {
   const branches = useDeploymentBranches(projectId || undefined);
   const records = useDeploymentRecords(projectId || undefined);
   const deploymentStatus = useDeploymentStatus(projectId || undefined);
+  const liveStatus = deploymentStatus.data?.status;
   const actions = useDeploymentCenterActions();
 
   useEffect(() => {
@@ -199,7 +200,7 @@ export function DeploymentCenterPage() {
                 <h2 className="mt-1 text-base font-bold">选择部署环境</h2>
               </div>
               {project?.deployment && (
-                <StatusBadge status={project.deployment.status} />
+                <StatusBadge status={liveStatus || "unknown"} />
               )}
             </div>
             {!project ? (
@@ -242,7 +243,7 @@ export function DeploymentCenterPage() {
                   !binding ||
                   !branch ||
                   actions.deploy.isPending ||
-                  project?.deployment?.status === "building"
+                  liveStatus === "building"
                 }
                 onClick={runDeploy}
               >
@@ -258,7 +259,7 @@ export function DeploymentCenterPage() {
             {project?.deployment ? (
               <dl className="mt-4 space-y-3 text-xs">
                 <CurrentRow label="状态">
-                  <StatusBadge status={project.deployment.status} />
+                  {deploymentStatus.isError ? <span className="text-red-500">集群不可达/无法连接</span> : <StatusBadge status={liveStatus || "unknown"} />}
                 </CurrentRow>
                 <CurrentRow label="环境">
                   {project.deployment.environment}
@@ -288,7 +289,7 @@ export function DeploymentCenterPage() {
                     打开服务 <ChevronRight size={14} />
                   </a>
                 )}
-                {project.deployment.status === "running" &&
+                {liveStatus === "running" &&
                   project.deployment.targetId &&
                   project.deployment.containerId?.startsWith("k8s://") && (
                     <button
@@ -309,7 +310,7 @@ export function DeploymentCenterPage() {
                 >
                   <History size={13} /> {showDetails ? "收起部署详情" : "查看部署详情"}
                 </button>
-                {project.deployment.status === "running" && (
+                {liveStatus === "running" && (
                   <button
                     className="btn btn-ghost btn-sm mt-2 w-full text-red-600 dark:text-red-400"
                     onClick={stopDeployment}

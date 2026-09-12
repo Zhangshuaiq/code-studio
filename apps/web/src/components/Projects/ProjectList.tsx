@@ -192,7 +192,9 @@ function ProjectCard({
   onManageRepository: () => void;
 }) {
   const { remove, retryImport } = useProjectMutations();
-  const { confirm: askConfirm, toast } = useFeedback();
+  const { toast } = useFeedback();
+  const [deleteOpen, setDeleteOpen] = useState(false);
+  const [cleanupDeployment, setCleanupDeployment] = useState(false);
   const Icon = LANG_ICON[project.language] ?? Terminal;
   const tile =
     LANG_TILE[project.language] ??
@@ -294,18 +296,10 @@ function ProjectCard({
           </button>
         )}
         {project.accessRole === "owner" && !importing && <button
-          onClick={async (e) => {
+          onClick={(e) => {
             e.stopPropagation();
-            if (
-              await askConfirm({
-                title: "删除项目",
-                message: `确认删除项目「${project.name}」？该操作不可恢复。`,
-                confirmText: "删除项目",
-                tone: "danger",
-              })
-            ) {
-              remove.mutate(project.id);
-            }
+            setCleanupDeployment(false);
+            setDeleteOpen(true);
           }}
           title="删除项目"
           className="rounded-lg p-1.5 text-slate-400 transition hover:bg-red-50 hover:text-red-500 dark:hover:bg-red-500/10"
@@ -313,6 +307,32 @@ function ProjectCard({
           <Trash2 size={14} />
         </button>}
       </div>
+      {deleteOpen && <div className="fixed inset-0 z-[120] flex items-center justify-center bg-slate-950/55 p-4 backdrop-blur-sm" onMouseDown={(event) => event.target === event.currentTarget && setDeleteOpen(false)}>
+        <div role="dialog" aria-modal="true" aria-labelledby={`delete-project-${project.id}`} className="card w-full max-w-md overflow-hidden" onClick={(event) => event.stopPropagation()}>
+          <div className="flex items-start gap-3 px-5 pb-4 pt-5">
+            <span className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-red-50 text-red-600 dark:bg-red-500/10 dark:text-red-300"><Trash2 size={18} /></span>
+            <div className="min-w-0 flex-1"><h2 id={`delete-project-${project.id}`} className="font-semibold">删除项目</h2><p className="mt-1 text-sm leading-6 text-muted">确定删除项目「{project.name}」吗？项目数据和代码文件删除后不可恢复。</p></div>
+            <button className="icon-btn" aria-label="关闭" onClick={() => setDeleteOpen(false)}><X size={16} /></button>
+          </div>
+          <label className="mx-5 mb-5 flex cursor-pointer items-start gap-3 rounded-xl border border-slate-200 p-3 dark:border-slate-700">
+            <input type="checkbox" className="mt-1" checked={cleanupDeployment} onChange={(event) => setCleanupDeployment(event.target.checked)} />
+            <span><span className="block text-sm font-medium">尝试删除关联部署</span><span className="mt-1 block text-xs leading-5 text-muted">系统只会尝试停止一次关联部署。即使操作失败，项目仍会继续删除；该选项不保证 Kubernetes 中的部署资源一定被删除。</span></span>
+          </label>
+          <div className="flex justify-end gap-2 border-t border-slate-200 bg-slate-50 px-5 py-4 dark:border-slate-800 dark:bg-slate-950/35">
+            <button className="btn btn-secondary" disabled={remove.isPending} onClick={() => setDeleteOpen(false)}>取消</button>
+            <button className="btn bg-red-600 text-white hover:bg-red-700" disabled={remove.isPending} onClick={async () => {
+              try {
+                const result = await remove.mutateAsync({ id: project.id, cleanupDeployment });
+                setDeleteOpen(false);
+                const failed = result?.deploymentCleanup?.attempted && !result?.deploymentCleanup?.succeeded;
+                toast(failed ? '项目已开始删除，但关联部署停止失败，请在部署中心确认' : '项目已开始删除', { tone: failed ? 'warning' : 'success' });
+              } catch (error: any) {
+                toast(error?.response?.data?.message ?? '删除项目失败', { tone: 'error' });
+              }
+            }}>{remove.isPending ? '正在删除…' : '确定删除'}</button>
+          </div>
+        </div>
+      </div>}
     </div>
   );
 }

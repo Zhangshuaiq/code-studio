@@ -21,6 +21,7 @@ import { WorkspaceService } from '../workspace/workspace.service';
 import { GitService } from '../git/git.service';
 import { GitSettingsService } from '../git/git-settings.service';
 import { diagnosticMessage } from '../common/redact-diagnostic';
+import { DeployService } from '../deploy/deploy.service';
 
 @Injectable()
 export class ProjectService {
@@ -31,6 +32,7 @@ export class ProjectService {
     private readonly workspaces: WorkspaceService,
     private readonly git: GitService,
     private readonly gitSettings: GitSettingsService,
+    private readonly deploy: DeployService,
   ) {}
 
   async create(userId: string, dto: CreateProjectDto) {
@@ -248,28 +250,20 @@ export class ProjectService {
     return this.prisma.project.update({ where: { id }, data: dto });
   }
 
-  async remove(userId: string, id: string) {
+  async remove(userId: string, id: string, cleanupDeployment = false) {
     const project = await this.ensureOwner(userId, id);
-    if (['import_queued', 'importing'].includes(project.status)) {
-      throw new ConflictException({ code: 'PROJECT_DELETE_BLOCKED', message: '项目正在导入，完成或失败后才能删除' });
-    }
     if (project.status === 'deleting_cleanup') {
       return { ok: true, status: 'deleting' };
     }
-    const [activeTasks, activeSandboxes, activePreviews, deployment] = await Promise.all([
-      this.prisma.task.count({ where: { session: { projectId: id }, status: { in: ['queued', 'running', 'cancelling'] } } }),
-      this.prisma.sandboxInstance.count({ where: { session: { projectId: id }, status: { in: ['starting', 'running'] } } }),
-      this.prisma.previewInstance.count({ where: { session: { projectId: id }, status: { in: ['starting', 'ready'] } } }),
-      this.prisma.deployment.findUnique({ where: { projectId: id }, select: { status: true } }),
-    ]);
-    const blockers = [
-      activeTasks ? `${activeTasks} 个生成任务` : null,
-      activeSandboxes ? `${activeSandboxes} 个沙箱` : null,
-      activePreviews ? `${activePreviews} 个预览` : null,
-      deployment && ['building', 'running'].includes(deployment.status) ? `状态为 ${deployment.status} 的部署` : null,
-    ].filter(Boolean);
-    if (blockers.length) {
-      throw new ConflictException({ code: 'PROJECT_DELETE_BLOCKED', message: `删除项目前必须先停止：${blockers.join('、')}`, blockers });
+    let deploymentStopError: string | null = null;
+    let deploymentCleanupAttempted = false;
+    if (cleanupDeployment) {
+      deploymentCleanupAttempted = true;
+      try {
+        await this.deploy.stopProject(userId, id);
+      } catch (error) {
+        deploymentStopError = diagnosticMessage(error).slice(0, 10_000);
+      }
     }
     await this.prisma.project.update({
       where: { id },
@@ -285,7 +279,16 @@ export class ProjectService {
         deletionAcknowledgementNote: null,
       },
     });
-    return { ok: true, status: 'deleting' };
+    return {
+      ok: true,
+      status: 'deleting',
+      deploymentCleanup: {
+        requested: cleanupDeployment,
+        attempted: deploymentCleanupAttempted,
+        succeeded: deploymentCleanupAttempted && !deploymentStopError,
+        error: deploymentStopError,
+      },
+    };
   }
 
   async getRepository(userId: string, projectId: string) {

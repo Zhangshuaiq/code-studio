@@ -1,6 +1,99 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '../lib/api';
 
+export interface ClusterPod {
+  name: string;
+  namespace: string;
+  phase: string;
+  ready: string;
+  restarts: number;
+  node: string | null;
+  podIP: string | null;
+  hostIP: string | null;
+  images: string[];
+  workloadKind: string | null;
+  workloadName: string | null;
+  createdAt: string | null;
+}
+
+export interface ClusterOverview {
+  reachable: true;
+  observedAt: string;
+  target: { id: string; name: string };
+  namespaces: string[];
+  pods: ClusterPod[];
+  deployments: ClusterDeployment[];
+}
+
+export interface ClusterDeployment {
+  name: string;
+  namespace: string;
+  desired: number;
+  current: number;
+  ready: number;
+  available: number;
+  updated: number;
+  images: string[];
+  strategy: string;
+  createdAt: string | null;
+  conditions: Array<{ type: string; status: string; reason: string | null; message: string | null; updatedAt: string | null }>;
+}
+
+export interface PodDetail {
+  name: string;
+  namespace: string;
+  status: string;
+  ready: string;
+  restarts: number;
+  age: string | null;
+  ip: string | null;
+  node: string | null;
+  labels: Record<string, string>;
+  containers: Array<{ name: string; image: string; ports?: number[]; ready: boolean; restartCount: number; state: Record<string, unknown>; lastState: Record<string, unknown> }>;
+  conditions: Array<{ type: string; status: string; reason?: string; message?: string; lastTransitionTime?: string }>;
+  events: Array<{ type: string; reason: string | null; message: string | null; count: number; firstAt: string | null; lastAt: string | null; source: string | null }>;
+}
+
+export function useClusterOverview(targetId: string | undefined) {
+  return useQuery<ClusterOverview>({
+    queryKey: ['k8s-cluster-overview', targetId],
+    enabled: !!targetId,
+    retry: false,
+    refetchInterval: 5_000,
+    queryFn: async () => (await api.get(`/k8s/${targetId}/overview`)).data,
+  });
+}
+
+export function useDeleteClusterPod(targetId: string | undefined) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ namespace, name }: { namespace: string; name: string }) =>
+      api.delete(`/k8s/${targetId}/namespaces/${encodeURIComponent(namespace)}/pods/${encodeURIComponent(name)}`),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['k8s-cluster-overview', targetId] }),
+  });
+}
+
+export function useClusterDeploymentActions(targetId: string | undefined) {
+  const qc = useQueryClient();
+  const refresh = () => qc.invalidateQueries({ queryKey: ['k8s-cluster-overview', targetId] });
+  const scale = useMutation({
+    mutationFn: ({ namespace, name, replicas }: { namespace: string; name: string; replicas: number }) =>
+      api.post(`/k8s/${targetId}/namespaces/${encodeURIComponent(namespace)}/deployments/${encodeURIComponent(name)}/scale`, { replicas }),
+    onSuccess: refresh,
+  });
+  const restart = useMutation({
+    mutationFn: ({ namespace, name }: { namespace: string; name: string }) =>
+      api.post(`/k8s/${targetId}/namespaces/${encodeURIComponent(namespace)}/deployments/${encodeURIComponent(name)}/restart`),
+    onSuccess: refresh,
+  });
+  const remove = useMutation({
+    mutationFn: ({ namespace, name }: { namespace: string; name: string }) =>
+      api.delete(`/k8s/${targetId}/namespaces/${encodeURIComponent(namespace)}/deployments/${encodeURIComponent(name)}`),
+    onSuccess: refresh,
+  });
+  return { scale, restart, remove };
+}
+
 // K8s 部署目标
 export function useK8sTargets() {
   return useQuery({
@@ -92,7 +185,7 @@ export function usePod(
   namespace: string | undefined,
   name: string | undefined,
 ) {
-  return useQuery({
+  return useQuery<PodDetail | null>({
     queryKey: ['pod', targetId, namespace, name],
     queryFn: async () => {
       if (!targetId || !namespace || !name) return null;
@@ -100,6 +193,8 @@ export function usePod(
       return res.data;
     },
     enabled: !!targetId && !!namespace && !!name,
+    retry: false,
+    refetchInterval: 5_000,
   });
 }
 
@@ -108,15 +203,18 @@ export function usePodLogs(
   targetId: string | undefined,
   namespace: string | undefined,
   name: string | undefined,
+  container?: string,
+  previous = false,
 ) {
   return useQuery({
-    queryKey: ['pod-logs', targetId, namespace, name],
+    queryKey: ['pod-logs', targetId, namespace, name, container, previous],
     queryFn: async () => {
       if (!targetId || !namespace || !name) return { logs: '' };
-      const res = await api.get(`/k8s/${targetId}/namespaces/${namespace}/pods/${name}/logs`);
+      const res = await api.get(`/k8s/${targetId}/namespaces/${namespace}/pods/${name}/logs`, { params: { container, previous, tail: 500 } });
       return res.data as { logs: string };
     },
     enabled: !!targetId && !!namespace && !!name,
+    retry: false,
   });
 }
 
