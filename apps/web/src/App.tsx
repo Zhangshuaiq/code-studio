@@ -81,7 +81,7 @@ export default function App() {
   if (!token) return <LoginForm />;
 
   if (/^\/requirements\/[^/]+\/document\/?$/.test(location.pathname)) {
-    return <Suspense fallback={<div className="grid h-screen place-items-center text-sm text-muted">正在加载文档…</div>}><PermissionGate anyOf={[ACCESS.requirements]}><RequirementDocumentPage /></PermissionGate></Suspense>;
+    return <Suspense fallback={<div className="grid h-screen place-items-center text-sm text-muted">正在加载文档…</div>}><Routes><Route path="/requirements/:id/document" element={<PermissionGate anyOf={[ACCESS.requirements]}><RequirementDocumentPage /></PermissionGate>} /></Routes></Suspense>;
   }
 
   return (
