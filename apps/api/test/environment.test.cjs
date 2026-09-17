@@ -10,6 +10,12 @@ const valid = {
   WEB_ORIGIN: 'https://code.example.com',
   SELF_REGISTRATION_ENABLED: 'false',
   INITIAL_ADMIN_TOKEN: 'a-secure-one-time-admin-setup-token',
+  K8S_GENERATION_WORKSPACE_CLAIM: 'codegen-workspace',
+  DEPENDENCY_ACCESS_POLICY: 'direct',
+  SANDBOX_NODE_IMAGE: `example/node@sha256:${'a'.repeat(64)}`,
+  SANDBOX_JAVA_IMAGE: `example/java@sha256:${'a'.repeat(64)}`,
+  SANDBOX_PYTHON_IMAGE: `example/python@sha256:${'a'.repeat(64)}`,
+  SANDBOX_REACT_NATIVE_IMAGE: `example/react-native@sha256:${'a'.repeat(64)}`,
 };
 
 test('production environment accepts strong required configuration', () => {
@@ -82,7 +88,7 @@ test('environment validates JWT key ids and previous signing secrets', () => {
 
 test('kubernetes generation executor requires a shared workspace claim', () => {
   assert.throws(
-    () => validateEnvironment({ ...valid, GENERATION_EXECUTOR: 'kubernetes' }),
+    () => validateEnvironment({ ...valid, GENERATION_EXECUTOR: 'kubernetes', K8S_GENERATION_WORKSPACE_CLAIM: '' }),
     /K8S_GENERATION_WORKSPACE_CLAIM/,
   );
   assert.equal(validateEnvironment({

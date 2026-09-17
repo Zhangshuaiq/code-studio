@@ -1,5 +1,5 @@
 import { CallHandler, ExecutionContext, Injectable, NestInterceptor } from '@nestjs/common';
-import { lastValueFrom, type Observable } from 'rxjs';
+import { lastValueFrom, Observable } from 'rxjs';
 import { ProjectAccessService } from '../project-access/project-access.service';
 import { DistributedWorkspaceLockService } from './distributed-workspace-lock.service';
 import { WorkspaceService } from './workspace.service';
