@@ -36,6 +36,11 @@ export class ProjectCleanupListQueryDto extends PageQueryDto {
   status?: string;
 }
 
+export class ProjectImportListQueryDto extends PageQueryDto {
+  @IsOptional() @IsIn(['import_queued', 'importing', 'import_failed'])
+  status?: string;
+}
+
 export class AcknowledgeProjectCleanupDto {
   @IsString() @MinLength(1) @MaxLength(2000) note!: string;
 }
