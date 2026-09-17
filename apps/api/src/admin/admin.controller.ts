@@ -17,7 +17,7 @@ import { AuthUser } from '../auth/jwt.strategy';
 import { PERMISSIONS } from '../auth/permissions';
 import { Audit } from '../audit/audit.decorator';
 import { AdminService } from './admin.service';
-import { AcknowledgeProjectCleanupDto, CreateAdminUserDto, CreateRoleDto, ProjectCleanupListQueryDto, ResetPasswordDto, UpdateAdminUserDto, UpdateRoleDto } from './dto/admin.dto';
+import { AcknowledgeProjectCleanupDto, CreateAdminUserDto, CreateRoleDto, ProjectCleanupListQueryDto, ProjectImportListQueryDto, ResetPasswordDto, UpdateAdminUserDto, UpdateRoleDto } from './dto/admin.dto';
 import { PageQueryDto } from '../common/dto/page-query.dto';
 
 @UseGuards(JwtAuthGuard, PermissionsGuard)
@@ -125,5 +125,18 @@ export class AdminController {
     @Body() body: AcknowledgeProjectCleanupDto,
   ) {
     return this.admin.acknowledgeProjectCleanup(actor, id, body.note);
+  }
+
+  @Get('project-imports')
+  @RequirePermissions(PERMISSIONS.SYSTEM_SETTING_MANAGE)
+  projectImports(@Query() query: ProjectImportListQueryDto) {
+    return this.admin.listProjectImports(query);
+  }
+
+  @Post('project-imports/:id/retry')
+  @RequirePermissions(PERMISSIONS.SYSTEM_SETTING_MANAGE)
+  @Audit('project.git-import.admin-retry', 'project')
+  retryProjectImport(@Param('id') id: string) {
+    return this.admin.retryProjectImport(id);
   }
 }
