@@ -10,7 +10,6 @@ const protectedControllers = [
   require('../dist/model-config/model-config.controller.js').ModelConfigController,
   require('../dist/db-query/db-query.controller.js').DbQueryController,
   require('../dist/k8s/k8s.controller.js').K8sController,
-  require('../dist/api-metrics/api-metrics.controller.js').ApiMetricsController,
   require('../dist/platform-health/platform-health.controller.js').PlatformHealthController,
 ];
 

@@ -17,7 +17,6 @@ interface CleanupItem {
   user: { username: string; displayName?: string | null };
   team?: { name: string } | null;
 }
-
 interface CleanupPage {
   items: CleanupItem[];
   page: number;

@@ -5,6 +5,63 @@ generator client {
   provider = "prisma-client-js"
 }
 
+model KnowledgeFolder {
+  id          String              @id @default(uuid())
+  teamId      String
+  team        Team                @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  parentId    String?
+  parent      KnowledgeFolder?    @relation("KnowledgeFolderTree", fields: [parentId], references: [id], onDelete: Restrict)
+  children    KnowledgeFolder[]   @relation("KnowledgeFolderTree")
+  name        String
+  createdById String
+  createdBy   User                @relation("KnowledgeFolderCreator", fields: [createdById], references: [id], onDelete: Restrict)
+  createdAt   DateTime            @default(now())
+  updatedAt   DateTime            @updatedAt
+  documents   KnowledgeDocument[]
+
+  @@unique([teamId, parentId, name])
+  @@index([teamId, parentId])
+}
+
+model KnowledgeDocument {
+  id              String                      @id @default(uuid())
+  teamId          String
+  team            Team                        @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  folderId        String?
+  folder          KnowledgeFolder?            @relation(fields: [folderId], references: [id], onDelete: Restrict)
+  requirementId   String?                     @unique
+  requirement     Requirement?                @relation(fields: [requirementId], references: [id], onDelete: SetNull)
+  title           String
+  contentMarkdown String                      @default("") @db.Text
+  layoutJson      Json?
+  version         Int                         @default(1)
+  createdById     String
+  createdBy       User                        @relation("KnowledgeDocumentCreator", fields: [createdById], references: [id], onDelete: Restrict)
+  updatedById     String
+  updatedBy       User                        @relation("KnowledgeDocumentUpdater", fields: [updatedById], references: [id], onDelete: Restrict)
+  createdAt       DateTime                    @default(now())
+  updatedAt       DateTime                    @updatedAt
+  revisions       KnowledgeDocumentRevision[]
+
+  @@index([teamId, folderId, updatedAt])
+}
+
+model KnowledgeDocumentRevision {
+  id              String            @id @default(uuid())
+  documentId      String
+  document        KnowledgeDocument @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  version         Int
+  contentMarkdown String            @db.Text
+  layoutJson      Json?
+  changeSummary   String?
+  createdById     String
+  createdBy       User              @relation(fields: [createdById], references: [id], onDelete: Restrict)
+  createdAt       DateTime          @default(now())
+
+  @@unique([documentId, version])
+  @@index([documentId, createdAt])
+}
+
 datasource db {
   provider = "postgresql"
   url      = env("DATABASE_URL")
@@ -23,85 +80,89 @@ model User {
   source      String  @default("local") // local | oidc
   externalId  String? // IdP 侧用户 id（SSO 接入后用）
 
-  roles             Role[]             @relation("UserRoles")
-  gitProfile        UserGitProfile?
-  gitCredentials    GitCredential[]
-  projects          Project[]
-  modelConfigs      ModelConfig[]
-  deployTargets     DeployTarget[]
-  deploymentRecords DeploymentRecord[]
-  registries        Registry[]
-  teams             Team[]             @relation("TeamMembers") // 用户所属的项目组（多对多）
-  projectAccess     ProjectMember[] // 有权限的项目（多对多）
-  datasourceAccess  DatasourceMember[] // 有权限的数据源（多对多）
-  datasourceApprovals Datasource[] @relation("DatasourceApprovers") // 可审批的数据源
-  sessions          Session[]
-  createdRequirements Requirement[]        @relation("RequirementCreator")
-  ownedRequirements   Requirement[]        @relation("RequirementOwner")
-  requirementStages   RequirementStage[]   @relation("RequirementStageOwner")
-  requirementProjects RequirementProject[] @relation("RequirementDeveloper")
-  requirementRevisions RequirementRevision[]
-  requirementActivities RequirementActivity[]
+  roles                      Role[]                      @relation("UserRoles")
+  gitProfile                 UserGitProfile?
+  gitCredentials             GitCredential[]
+  projects                   Project[]
+  modelConfigs               ModelConfig[]
+  deployTargets              DeployTarget[]
+  deploymentRecords          DeploymentRecord[]
+  registries                 Registry[]
+  teams                      Team[]                      @relation("TeamMembers") // 用户所属的项目组（多对多）
+  projectAccess              ProjectMember[] // 有权限的项目（多对多）
+  datasourceAccess           DatasourceMember[] // 有权限的数据源（多对多）
+  datasourceApprovals        Datasource[]                @relation("DatasourceApprovers") // 可审批的数据源
+  sessions                   Session[]
+  createdRequirements        Requirement[]               @relation("RequirementCreator")
+  ownedRequirements          Requirement[]               @relation("RequirementOwner")
+  requirementStages          RequirementStage[]          @relation("RequirementStageOwner")
+  requirementProjects        RequirementProject[]        @relation("RequirementDeveloper")
+  requirementRevisions       RequirementRevision[]
+  requirementActivities      RequirementActivity[]
+  knowledgeFolders           KnowledgeFolder[]           @relation("KnowledgeFolderCreator")
+  createdKnowledgeDocuments  KnowledgeDocument[]         @relation("KnowledgeDocumentCreator")
+  updatedKnowledgeDocuments  KnowledgeDocument[]         @relation("KnowledgeDocumentUpdater")
+  knowledgeDocumentRevisions KnowledgeDocumentRevision[]
 }
 
 model JavaTaskApplication {
-  id              String   @id @default(uuid())
-  name            String   @unique
-  baseUrl         String
-  encryptedToken  String
-  enabled         Boolean  @default(true)
+  id               String              @id @default(uuid())
+  name             String              @unique
+  baseUrl          String
+  encryptedToken   String
+  enabled          Boolean             @default(true)
   lastRegisteredAt DateTime?
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
-  handlers        JavaTaskHandler[]
-  tasks           ScheduledJavaTask[]
+  createdAt        DateTime            @default(now())
+  updatedAt        DateTime            @updatedAt
+  handlers         JavaTaskHandler[]
+  tasks            ScheduledJavaTask[]
 }
 
 model JavaTaskHandler {
-  id              String   @id @default(uuid())
-  applicationId   String
-  application     JavaTaskApplication @relation(fields: [applicationId], references: [id], onDelete: Cascade)
-  methodName      String
-  description     String?
-  parameterSchema Json?
-  riskLevel       String   @default("medium")
-  timeoutSeconds  Int      @default(300)
-  allowConcurrent Boolean  @default(false)
-  idempotent      Boolean  @default(false)
-  version         String?
-  enabled         Boolean  @default(true)
-  lastRegisteredAt DateTime @default(now())
-  tasks           ScheduledJavaTask[]
+  id               String              @id @default(uuid())
+  applicationId    String
+  application      JavaTaskApplication @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+  methodName       String
+  description      String?
+  parameterSchema  Json?
+  riskLevel        String              @default("medium")
+  timeoutSeconds   Int                 @default(300)
+  allowConcurrent  Boolean             @default(false)
+  idempotent       Boolean             @default(false)
+  version          String?
+  enabled          Boolean             @default(true)
+  lastRegisteredAt DateTime            @default(now())
+  tasks            ScheduledJavaTask[]
 
   @@unique([applicationId, methodName])
   @@index([applicationId, enabled])
 }
 
 model ScheduledJavaTask {
-  id                String   @id @default(uuid())
+  id                String              @id @default(uuid())
   name              String
   applicationId     String
   application       JavaTaskApplication @relation(fields: [applicationId], references: [id], onDelete: Restrict)
   handlerId         String
-  handler           JavaTaskHandler @relation(fields: [handlerId], references: [id], onDelete: Restrict)
+  handler           JavaTaskHandler     @relation(fields: [handlerId], references: [id], onDelete: Restrict)
   parameters        Json
-  scheduleType      String   @default("immediate") // immediate | once | cron
+  scheduleType      String              @default("immediate") // immediate | once | cron
   cronExpression    String?
-  timezone          String   @default("Asia/Shanghai")
+  timezone          String              @default("Asia/Shanghai")
   executeAt         DateTime?
   nextRunAt         DateTime?
-  status            String   @default("pending_approval") // pending_approval | enabled | paused | completed | rejected
-  concurrencyPolicy String   @default("forbid") // forbid | allow
+  status            String              @default("pending_approval") // pending_approval | enabled | paused | completed | rejected
+  concurrencyPolicy String              @default("forbid") // forbid | allow
   timeoutSeconds    Int
-  maxRetries        Int      @default(0)
+  maxRetries        Int                 @default(0)
   createdById       String
   createdByName     String
   approvedById      String?
   approvedByName    String?
   approvedAt        DateTime?
   expiresAt         DateTime?
-  createdAt         DateTime @default(now())
-  updatedAt         DateTime @updatedAt
+  createdAt         DateTime            @default(now())
+  updatedAt         DateTime            @updatedAt
   executions        JavaTaskExecution[]
 
   @@index([status, nextRunAt])
@@ -109,12 +170,12 @@ model ScheduledJavaTask {
 }
 
 model JavaTaskExecution {
-  id                 String   @id @default(uuid())
+  id                 String            @id @default(uuid())
   taskId             String
   task               ScheduledJavaTask @relation(fields: [taskId], references: [id], onDelete: Cascade)
-  status             String   @default("queued") // queued | running | succeeded | failed | timed_out | cancelled
+  status             String            @default("queued") // queued | running | succeeded | failed | timed_out | cancelled
   triggerType        String
-  attempt            Int      @default(1)
+  attempt            Int               @default(1)
   parametersSnapshot Json
   handlerVersion     String?
   scheduledAt        DateTime
@@ -122,9 +183,9 @@ model JavaTaskExecution {
   finishedAt         DateTime?
   heartbeatAt        DateTime?
   resultSummary      Json?
-  error              String?  @db.Text
-  traceId            String   @unique
-  createdAt          DateTime @default(now())
+  error              String?           @db.Text
+  traceId            String            @unique
+  createdAt          DateTime          @default(now())
 
   @@index([taskId, createdAt])
   @@index([status, scheduledAt])
@@ -140,31 +201,31 @@ model SystemSetting {
 
 // MCP/Agent 的通用工具调用审批。只保存参数哈希和人工可读摘要，不保存原始工具参数。
 model McpToolApproval {
-  id                String   @id @default(uuid())
-  requesterId       String
-  requesterName     String
-  clientId          String
-  agentRunId        String?
-  toolName          String
-  riskLevel         String
+  id                  String    @id @default(uuid())
+  requesterId         String
+  requesterName       String
+  clientId            String
+  agentRunId          String?
+  toolName            String
+  riskLevel           String
   requiredPermissions String[]
-  reviewerIds       String[]
-  environment       String?
-  resourceType      String?
-  resourceId        String?
-  resourceVersion   String?
-  argumentsHash     String
-  argumentsSummary Json
-  impactSummary     String
-  status            String   @default("requested") // requested | approved | rejected | cancelled | expired | revoked | consuming | consumed | execution_failed
-  reviewerId        String?
-  reviewerName      String?
-  decisionReason    String?
-  reviewedAt        DateTime?
-  expiresAt         DateTime
-  consumedAt        DateTime?
-  createdAt         DateTime @default(now())
-  updatedAt         DateTime @updatedAt
+  reviewerIds         String[]
+  environment         String?
+  resourceType        String?
+  resourceId          String?
+  resourceVersion     String?
+  argumentsHash       String
+  argumentsSummary    Json
+  impactSummary       String
+  status              String    @default("requested") // requested | approved | rejected | cancelled | expired | revoked | consuming | consumed | execution_failed
+  reviewerId          String?
+  reviewerName        String?
+  decisionReason      String?
+  reviewedAt          DateTime?
+  expiresAt           DateTime
+  consumedAt          DateTime?
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
 
   @@index([requesterId, createdAt])
   @@index([status, expiresAt])
@@ -303,27 +364,27 @@ model GitCredential {
 }
 
 model Project {
-  id         String   @id @default(uuid())
-  userId     String
-  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  name       String
-  language   String   @default("java") // 预留多语言
-  status     String   @default("active") // "active" | "archived"
-  volumePath String // 项目文件在宿主机上的挂载路径
-  createdAt  DateTime @default(now())
-  deletionStartedAt DateTime?
-  deletionError     String?  @db.Text
-  deletionAttempts  Int      @default(0)
-  deletionNextAttemptAt DateTime?
-  deletionAcknowledgedAt DateTime?
-  deletionAcknowledgedById String?
-  deletionAcknowledgedByName String?
-  deletionAcknowledgementNote String? @db.Text
-  importStartedAt DateTime?
-  importFinishedAt DateTime?
-  importLeaseUntil DateTime?
-  importError     String?  @db.Text
-  importAttempts  Int      @default(0)
+  id                          String    @id @default(uuid())
+  userId                      String
+  user                        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name                        String
+  language                    String    @default("java") // 预留多语言
+  status                      String    @default("active") // "active" | "archived"
+  volumePath                  String // 项目文件在宿主机上的挂载路径
+  createdAt                   DateTime  @default(now())
+  deletionStartedAt           DateTime?
+  deletionError               String?   @db.Text
+  deletionAttempts            Int       @default(0)
+  deletionNextAttemptAt       DateTime?
+  deletionAcknowledgedAt      DateTime?
+  deletionAcknowledgedById    String?
+  deletionAcknowledgedByName  String?
+  deletionAcknowledgementNote String?   @db.Text
+  importStartedAt             DateTime?
+  importFinishedAt            DateTime?
+  importLeaseUntil            DateTime?
+  importError                 String?   @db.Text
+  importAttempts              Int       @default(0)
 
   teamId String? // 所属项目组（可选，为空则仅创建人可见）
   team   Team?   @relation(fields: [teamId], references: [id], onDelete: SetNull)
@@ -347,24 +408,24 @@ model Project {
 }
 
 model MonitoringAlertRule {
-  id              String   @id @default(uuid())
+  id              String                 @id @default(uuid())
   projectId       String
-  project         Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  project         Project                @relation(fields: [projectId], references: [id], onDelete: Cascade)
   name            String
-  metric          String   // success_rate | p95_latency_ms | error_rate
-  operator        String   // lt | gt
+  metric          String // success_rate | p95_latency_ms | error_rate
+  operator        String // lt | gt
   threshold       Float
-  windowMinutes   Int      @default(5)
+  windowMinutes   Int                    @default(5)
   environment     String?
   serviceName     String?
-  enabled         Boolean  @default(true)
-  cooldownMinutes Int      @default(15)
+  enabled         Boolean                @default(true)
+  cooldownMinutes Int                    @default(15)
   lastTriggeredAt DateTime?
-  state           String   @default("ok") // ok | firing
+  state           String                 @default("ok") // ok | firing
   lastValue       Float?
   lastEvaluatedAt DateTime?
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
+  createdAt       DateTime               @default(now())
+  updatedAt       DateTime               @updatedAt
   events          MonitoringAlertEvent[]
 
   @@index([projectId])
@@ -372,20 +433,20 @@ model MonitoringAlertRule {
 }
 
 model MonitoringAlertEvent {
-  id         String              @id @default(uuid())
-  projectId  String
-  project    Project             @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  ruleId     String
-  rule       MonitoringAlertRule @relation(fields: [ruleId], references: [id], onDelete: Cascade)
-  metric     String
-  value      Float
-  threshold  Float
-  status     String              @default("firing") // firing | resolved
-  message    String
-  notificationStatus String      @default("pending") // pending | sent | failed | in_app
+  id                 String              @id @default(uuid())
+  projectId          String
+  project            Project             @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  ruleId             String
+  rule               MonitoringAlertRule @relation(fields: [ruleId], references: [id], onDelete: Cascade)
+  metric             String
+  value              Float
+  threshold          Float
+  status             String              @default("firing") // firing | resolved
+  message            String
+  notificationStatus String              @default("pending") // pending | sent | failed | in_app
   notificationError  String?
   notifiedAt         DateTime?
-  createdAt  DateTime            @default(now())
+  createdAt          DateTime            @default(now())
 
   @@index([projectId, createdAt])
   @@index([ruleId, createdAt])
@@ -432,7 +493,7 @@ model Deployment {
   containerPort  Int?
   containerId    String?
   logsTail       String?  @db.Text
-  activeRecordId String?  // 当前部署对应的不可变记录；跨 Pod 共享，不使用进程内状态
+  activeRecordId String? // 当前部署对应的不可变记录；跨 Pod 共享，不使用进程内状态
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
 
@@ -512,10 +573,10 @@ model Session {
   modelConfig     ModelConfig? @relation(fields: [modelConfigId], references: [id], onDelete: SetNull)
   createdAt       DateTime     @default(now())
 
-  tasks   Task[]
-  sandbox SandboxInstance?
-  preview PreviewInstance?
-  requirementLinks RequirementProject[]
+  tasks                  Task[]
+  sandbox                SandboxInstance?
+  preview                PreviewInstance?
+  requirementLinks       RequirementProject[]
   previewSourceSnapshots PreviewSourceSnapshot[]
 
   @@unique([projectId, userId])
@@ -531,10 +592,10 @@ model Task {
   prompt             String    @db.Text
   status             String    @default("queued") // queued | running | cancelling | succeeded | failed | cancelled | timed_out
   resultLog          String?   @db.Text
-  executorKind       String?   // docker | kubernetes
+  executorKind       String? // docker | kubernetes
   executionNamespace String?
-  executionRef       String?   // Docker container id / Kubernetes Job name
-  failureCode        String?   // command_failed | image_pull | oom_killed | deadline_exceeded | cluster_error
+  executionRef       String? // Docker container id / Kubernetes Job name
+  failureCode        String? // command_failed | image_pull | oom_killed | deadline_exceeded | cluster_error
   priority           Int       @default(5) // 1 最高，10 最低
   resourceWaitCount  Int       @default(0)
   startedAt          DateTime?
@@ -566,17 +627,17 @@ model SandboxInstance {
 }
 
 model PreviewInstance {
-  id            String   @id @default(uuid())
-  sessionId     String   @unique
-  session       Session  @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  id            String  @id @default(uuid())
+  sessionId     String  @unique
+  session       Session @relation(fields: [sessionId], references: [id], onDelete: Cascade)
   kind          String // 'web-dev-server' 等
-  status        String   @default("starting") // "starting" | "ready" | "failed" | "stopped"
+  status        String  @default("starting") // "starting" | "ready" | "failed" | "stopped"
   url           String? // 预览访问地址（本地阶段为 http://localhost:<hostPort>）
   hostPort      Int?
   containerPort Int?
   targetId      String?
   targetName    String?
-  logsTail      String?  @db.Text // dev server 最近日志
+  logsTail      String? @db.Text // dev server 最近日志
 
   // 移动端模拟器预览（kind='emulator'）专属。web/http 预览这些列为空。
   emulatorContainerId String? // 模拟器容器 id（停止预览时一并回收）
@@ -584,66 +645,67 @@ model PreviewInstance {
   webrtcTokenEnc      String? // 加密后的短期 WebRTC token（CryptoService 加密，DTO 不回明文）
   extra               Json? // deviceProfile / bootMs / bundle 路径等非索引元数据
   requirementId       String?
-  requirement         Requirement? @relation(fields: [requirementId], references: [id], onDelete: SetNull)
+  requirement         Requirement?              @relation(fields: [requirementId], references: [id], onDelete: SetNull)
   serviceKey          String? // 联调路由中的稳定服务标识
   routeEndpoint       RequirementRouteEndpoint?
 
-  createdAt     DateTime @default(now())
-  lastActiveAt  DateTime @default(now())
+  createdAt    DateTime @default(now())
+  lastActiveAt DateTime @default(now())
 
   @@index([requirementId])
   @@index([requirementId, serviceKey])
 }
 
 model Requirement {
-  id              String   @id @default(uuid())
-  requirementNo   String   @unique
-  teamId          String
-  team            Team     @relation(fields: [teamId], references: [id], onDelete: Cascade)
-  title           String
-  summary         String?
-  contentMarkdown String   @default("") @db.Text
-  documentVersion Int      @default(1)
-  status          String   @default("draft") // draft | active | completed | cancelled | archived
-  currentStage    String   @default("design") // design | development | testing | canary | release
-  progress        Int      @default(0)
-  plannedStartAt  DateTime?
-  plannedEndAt    DateTime?
-  ownerId         String
-  owner           User     @relation("RequirementOwner", fields: [ownerId], references: [id], onDelete: Restrict)
-  createdById     String
-  createdBy       User     @relation("RequirementCreator", fields: [createdById], references: [id], onDelete: Restrict)
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
-  stages          RequirementStage[]
-  revisions       RequirementRevision[]
-  projects        RequirementProject[]
-  activities      RequirementActivity[]
-  previews        PreviewInstance[]
-  routeEndpoints  RequirementRouteEndpoint[]
+  id                String                     @id @default(uuid())
+  requirementNo     String                     @unique
+  teamId            String
+  team              Team                       @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  title             String
+  summary           String?
+  contentMarkdown   String                     @default("") @db.Text
+  documentVersion   Int                        @default(1)
+  status            String                     @default("draft") // draft | active | completed | cancelled | archived
+  currentStage      String                     @default("design") // design | development | testing | canary | release
+  progress          Int                        @default(0)
+  plannedStartAt    DateTime?
+  plannedEndAt      DateTime?
+  ownerId           String
+  owner             User                       @relation("RequirementOwner", fields: [ownerId], references: [id], onDelete: Restrict)
+  createdById       String
+  createdBy         User                       @relation("RequirementCreator", fields: [createdById], references: [id], onDelete: Restrict)
+  createdAt         DateTime                   @default(now())
+  updatedAt         DateTime                   @updatedAt
+  stages            RequirementStage[]
+  revisions         RequirementRevision[]
+  projects          RequirementProject[]
+  activities        RequirementActivity[]
+  previews          PreviewInstance[]
+  routeEndpoints    RequirementRouteEndpoint[]
+  knowledgeDocument KnowledgeDocument?
 
   @@index([teamId, status, updatedAt])
   @@index([ownerId, status])
 }
 
 model RequirementStage {
-  id                  String   @id @default(uuid())
+  id                  String      @id @default(uuid())
   requirementId       String
   requirement         Requirement @relation(fields: [requirementId], references: [id], onDelete: Cascade)
   type                String // design | development | testing | canary | release
   sortOrder           Int
   ownerId             String?
-  owner               User?    @relation("RequirementStageOwner", fields: [ownerId], references: [id], onDelete: SetNull)
-  descriptionMarkdown String    @default("") @db.Text
-  status              String    @default("pending") // pending | in_progress | completed | blocked | skipped
-  progress            Int       @default(0)
-  blockedReason       String?   @db.Text
+  owner               User?       @relation("RequirementStageOwner", fields: [ownerId], references: [id], onDelete: SetNull)
+  descriptionMarkdown String      @default("") @db.Text
+  status              String      @default("pending") // pending | in_progress | completed | blocked | skipped
+  progress            Int         @default(0)
+  blockedReason       String?     @db.Text
   plannedStartAt      DateTime?
   plannedEndAt        DateTime?
   startedAt           DateTime?
   completedAt         DateTime?
-  createdAt           DateTime  @default(now())
-  updatedAt           DateTime  @updatedAt
+  createdAt           DateTime    @default(now())
+  updatedAt           DateTime    @updatedAt
 
   @@unique([requirementId, type])
   @@index([ownerId, status])
@@ -728,22 +790,22 @@ model RequirementRouteEndpoint {
 
 // Kubernetes 预览镜像的不可变构建记录，用于成功率、耗时和故障追踪。
 model PreviewBuildRecord {
-  id          String    @id @default(uuid())
-  sessionId   String
-  projectId   String
-  userId      String
-  teamId      String
-  targetId    String
-  namespace   String
-  jobName     String    @unique
-  image       String
-  status      String    @default("queued") // queued | building | succeeded | failed | cancelled
-  logsTail    String?   @db.Text
-  queuedAt    DateTime  @default(now())
-  startedAt   DateTime?
-  finishedAt  DateTime?
-  durationMs  Int?
-  createdAt   DateTime  @default(now())
+  id         String    @id @default(uuid())
+  sessionId  String
+  projectId  String
+  userId     String
+  teamId     String
+  targetId   String
+  namespace  String
+  jobName    String    @unique
+  image      String
+  status     String    @default("queued") // queued | building | succeeded | failed | cancelled
+  logsTail   String?   @db.Text
+  queuedAt   DateTime  @default(now())
+  startedAt  DateTime?
+  finishedAt DateTime?
+  durationMs Int?
+  createdAt  DateTime  @default(now())
 
   @@index([projectId, createdAt])
   @@index([teamId, status, queuedAt])
@@ -754,17 +816,17 @@ model PreviewBuildRecord {
 
 // 当前用户工作区的不可变、短期构建快照。归档位于平台共享卷，下载凭证只保存哈希。
 model PreviewSourceSnapshot {
-  id           String   @id @default(uuid())
+  id           String    @id @default(uuid())
   sessionId    String
-  session      Session  @relation(fields: [sessionId], references: [id], onDelete: Cascade)
-  tokenHash    String   @unique
+  session      Session   @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  tokenHash    String    @unique
   archivePath  String
   sha256       String
   sizeBytes    Int
-  status       String   @default("ready") // ready | deleted
+  status       String    @default("ready") // ready | deleted
   expiresAt    DateTime
   downloadedAt DateTime?
-  createdAt    DateTime @default(now())
+  createdAt    DateTime  @default(now())
 
   @@index([sessionId, createdAt])
   @@index([status, expiresAt])
@@ -777,11 +839,13 @@ model Team {
   description String?
   createdAt   DateTime @default(now())
 
-  members       User[]         @relation("TeamMembers")
-  projects      Project[]
-  datasources   Datasource[]
-  deployTargets DeployTarget[]
-  requirements  Requirement[]
+  members            User[]              @relation("TeamMembers")
+  projects           Project[]
+  datasources        Datasource[]
+  deployTargets      DeployTarget[]
+  requirements       Requirement[]
+  knowledgeFolders   KnowledgeFolder[]
+  knowledgeDocuments KnowledgeDocument[]
 }
 
 // 数据源：MySQL/Redis/MongoDB 等外部数据库连接配置。凭证加密存储。
@@ -837,24 +901,24 @@ model DatasourceMember {
 
 // 数据库写操作审批。SQL 仅在审批通过后由服务端使用原数据源凭据执行。
 model DatabaseApproval {
-  id             String    @id @default(uuid())
-  datasourceId   String
-  datasource     Datasource @relation(fields: [datasourceId], references: [id], onDelete: Cascade)
-  requesterId    String
-  requesterName  String
-  approverId     String?
-  approverName   String?
-  database       String?
-  sql            String    @db.Text
-  operation      String
-  status         String    @default("pending") // pending | executing | approved | rejected | failed | cancelled
-  resultSummary  Json?
-  planAnalysis   Json?
-  analyzedAt     DateTime?
-  error          String?   @db.Text
-  requestedAt    DateTime  @default(now())
-  reviewedAt     DateTime?
-  executedAt     DateTime?
+  id            String     @id @default(uuid())
+  datasourceId  String
+  datasource    Datasource @relation(fields: [datasourceId], references: [id], onDelete: Cascade)
+  requesterId   String
+  requesterName String
+  approverId    String?
+  approverName  String?
+  database      String?
+  sql           String     @db.Text
+  operation     String
+  status        String     @default("pending") // pending | executing | approved | rejected | failed | cancelled
+  resultSummary Json?
+  planAnalysis  Json?
+  analyzedAt    DateTime?
+  error         String?    @db.Text
+  requestedAt   DateTime   @default(now())
+  reviewedAt    DateTime?
+  executedAt    DateTime?
 
   @@index([status, requestedAt])
   @@index([datasourceId, requestedAt])
@@ -862,37 +926,37 @@ model DatabaseApproval {
 }
 
 model DatabaseTransfer {
-  id                   String     @id @default(uuid())
-  kind                 String     @default("migration") // backup | migration
-  sourceDatasourceId   String
-  sourceDatasource     Datasource @relation("TransferSource", fields: [sourceDatasourceId], references: [id], onDelete: Restrict)
-  targetDatasourceId   String?
-  targetDatasource     Datasource? @relation("TransferTarget", fields: [targetDatasourceId], references: [id], onDelete: Restrict)
-  requesterId          String
-  requesterName        String
-  approverId           String?
-  approverName         String?
-  sourceDatabase       String
-  targetDatabase       String?
-  tables               String[]
-  conflictStrategy     String     @default("fail") // fail | append | replace
-  preflight            Json?
-  checkpoints          Json?
-  cancelRequested      Boolean    @default(false)
-  leaseOwner           String?
-  heartbeatAt          DateTime?
-  status               String     @default("pending_approval") // pending_approval | queued | running | succeeded | failed | rejected | cancelled
-  currentTable         String?
-  totalTables          Int        @default(0)
-  completedTables      Int        @default(0)
-  totalRows            Int        @default(0)
-  migratedRows         Int        @default(0)
-  backupPath           String?
-  error                String?    @db.Text
-  requestedAt          DateTime   @default(now())
-  reviewedAt           DateTime?
-  startedAt            DateTime?
-  finishedAt           DateTime?
+  id                 String      @id @default(uuid())
+  kind               String      @default("migration") // backup | migration
+  sourceDatasourceId String
+  sourceDatasource   Datasource  @relation("TransferSource", fields: [sourceDatasourceId], references: [id], onDelete: Restrict)
+  targetDatasourceId String?
+  targetDatasource   Datasource? @relation("TransferTarget", fields: [targetDatasourceId], references: [id], onDelete: Restrict)
+  requesterId        String
+  requesterName      String
+  approverId         String?
+  approverName       String?
+  sourceDatabase     String
+  targetDatabase     String?
+  tables             String[]
+  conflictStrategy   String      @default("fail") // fail | append | replace
+  preflight          Json?
+  checkpoints        Json?
+  cancelRequested    Boolean     @default(false)
+  leaseOwner         String?
+  heartbeatAt        DateTime?
+  status             String      @default("pending_approval") // pending_approval | queued | running | succeeded | failed | rejected | cancelled
+  currentTable       String?
+  totalTables        Int         @default(0)
+  completedTables    Int         @default(0)
+  totalRows          Int         @default(0)
+  migratedRows       Int         @default(0)
+  backupPath         String?
+  error              String?     @db.Text
+  requestedAt        DateTime    @default(now())
+  reviewedAt         DateTime?
+  startedAt          DateTime?
+  finishedAt         DateTime?
 
   @@index([status, requestedAt])
   @@index([requesterId, requestedAt])

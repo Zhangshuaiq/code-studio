@@ -23,6 +23,7 @@ import { UpdateProjectDto } from './dto/update-project.dto';
 import { SetProjectRepositoryDto } from './dto/set-project-repository.dto';
 import { ProjectMemberRoleDto, ProjectMembersDto } from './dto/project-members.dto';
 import { PageQueryDto } from '../common/dto/page-query.dto';
+import { DeleteProjectDto } from './dto/delete-project.dto';
 
 @UseGuards(JwtAuthGuard, PermissionsGuard)
 @RequirePermissions(PERMISSIONS.PROJECT_READ)
@@ -67,8 +68,8 @@ export class ProjectController {
   @Delete(':id')
   @RequirePermissions(PERMISSIONS.PROJECT_WRITE)
   @Audit('project.delete', 'project')
-  remove(@CurrentUser() user: AuthUser, @Param('id') id: string) {
-    return this.projects.remove(user.id, id);
+  remove(@CurrentUser() user: AuthUser, @Param('id') id: string, @Body() body: DeleteProjectDto) {
+    return this.projects.remove(user.id, id, body?.cleanupDeployment === true);
   }
 
   @Get(':id/repository')
