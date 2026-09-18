@@ -27,7 +27,8 @@ import {
   ProjectCapability,
 } from "../project-access/project-access.service";
 import { WorkspaceService } from "../workspace/workspace.service";
-import { DatasourceService, DatasourceConfig } from "../datasource/datasource.service";
+import { DatasourceService } from "../datasource/datasource.service";
+import type { DatasourceConfig } from "../datasource/dto/datasource.dto";
 import { diagnosticMessage } from "../common/redact-diagnostic";
 import { dependencyPolicyRequiresProxy, resolveDependencyAccessPolicy } from "../common/dependency-access-policy";
 

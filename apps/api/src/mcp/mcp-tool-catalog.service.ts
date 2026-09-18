@@ -332,7 +332,7 @@ export class McpToolCatalogService {
         inputSchema,
         annotations: infrastructureReadAnnotations,
         _meta: metadata('R0', permissions),
-      }, (input) => this.invocations.execute(name, principal, input, () => handler(input as never)));
+      }, (input: unknown) => this.invocations.execute(name, principal, input, () => handler(input as never)));
     }
   }
 

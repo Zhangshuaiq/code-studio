@@ -1,9 +1,10 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { CreateSessionDto } from './dto/create-session.dto';
 import { UpdateSessionDto } from './dto/update-session.dto';
 import { ProjectAccessService } from '../project-access/project-access.service';
 import { WorkspaceService } from '../workspace/workspace.service';
+import { ModelConfigService } from '../model-config/model-config.service';
 
 @Injectable()
 export class SessionService {
@@ -11,6 +12,7 @@ export class SessionService {
     private readonly prisma: PrismaService,
     private readonly access: ProjectAccessService,
     private readonly workspaces: WorkspaceService,
+    private readonly models: ModelConfigService,
   ) {}
 
   async create(userId: string, dto: CreateSessionDto) {
@@ -29,7 +31,7 @@ export class SessionService {
   }
 
   async update(userId: string, id: string, dto: UpdateSessionDto) {
-    await this.access.requireSession(userId, id, 'read');
+    await this.access.requireSession(userId, id, 'edit');
     // 校验模型配置属于本人（传了才校验）
     if (dto.modelConfigId) {
       const cfg = await this.prisma.modelConfig.findFirst({
@@ -38,10 +40,21 @@ export class SessionService {
       });
       if (!cfg) throw new NotFoundException('模型配置不存在');
     }
-    return this.prisma.session.update({
+    const modelConfigId = dto.modelConfigId;
+    const modelName = dto.modelName;
+    if (modelName) {
+      if (!modelConfigId) throw new BadRequestException('请选择已连接的平台');
+      await this.models.assertModelAvailable(userId, modelConfigId, modelName);
+    }
+    const updated = await this.prisma.session.update({
       where: { id },
-      data: { modelConfigId: dto.modelConfigId ?? null },
+      data: {
+        ...(dto.modelConfigId !== undefined ? { modelConfigId: dto.modelConfigId } : {}),
+        ...(dto.modelName !== undefined ? { modelName: dto.modelName } : {}),
+        ...(dto.modelConfigId !== undefined && dto.modelName === undefined ? { modelName: null } : {}),
+      },
     });
+    return this.publicSession(updated, userId);
   }
 
   async findByProject(userId: string, projectId: string) {

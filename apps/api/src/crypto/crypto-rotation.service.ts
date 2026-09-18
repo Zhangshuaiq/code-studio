@@ -5,7 +5,7 @@ import { CryptoService } from './crypto.service';
 
 const ALERT_NOTIFICATION_KEY = 'monitoring.alert_notification';
 
-type ResourceName = 'deployTargets' | 'registries' | 'modelConfigs' | 'gitCredentials' | 'datasources' | 'alertNotifications';
+type ResourceName = 'deployTargets' | 'registries' | 'modelConfigs' | 'gitCredentials' | 'datasources' | 'alertNotifications' | 'monitoringConnections';
 type ResourceStat = { total: number; needingRotation: number; keyIds: Record<string, number> };
 type RotationStatus = { activeKeyId: string; total: number; needingRotation: number; resources: Record<ResourceName, ResourceStat> };
 
@@ -46,18 +46,25 @@ export class CryptoRotationService {
           });
         }
       }
+      const monitoring = await tx.systemSetting.findMany({ where: { key: { startsWith: 'monitoring.connection.' } } });
+      await Promise.all(monitoring.map((row) => {
+        const value = row.value as Record<string, unknown>;
+        if (typeof value.encryptedSecret !== 'string' || !this.crypto.needsRotation(value.encryptedSecret)) return Promise.resolve(row);
+        return tx.systemSetting.update({ where: { key: row.key }, data: { value: { ...value, encryptedSecret: this.crypto.rotate(value.encryptedSecret) } as Prisma.InputJsonValue } });
+      }));
       return { ...await this.inspect(tx), rotated: before.needingRotation };
     });
   }
 
   private async inspect(db: PrismaService | Prisma.TransactionClient): Promise<RotationStatus> {
-    const [deployTargets, registries, modelConfigs, gitCredentials, datasources, alert] = await Promise.all([
+    const [deployTargets, registries, modelConfigs, gitCredentials, datasources, alert, monitoring] = await Promise.all([
       db.deployTarget.findMany({ select: { encryptedConfig: true } }),
       db.registry.findMany({ select: { encryptedConfig: true } }),
       db.modelConfig.findMany({ select: { encryptedKey: true } }),
       db.gitCredential.findMany({ select: { encryptedToken: true } }),
       db.datasource.findMany({ select: { encryptedConfig: true } }),
       db.systemSetting.findUnique({ where: { key: ALERT_NOTIFICATION_KEY }, select: { value: true } }),
+      db.systemSetting.findMany({ where: { key: { startsWith: 'monitoring.connection.' } }, select: { value: true } }),
     ]);
     const alertValue = alert?.value as Record<string, unknown> | undefined;
     const alertBlobs = [alertValue?.encryptedUrl, alertValue?.encryptedSecret].filter((value): value is string => typeof value === 'string');
@@ -68,6 +75,7 @@ export class CryptoRotationService {
       gitCredentials: this.stat(gitCredentials.map((row) => row.encryptedToken)),
       datasources: this.stat(datasources.map((row) => row.encryptedConfig)),
       alertNotifications: this.stat(alertBlobs),
+      monitoringConnections: this.stat(monitoring.map((row) => (row.value as Record<string, unknown>).encryptedSecret).filter((value): value is string => typeof value === 'string')),
     };
     const values = Object.values(resources);
     return {

@@ -10,7 +10,7 @@ export interface AgentEvent {
 // 每用户自带的模型凭证（BYOK），由 ModelConfigService 解析后注入
 export interface ModelCredential {
   provider: string; // 'openai-compatible' 等
-  engine: string; // 生成引擎: 'simple' | 'aider'
+  engine: string; // simple | aider | codex | claude-code
   baseUrl: string;
   model: string;
   apiKey: string;
@@ -21,7 +21,7 @@ export interface GenerationInput {
   prompt: string;
   cwd: string; // 项目挂载卷（生成的文件写这里）
   runtime: ProjectRuntime;
-  resumeId?: string; // 多轮延续标识（claude-agent 用）
+  resumeId?: string; // 多轮延续标识
   credentials?: ModelCredential; // BYOK：本次生成用哪套模型/key
   onEvent?: (e: AgentEvent) => void;
   signal?: AbortSignal;

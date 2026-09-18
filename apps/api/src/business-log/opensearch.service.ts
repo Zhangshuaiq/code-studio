@@ -5,6 +5,7 @@ import {
   ServiceUnavailableException,
 } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
+import { MonitoringConfigService } from "../monitoring-config/monitoring-config.service";
 
 interface OpenSearchResponseError {
   error?: { reason?: string; root_cause?: Array<{ reason?: string }> } | string;
@@ -14,19 +15,11 @@ interface OpenSearchResponseError {
 @Injectable()
 export class OpenSearchService implements OnApplicationBootstrap {
   private readonly logger = new Logger(OpenSearchService.name);
-  private readonly baseUrl: string;
-  private readonly username: string;
-  private readonly password: string;
   private readonly timeoutMs: number;
   private readonly maxResponseBytes: number;
   private templateReady = false;
 
-  constructor(private readonly config: ConfigService) {
-    this.baseUrl = config
-      .get<string>("OPENSEARCH_URL", "http://localhost:9200")
-      .replace(/\/+$/, "");
-    this.username = config.get<string>("OPENSEARCH_USERNAME", "");
-    this.password = config.get<string>("OPENSEARCH_PASSWORD", "");
+  constructor(private readonly config: ConfigService, private readonly monitoring: MonitoringConfigService) {
     this.timeoutMs = Number(config.get("OPENSEARCH_TIMEOUT_MS", 15_000));
     this.maxResponseBytes = Number(config.get("OPENSEARCH_MAX_RESPONSE_BYTES", 20 * 1024 * 1024));
   }
@@ -34,7 +27,7 @@ export class OpenSearchService implements OnApplicationBootstrap {
   async onApplicationBootstrap() {
     try {
       await this.ensureIndexTemplate();
-      this.logger.log(`OpenSearch 日志索引模板已就绪: ${this.baseUrl}`);
+      this.logger.log(`OpenSearch 日志索引模板已就绪`);
     } catch (error) {
       // OpenSearch 可以晚于 API 启动；首次写入时会再次尝试创建模板。
       this.logger.warn(`OpenSearch 暂不可用: ${this.reason(error)}`);
@@ -182,6 +175,11 @@ export class OpenSearchService implements OnApplicationBootstrap {
     };
   }
 
+  async connectionStatus() {
+    const connection = await this.monitoring.resolve('opensearch');
+    return { enabled: connection.enabled, configured: connection.configured, source: connection.source };
+  }
+
   async listLogIndices(): Promise<
     Array<{ index: string; docsCount?: string; storeSize?: string }>
   > {
@@ -211,16 +209,13 @@ export class OpenSearchService implements OnApplicationBootstrap {
     body?: unknown,
     contentType = "application/json",
   ): Promise<T> {
-    const headers: Record<string, string> = { Accept: "application/json" };
+    const connection = await this.monitoring.resolve('opensearch');
+    if (!connection.enabled || !connection.configured) throw new ServiceUnavailableException('日志服务尚未配置');
+    const headers: Record<string, string> = { Accept: "application/json", ...connection.headers };
     if (body !== undefined) headers["Content-Type"] = contentType;
-    if (this.username) {
-      headers.Authorization = `Basic ${Buffer.from(
-        `${this.username}:${this.password}`,
-      ).toString("base64")}`;
-    }
     let response: Response;
     try {
-      response = await fetch(`${this.baseUrl}${path}`, {
+      response = await fetch(`${connection.url}${path}`, {
         method,
         headers,
         body:

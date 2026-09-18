@@ -166,6 +166,8 @@ export function useProjectSession(projectId?: string) {
   return useQuery<{
     projectId: string;
     sessionId: string;
+    modelConfigId?: string | null;
+    modelName?: string | null;
     workspaceBranch?: string;
     userWorkspace: boolean;
   }>({
@@ -181,6 +183,8 @@ export function useProjectSession(projectId?: string) {
       return {
         projectId: projectId!,
         sessionId: session.id,
+        modelConfigId: session.modelConfigId,
+        modelName: session.modelName,
         workspaceBranch: session.workspaceBranch,
         userWorkspace: session.userWorkspace !== false,
       };

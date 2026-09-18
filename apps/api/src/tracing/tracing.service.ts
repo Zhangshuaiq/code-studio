@@ -2,16 +2,16 @@ import { BadGatewayException, BadRequestException, Injectable, Logger, NotFoundE
 import { ConfigService } from '@nestjs/config';
 import { TraceSearchQueryDto } from './dto/trace-query.dto';
 import { ProjectAccessService } from '../project-access/project-access.service';
+import { MonitoringConfigService } from '../monitoring-config/monitoring-config.service';
 
 @Injectable()
 export class TracingService {
   private readonly logger = new Logger(TracingService.name);
-  private readonly tempoUrl: string;
-  constructor(config: ConfigService, private readonly access: ProjectAccessService) { this.tempoUrl = config.get<string>('TEMPO_URL', 'http://tempo:3200').replace(/\/$/, ''); }
+  constructor(_config: ConfigService, private readonly access: ProjectAccessService, private readonly monitoring: MonitoringConfigService) {}
 
   async health() {
     const started = Date.now();
-    try { const response = await fetch(`${this.tempoUrl}/ready`, { signal: AbortSignal.timeout(2000) }); return { available: response.ok, latencyMs: Date.now() - started, ...(response.ok ? {} : { error: `HTTP ${response.status}` }) }; }
+    try { const connection = await this.monitoring.resolve('tempo'); if (!connection.enabled || !connection.configured) return { available: false, disabled: true, configured: false, latencyMs: 0 }; const response = await fetch(`${connection.url}/ready`, { headers: connection.headers, signal: AbortSignal.timeout(2000) }); return { available: response.ok, configured: true, latencyMs: Date.now() - started, ...(response.ok ? {} : { error: `HTTP ${response.status}` }) }; }
     catch (error) { return { available: false, latencyMs: Date.now() - started, error: (error as Error).message }; }
   }
 
@@ -66,7 +66,7 @@ export class TracingService {
     return { traceId, startTimeUnixNano: traceStartNs.toString(), durationMs: nsMs(traceEndNs - traceStartNs), services: [...new Set(spans.map((span) => span.serviceName))], languages: [...new Set(spans.map((span) => span.language).filter(Boolean))], errorCount: spans.filter((span) => span.status === 'error').length, spans: withTiming.map(({ startNs, endNs, ...span }) => span) };
   }
 
-  private async get(path: string): Promise<unknown> { try { const response = await fetch(`${this.tempoUrl}${path}`, { headers: { accept: 'application/json' }, signal: AbortSignal.timeout(10_000) }); if (response.status === 404) throw new NotFoundException('Trace 不存在'); if (!response.ok) throw new Error(`Tempo HTTP ${response.status}: ${(await response.text()).slice(0, 500)}`); const declaredSize = Number(response.headers.get('content-length') || 0); if (declaredSize > 10 * 1024 * 1024) throw new Error('Tempo 响应超过 10 MiB'); const text = await response.text(); if (Buffer.byteLength(text) > 10 * 1024 * 1024) throw new Error('Tempo 响应超过 10 MiB'); return JSON.parse(text); } catch (error) { if (error instanceof NotFoundException) throw error; this.logger.warn(`Tempo 查询失败 path=${path}: ${(error as Error).message}`); throw new BadGatewayException('Trace 服务暂时不可用'); } }
+  private async get(path: string): Promise<unknown> { try { const connection = await this.monitoring.resolve('tempo'); if (!connection.enabled || !connection.configured) throw new Error('链路追踪服务尚未配置'); const response = await fetch(`${connection.url}${path}`, { headers: { accept: 'application/json', ...connection.headers }, signal: AbortSignal.timeout(10_000) }); if (response.status === 404) throw new NotFoundException('Trace 不存在'); if (!response.ok) throw new Error(`Tempo HTTP ${response.status}: ${(await response.text()).slice(0, 500)}`); const declaredSize = Number(response.headers.get('content-length') || 0); if (declaredSize > 10 * 1024 * 1024) throw new Error('Tempo 响应超过 10 MiB'); const text = await response.text(); if (Buffer.byteLength(text) > 10 * 1024 * 1024) throw new Error('Tempo 响应超过 10 MiB'); return JSON.parse(text); } catch (error) { if (error instanceof NotFoundException) throw error; this.logger.warn(`Tempo 查询失败 path=${path}: ${(error as Error).message}`); throw new BadGatewayException('Trace 服务暂时不可用'); } }
 }
 
 interface RawSpan { spanId: string; parentSpanId: string; name: string; kind: unknown; serviceName: string; language: string; environment: string; projectId: string; status: string; statusMessage: string; attributes: Record<string, unknown>; events: unknown[]; startNs: bigint; endNs: bigint }
@@ -89,7 +89,7 @@ function flattenTrace(payload: unknown): RawSpan[] {
 }
 function attributes(rows: unknown[]) { const entries: Array<[string, unknown]> = []; for (const raw of rows.slice(0, 1000)) { const row = record(raw); const key = text(row.key); if (key) entries.push([key, attributeValue(row.value, 0)]); } return Object.fromEntries(entries); }
 function attributeValue(input: unknown, depth: number): unknown { if (depth > 5 || !isRecord(input)) return input; for (const key of ['stringValue','intValue','doubleValue','boolValue','bytesValue']) if (key in input) return input[key]; const arrayValue = record(input.arrayValue); if (input.arrayValue) return array(arrayValue.values).slice(0, 1000).map((item) => attributeValue(item, depth + 1)); const kvlistValue = record(input.kvlistValue); if (input.kvlistValue) return attributes(array(kvlistValue.values)); return {}; }
-function traceSummary(input: unknown) { const trace = record(input); const traceId = text(trace.traceID); if (!/^[a-fA-F0-9]{16,32}$/.test(traceId)) return null; const spanSets = array(trace.spanSets); const spanSet = record(trace.spanSet); const matched = spanSets.reduce((sum, item) => sum + boundedNumber(record(item).matched, 0, 1_000_000, 0), 0) || boundedNumber(spanSet.matched, 0, 1_000_000, 0); return { traceId, rootServiceName: text(trace.rootServiceName) || 'unknown', rootTraceName: text(trace.rootTraceName) || 'trace', startTimeUnixNano: text(trace.startTimeUnixNano), durationMs: boundedNumber(trace.durationMs, 0, 86_400_000, 0), spanCount: matched, serviceStats: isRecord(trace.serviceStats) ? trace.serviceStats : {} }; }
+function traceSummary(input: unknown) { const trace = record(input); const traceId = text(trace.traceID); if (!/^[a-fA-F0-9]{16,32}$/.test(traceId)) return null; const spanSets = array(trace.spanSets); const spanSet = record(trace.spanSet); const matched = spanSets.reduce<number>((sum, item) => sum + boundedNumber(record(item).matched, 0, 1_000_000, 0), 0) || boundedNumber(spanSet.matched, 0, 1_000_000, 0); return { traceId, rootServiceName: text(trace.rootServiceName) || 'unknown', rootTraceName: text(trace.rootTraceName) || 'trace', startTimeUnixNano: text(trace.startTimeUnixNano), durationMs: boundedNumber(trace.durationMs, 0, 86_400_000, 0), spanCount: matched, serviceStats: isRecord(trace.serviceStats) ? trace.serviceStats : {} }; }
 function isRecord(value: unknown): value is Record<string, unknown> { return !!value && typeof value === 'object' && !Array.isArray(value); }
 function record(value: unknown): Record<string, unknown> { return isRecord(value) ? value : {}; }
 function array(value: unknown): unknown[] { return Array.isArray(value) ? value : []; }

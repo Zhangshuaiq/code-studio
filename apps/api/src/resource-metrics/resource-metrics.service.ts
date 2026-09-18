@@ -1,27 +1,21 @@
 import { BadGatewayException, BadRequestException, Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { DeployTargetService } from '../deploy/deploy-target.service';
+import { MonitoringConfigService } from '../monitoring-config/monitoring-config.service';
 
 type PrometheusValue = [number, string];
 type PrometheusSeries = { metric: Record<string, string>; values?: PrometheusValue[] };
 
 @Injectable()
 export class ResourceMetricsService {
-  private readonly url: string;
-  private readonly headers: Record<string, string>;
   private readonly maxResponseBytes: number;
-  constructor(config: ConfigService, private readonly targets: DeployTargetService) {
-    this.url = config.get<string>('PROMETHEUS_URL', 'http://prometheus:9090').replace(/\/$/, '');
-    const token = config.get<string>('PROMETHEUS_BEARER_TOKEN', '');
-    const username = config.get<string>('PROMETHEUS_USERNAME', '');
-    const password = config.get<string>('PROMETHEUS_PASSWORD', '');
+  constructor(config: ConfigService, private readonly targets: DeployTargetService, private readonly monitoring: MonitoringConfigService) {
     this.maxResponseBytes = Number(config.get('PROMETHEUS_MAX_RESPONSE_BYTES', 10 * 1024 * 1024));
-    this.headers = token ? { authorization: `Bearer ${token}` } : username ? { authorization: `Basic ${Buffer.from(`${username}:${password}`).toString('base64')}` } : {};
   }
 
   async health() {
     const started = Date.now();
-    try { const response = await fetch(`${this.url}/-/ready`, { headers: this.headers, signal: AbortSignal.timeout(2000) }); return { available: response.ok, latencyMs: Date.now() - started, ...(response.ok ? {} : { error: `HTTP ${response.status}` }) }; }
+    try { const connection = await this.monitoring.resolve('prometheus'); if (!connection.enabled || !connection.configured) return { available: false, disabled: true, configured: false, latencyMs: 0 }; const response = await fetch(`${connection.url}/-/ready`, { headers: connection.headers, signal: AbortSignal.timeout(2000) }); return { available: response.ok, configured: true, latencyMs: Date.now() - started, ...(response.ok ? {} : { error: `HTTP ${response.status}` }) }; }
     catch (error) { return { available: false, latencyMs: Date.now() - started, error: (error as Error).message }; }
   }
 
@@ -116,7 +110,9 @@ export class ResourceMetricsService {
   }
 
   private async prometheus(path: string, source?: { url: string; headers: Record<string, string> }): Promise<unknown> {
-    const response = await fetch(`${source?.url || this.url}${path}`, { headers: source?.headers || this.headers, signal: AbortSignal.timeout(10_000) });
+    const connection = source ? null : await this.monitoring.resolve('prometheus');
+    if (!source && (!connection?.enabled || !connection.configured)) throw new BadRequestException('性能监控尚未配置');
+    const response = await fetch(`${source?.url || connection!.url}${path}`, { headers: source?.headers || connection!.headers, signal: AbortSignal.timeout(10_000) });
     const declaredSize = Number(response.headers.get('content-length') || 0);
     if (declaredSize > this.maxResponseBytes) { await response.body?.cancel(); throw new BadGatewayException('Prometheus 响应超过平台大小限制'); }
     const textBody = await readLimitedText(response, this.maxResponseBytes);

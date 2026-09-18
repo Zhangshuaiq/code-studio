@@ -1,0 +1,105 @@
+{{- if .Values.agentWorker.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "codegen.fullname" . }}-agent-worker
+  labels:
+    {{- include "codegen.labels" . | nindent 4 }}
+    app.kubernetes.io/component: agent-worker
+spec:
+  revisionHistoryLimit: {{ .Values.worker.revisionHistoryLimit }}
+  progressDeadlineSeconds: {{ .Values.worker.progressDeadlineSeconds }}
+  {{- if not .Values.agentWorker.autoscaling.enabled }}
+  replicas: {{ .Values.agentWorker.replicaCount }}
+  {{- end }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: { maxUnavailable: 0, maxSurge: 1 }
+  selector:
+    matchLabels:
+      {{- include "codegen.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: agent-worker
+  template:
+    metadata:
+      labels:
+        {{- include "codegen.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: agent-worker
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- if not .Values.secrets.existingSecret }}
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "codegen.serviceAccountName" . }}
+      automountServiceAccountToken: {{ eq .Values.runtime.generationExecutor "kubernetes" }}
+      terminationGracePeriodSeconds: 1800
+      imagePullSecrets: {{ toYaml .Values.imagePullSecrets | nindent 8 }}
+      securityContext:
+        seccompProfile: { type: RuntimeDefault }
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        fsGroupChangePolicy: OnRootMismatch
+      containers:
+        - name: agent-worker
+          image: "{{ .Values.worker.image.repository }}:{{ .Values.worker.image.tag }}"
+          imagePullPolicy: {{ .Values.worker.image.pullPolicy }}
+          command: ["node", "--require", "./apps/api/dist/instrumentation.js", "apps/api/dist/agent-worker-main.js"]
+          envFrom:
+            - configMapRef: { name: {{ include "codegen.fullname" . }} }
+            - secretRef: { name: {{ include "codegen.secretName" . }} }
+          env:
+            - { name: PROCESS_ROLE, value: agent-worker }
+            - { name: BUILD_IMAGE, value: "{{ .Values.worker.image.repository }}:{{ .Values.worker.image.tag }}" }
+            - { name: AGENT_WORKER_HEALTH_PORT, value: {{ .Values.service.agentWorkerHealthPort | quote }} }
+            - { name: AGENT_WORKER_CONCURRENCY, value: {{ .Values.agentWorker.concurrency | quote }} }
+            - { name: OTEL_SERVICE_NAME, value: codegen-agent-worker }
+          ports:
+            - { name: health, containerPort: {{ .Values.service.agentWorkerHealthPort }}, protocol: TCP }
+          startupProbe:
+            httpGet: { path: /health/live, port: health }
+            failureThreshold: 30
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /health/live, port: health }
+            periodSeconds: 15
+          readinessProbe:
+            httpGet: { path: /health/ready, port: health }
+            periodSeconds: 10
+            timeoutSeconds: 5
+          resources:
+            {{- toYaml .Values.agentWorker.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+            readOnlyRootFilesystem: false
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+          volumeMounts:
+            - { name: workspace, mountPath: /data }
+      volumes:
+        - name: workspace
+          {{- if .Values.persistence.enabled }}
+          persistentVolumeClaim: { claimName: {{ include "codegen.workspaceClaim" . }} }
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector: {{ toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations: {{ toYaml . | nindent 8 }}
+      {{- end }}
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    {{- include "codegen.selectorLabels" . | nindent 20 }}
+                    app.kubernetes.io/component: agent-worker
+{{- end }}

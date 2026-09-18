@@ -11,6 +11,7 @@ import { WorkspaceService } from '../workspace/workspace.service';
 export interface GenerationWorkspace {
   volumePath: string;
   runtime: ProjectRuntime;
+  verificationAvailable: boolean;
 }
 
 export interface GenerationExecResult extends ExecResult {
@@ -40,7 +41,7 @@ export type GenerationFailureCode =
 @Injectable()
 export class GenerationExecutorService {
   private readonly logger = new Logger(GenerationExecutorService.name);
-  private readonly mode: 'docker' | 'kubernetes';
+  private readonly mode: 'docker' | 'kubernetes' | 'local';
   private batchApi?: k8s.BatchV1Api;
   private coreApi?: k8s.CoreV1Api;
 
@@ -50,13 +51,13 @@ export class GenerationExecutorService {
     private readonly workspaces: WorkspaceService,
     private readonly sandbox: SandboxService,
   ) {
-    this.mode = this.config.get('GENERATION_EXECUTOR', 'kubernetes');
+    this.mode = this.config.get('GENERATION_EXECUTOR', 'local');
   }
 
   async prepare(sessionId: string): Promise<GenerationWorkspace> {
     if (this.mode === 'docker') {
       const handle = await this.sandbox.ensureSandbox(sessionId);
-      return { volumePath: handle.volumePath, runtime: handle.runtime };
+      return { volumePath: handle.volumePath, runtime: handle.runtime, verificationAvailable: true };
     }
 
     const session = await this.prisma.session.findUnique({
@@ -72,20 +73,39 @@ export class GenerationExecutorService {
     const runtime = configuredRuntime(declared, (key) =>
       this.config.get<string>(key),
     );
+    if (this.mode === 'local') {
+      return { volumePath: workspace.path, runtime, verificationAvailable: false };
+    }
+    const cluster = await this.health();
+    if (!cluster.available) {
+      if (this.config.get<string>('NODE_ENV') === 'production') {
+        throw new BadRequestException('Kubernetes 集群不可用，无法执行生产环境生成任务');
+      }
+      this.logger.warn('Kubernetes 集群不可用：降级为本机工作区编码，跳过容器构建和预览');
+      return { volumePath: workspace.path, runtime, verificationAvailable: false };
+    }
     this.workspaceSubPath(workspace.path);
-    this.clients();
-    return { volumePath: workspace.path, runtime };
+    return { volumePath: workspace.path, runtime, verificationAvailable: true };
   }
 
   async health() {
+    if (this.mode === 'local') {
+      return { available: true, kind: 'local', verificationAvailable: false };
+    }
     if (this.mode === 'docker') {
       return { ...(await this.sandbox.health()), kind: 'docker' };
     }
     const startedAt = Date.now();
     const namespace = this.config.get('K8S_GENERATION_NAMESPACE', 'default');
+    let timeout: NodeJS.Timeout | undefined;
     try {
       const { batchApi } = this.clients();
-      await batchApi.listNamespacedJob({ namespace, limit: 1 });
+      await Promise.race([
+        batchApi.listNamespacedJob({ namespace, limit: 1 }),
+        new Promise<never>((_, reject) => {
+          timeout = setTimeout(() => reject(new Error('Kubernetes 健康检查超时')), 2_000);
+        }),
+      ]);
       return {
         available: true,
         kind: 'kubernetes',
@@ -100,6 +120,8 @@ export class GenerationExecutorService {
         latencyMs: Date.now() - startedAt,
         error: (error as Error).message,
       };
+    } finally {
+      if (timeout) clearTimeout(timeout);
     }
   }
 
@@ -109,6 +131,9 @@ export class GenerationExecutorService {
     signal?: AbortSignal,
     options: { taskId?: string; onOutput?: (chunk: string) => void } = {},
   ): Promise<GenerationExecResult> {
+    if (this.mode === 'local') {
+      throw new BadRequestException('本机编码模式不执行未经隔离的构建命令');
+    }
     if (this.mode === 'docker') {
       const result = await this.sandbox.exec(sessionId, cmd, signal);
       return {

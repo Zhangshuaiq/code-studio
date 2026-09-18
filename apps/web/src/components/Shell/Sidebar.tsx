@@ -98,6 +98,7 @@ const NAV: NavItem[] = [
     section: "配置中心",
     children: [
       { to: "/settings/models", icon: Cpu, label: "模型", anyOf: [ACCESS.models] },
+      { to: "/settings/monitoring", icon: Gauge, label: "监控与日志", anyOf: [ACCESS.systemSettings] },
       { to: "/settings/account", icon: User, label: "账户" },
     ],
   },

@@ -16,6 +16,7 @@ import { ensureScaffold } from '../sandbox/scaffold';
 import { ClaudeAgentProvider } from './providers/claude-agent.provider';
 import { SimpleLlmProvider } from './providers/simple-llm.provider';
 import { AiderProvider } from './providers/aider.provider';
+import { CodexProvider } from './providers/codex.provider';
 import {
   AgentEvent,
   GenerationProvider,
@@ -58,6 +59,7 @@ export class AgentService {
     private readonly claudeAgent: ClaudeAgentProvider,
     private readonly simpleLlm: SimpleLlmProvider,
     private readonly aider: AiderProvider,
+    private readonly codex: CodexProvider,
   ) {}
 
   /**
@@ -67,6 +69,8 @@ export class AgentService {
    * 无 BYOK 配置时（credential 为空）回退 .env 的 AGENT_PROVIDER，便于本地调试。
    */
   private provider(cred?: ModelCredential): GenerationProvider {
+    if (cred?.engine === 'codex') return this.codex;
+    if (cred?.engine === 'claude-code' || cred?.engine === 'deepseek-agent' || cred?.engine === 'glm-agent') return this.claudeAgent;
     if (cred?.engine === 'aider') return this.aider;
     if (!cred && this.config.get<string>('AGENT_PROVIDER') === 'claude-agent')
       return this.claudeAgent;
@@ -95,10 +99,14 @@ export class AgentService {
     const credentials = await this.modelConfigs.resolveForGeneration(
       userId,
       session.modelConfigId,
+      session.modelName,
     );
     signal?.throwIfAborted();
 
     const handle = await this.executor.prepare(sessionId);
+    if (!handle.verificationAvailable) {
+      onEvent?.({ kind: 'system', text: '当前未连接集群：可继续编码，自动构建验证和预览暂不可用' });
+    }
     const task = queuedTaskId
       ? await this.prisma.task.update({
           where: { id: queuedTaskId },
@@ -118,12 +126,17 @@ export class AgentService {
       session.project.remote?.branch || 'main',
     );
 
+    const agentEngine = ['codex', 'claude-code', 'deepseek-agent', 'glm-agent'].includes(credentials.engine);
+    const contextPrefix = `${credentials.engine}:${credentials.model}:`;
+    const resumeId = agentEngine && session.agentContextId?.startsWith(contextPrefix)
+      ? session.agentContextId.slice(contextPrefix.length)
+      : undefined;
     const result = await this.provider(credentials).generate({
       userId,
       prompt,
       cwd: handle.volumePath,
       runtime: handle.runtime,
-      resumeId: session.agentContextId ?? undefined,
+      resumeId,
       credentials,
       onEvent,
       signal,
@@ -140,6 +153,9 @@ export class AgentService {
       else if (e.kind === 'system') log += `\n${e.text ?? ''}`;
     }
     log = log.trim();
+    if (!handle.verificationAvailable) {
+      log += '\n\n⚠ 当前未连接集群：已保存代码，未执行自动构建验证或预览。';
+    }
 
     let status: RunResult['status'] = result.isError ? 'failed' : 'succeeded';
 
@@ -178,6 +194,7 @@ export class AgentService {
     if (
       status === 'succeeded' &&
       verify &&
+      handle.verificationAvailable &&
       handle.runtime.category !== 'mobile' &&
       handle.runtime.buildCommand
     ) {
@@ -225,7 +242,7 @@ export class AgentService {
       }),
       this.prisma.session.update({
         where: { id: sessionId },
-        data: { agentContextId: result.contextId ?? session.agentContextId },
+        data: { agentContextId: agentEngine && result.contextId ? `${contextPrefix}${result.contextId}` : session.agentContextId },
       }),
     ]);
 
@@ -235,7 +252,7 @@ export class AgentService {
     const previewable =
       handle.runtime.preview.kind === 'web-dev-server' ||
       handle.runtime.preview.kind === 'http-service';
-    if (status === 'succeeded' && autoPreview && previewable) {
+    if (status === 'succeeded' && autoPreview && previewable && handle.verificationAvailable) {
       this.preview.start(userId, sessionId).catch((err) => {
         this.logger.warn(`自动预览启动失败 session=${sessionId}: ${err}`);
       });

@@ -298,7 +298,9 @@ export class KafkaService {
     const mechanism = this.config.get<string>('KAFKA_SASL_MECHANISM', 'plain');
     const username = this.config.get<string>('KAFKA_SASL_USERNAME', '');
     const password = this.config.get<string>('KAFKA_SASL_PASSWORD', '');
-    const sasl = username && password ? { mechanism: mechanism as 'plain' | 'scram-sha-256' | 'scram-sha-512', username, password } : undefined;
+    const sasl = username && password
+      ? { mechanism, username, password } as KafkaConfig['sasl']
+      : undefined;
     const sslEnabled = this.config.get('KAFKA_SSL', 'true') === 'true';
     const ca = this.config.get<string>('KAFKA_SSL_CA', '');
     const cert = this.config.get<string>('KAFKA_SSL_CERT', '');
@@ -337,6 +339,7 @@ function numericConfig(value: string | null | undefined, fallback: number) {
 function decodeMemberAssignment(value: Buffer) {
   try {
     const decoded = AssignerProtocol.MemberAssignment.decode(value);
+    if (!decoded) return [] as Array<{ topic: string; partitions: number[] }>;
     return Object.entries(decoded.assignment).map(([topic, partitions]) => ({ topic, partitions }));
   } catch {
     return [] as Array<{ topic: string; partitions: number[] }>;

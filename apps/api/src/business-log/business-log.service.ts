@@ -578,7 +578,10 @@ export class BusinessLogService
       dto.projectId,
     );
     const aggs = response.aggregations ?? {};
-    const total = Number(response.hits?.total?.value ?? response.hits?.total ?? 0);
+    const hitsTotal = response.hits?.total;
+    const total = Number(
+      typeof hitsTotal === "number" ? hitsTotal : hitsTotal?.value ?? 0,
+    );
     const successful = Number(aggs.successful?.doc_count ?? 0);
     const failed = Number(aggs.failed?.doc_count ?? 0);
     const rate = (ok: number, count: number) => count ? (ok / count) * 100 : 0;
@@ -950,6 +953,10 @@ export class BusinessLogService
   }
 
   async getHealth() {
+    const connection = await this.openSearch.connectionStatus();
+    if (!connection.enabled || !connection.configured) {
+      return { available: false, disabled: true, configured: false, source: connection.source };
+    }
     try {
       const [health, indices] = await Promise.all([
         this.openSearch.health(),

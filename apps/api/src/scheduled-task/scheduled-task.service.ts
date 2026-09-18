@@ -68,7 +68,7 @@ export class ScheduledTaskService implements OnModuleInit, OnModuleDestroy {
   async createTask(input: CreateScheduledTaskDto, user: AuthUser) {
     const handler = await this.prisma.javaTaskHandler.findUnique({ where: { id: requiredText(input.handlerId, '任务方法') }, include: { application: true } });
     if (!handler || !handler.enabled || !handler.application.enabled) throw new NotFoundException({ code: 'JAVA_TASK_HANDLER_UNAVAILABLE', message: 'Java 任务方法不存在或已停用' });
-    const scheduleType = ['immediate', 'once', 'cron'].includes(input.scheduleType) ? input.scheduleType : 'immediate';
+    const scheduleType = ['immediate', 'once', 'cron'].includes(input.scheduleType ?? '') ? input.scheduleType! : 'immediate';
     const timezone = optionalText(input.timezone) || 'Asia/Shanghai';
     let executeAt: Date | null = null; let cronExpression: string | null = null; let nextRunAt: Date | null = null;
     if (scheduleType === 'once') { executeAt = validFutureDate(input.executeAt); nextRunAt = executeAt; }
@@ -151,7 +151,10 @@ export class ScheduledTaskService implements OnModuleInit, OnModuleDestroy {
       const running = await this.prisma.javaTaskExecution.findFirst({ where: { taskId: task.id, status: { in: ['queued', 'running'] } } });
       if (running) throw new ConflictException({ code: 'SCHEDULED_TASK_ALREADY_RUNNING', message: '已有任务实例正在执行' });
     }
-    return this.prisma.javaTaskExecution.create({ data: { taskId: task.id, triggerType, parametersSnapshot: task.parameters, handlerVersion: task.handler.version, scheduledAt: new Date(), traceId: randomUUID() } });
+    const parametersSnapshot = task.parameters === null
+      ? Prisma.JsonNull
+      : task.parameters as Prisma.InputJsonValue;
+    return this.prisma.javaTaskExecution.create({ data: { taskId: task.id, triggerType, parametersSnapshot, handlerVersion: task.handler.version, scheduledAt: new Date(), traceId: randomUUID() } });
   }
   private async enqueueExecution(executionId: string, maxRetries: number) {
     try {

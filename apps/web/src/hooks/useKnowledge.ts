@@ -88,7 +88,10 @@ export function useKnowledgeMutations(teamId?: string) {
         title?: string;
         folderId?: string | null;
       }) => api.patch(`/knowledge/documents/${id}`, body),
-      onSuccess: refresh,
+      onSuccess: (_, input) => {
+        void refresh();
+        void qc.invalidateQueries({ queryKey: ["knowledge-document", input.id] });
+      },
     }),
     saveDocument: useMutation({
       mutationFn: ({

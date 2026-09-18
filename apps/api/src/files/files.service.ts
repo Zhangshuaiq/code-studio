@@ -5,10 +5,8 @@ import {
 } from '@nestjs/common';
 import { readdir, readFile, writeFile, mkdir, stat } from 'fs/promises';
 import { dirname, join, relative, resolve, sep } from 'path';
-import { PrismaService } from '../prisma/prisma.service';
 import { ProjectAccessService } from '../project-access/project-access.service';
 import { WorkspaceService } from '../workspace/workspace.service';
-import { DistributedWorkspaceLockService } from '../workspace/distributed-workspace-lock.service';
 import { ConfigService } from '@nestjs/config';
 import {
   assertWorkspaceChanges,
@@ -43,10 +41,8 @@ const SOURCE_EXTENSIONS = new Set(['js', 'jsx', 'mjs', 'cjs', 'ts', 'tsx', 'json
 @Injectable()
 export class FilesService {
   constructor(
-    private readonly prisma: PrismaService,
     private readonly access: ProjectAccessService,
     private readonly workspaces: WorkspaceService,
-    private readonly workspaceLock: DistributedWorkspaceLockService,
     private readonly config: ConfigService,
   ) {}
 
@@ -191,11 +187,9 @@ export class FilesService {
     path: string,
     content: string,
   ): Promise<{ path: string; bytes: number }> {
-    const session = await this.access.requireSession(userId, sessionId, 'edit');
+    await this.access.requireSession(userId, sessionId, 'edit');
     const root = await this.volumeRoot(userId, sessionId);
-    return this.workspaceLock.runExclusive(`workspace:${session.projectId}:${userId}`, () =>
-      this.writeUnlocked(root, path, content),
-    );
+    return this.writeUnlocked(root, path, content);
   }
 
   private async writeUnlocked(

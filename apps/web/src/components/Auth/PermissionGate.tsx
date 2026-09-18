@@ -8,6 +8,16 @@ export function PermissionGate({ anyOf, children }: { anyOf: readonly string[]; 
   const me = useMe();
   const navigate = useNavigate();
   if (me.isLoading) return <div className="grid h-full place-items-center text-sm text-muted">正在校验权限…</div>;
+  if (me.isError) {
+    return (
+      <div className="card mx-auto mt-20 max-w-md px-8 py-12 text-center">
+        <Shield size={28} className="mx-auto text-amber-500" />
+        <p className="mt-5 text-base font-bold">暂时无法校验权限</p>
+        <p className="mt-1 text-xs text-muted">后端服务不可用或请求失败，请稍后重试。</p>
+        <button onClick={() => void me.refetch()} className="btn btn-primary btn-sm mt-4">重新校验</button>
+      </div>
+    );
+  }
   if (!hasAnyAccess(me.data?.permissions ?? [], anyOf)) {
     return (
       <div className="card mx-auto mt-20 max-w-md px-8 py-12 text-center">

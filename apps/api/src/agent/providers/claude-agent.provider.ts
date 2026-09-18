@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import { AgentCredentialResolver } from '../credential-resolver';
+import { AgentRuntimeStateService } from '../agent-runtime-state.service';
 import type { ProjectRuntime } from '../../sandbox/language-runtime';
 import { isAbsolute, relative, resolve } from 'path';
 import {
@@ -26,14 +27,28 @@ export class ClaudeAgentProvider implements GenerationProvider {
   constructor(
     private readonly config: ConfigService,
     private readonly credentials: AgentCredentialResolver,
+    private readonly state: AgentRuntimeStateService,
   ) {}
 
   async generate(input: GenerationInput): Promise<GenerationResult> {
     const { userId, prompt, cwd, runtime, resumeId, onEvent, signal } = input;
     signal?.throwIfAborted();
-    const cred = await this.credentials.resolve(userId);
+    const apiAgent = ['claude-code', 'deepseek-agent', 'glm-agent'].includes(input.credentials?.engine || '');
+    const cred = apiAgent
+      ? { env: {
+          ...(input.credentials!.engine === 'glm-agent' || input.credentials!.engine === 'claude-code'
+            ? { ANTHROPIC_API_KEY: input.credentials!.apiKey }
+            : { ANTHROPIC_AUTH_TOKEN: input.credentials!.apiKey }),
+          ANTHROPIC_BASE_URL: input.credentials!.baseUrl,
+        }, source: 'user' as const }
+      : await this.credentials.resolve(userId);
 
-    const childEnv = restrictedChildEnvironment(cred.env);
+    const localHostLogin = this.config.get<string>('AGENT_USE_HOST_LOGIN') === 'true' &&
+      this.config.get<string>('NODE_ENV') !== 'production';
+    const stateTool = input.credentials?.engine === 'deepseek-agent' ? 'deepseek-api'
+      : input.credentials?.engine === 'glm-agent' ? 'glm-api' : apiAgent ? 'claude-api' : 'claude';
+    const configDir = localHostLogin && !apiAgent ? undefined : await this.state.home(userId, stateTool);
+    const childEnv = restrictedChildEnvironment({ ...cred.env, CLAUDE_CONFIG_DIR: configDir });
     for (const k of ['ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN']) {
       if (!childEnv[k]) delete childEnv[k];
     }
@@ -68,7 +83,7 @@ export class ClaudeAgentProvider implements GenerationProvider {
         prompt,
         options: {
           cwd,
-          model: this.config.get<string>('AGENT_MODEL', 'claude-opus-4-8'),
+          model: apiAgent ? input.credentials!.model : this.config.get<string>('AGENT_MODEL', 'claude-opus-4-8'),
           systemPrompt: {
             type: 'preset',
             preset: 'claude_code',

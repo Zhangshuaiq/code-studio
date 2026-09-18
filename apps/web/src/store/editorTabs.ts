@@ -117,7 +117,7 @@ export const useEditorTabs = create<TabState>((set) => ({
     set((state) => ({
       drafts: {
         ...state.drafts,
-        [path]: { content, baseline: content },
+        [path]: { content: state.drafts[path]?.content ?? content, baseline: content },
       },
     })),
 

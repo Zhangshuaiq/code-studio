@@ -17,7 +17,7 @@ export class PreviewRoutingService {
     if (left.length !== right.length || !timingSafeEqual(left, right)) throw new UnauthorizedException({ code: 'PREVIEW_ROUTING_UNAUTHORIZED', message: '路由控制面凭证无效' });
   }
 
-  async sync(previewInstanceId: string, status: string, detail?: { requirementId?: string | null; serviceKey?: string | null; targetId?: string | null; namespace?: string; serviceName?: string; port?: number; publicUrl?: string | null }, actorId?: string) {
+  async sync(previewInstanceId: string, status: string, detail?: { requirementId?: string | null; serviceKey?: string | null; targetId?: string | null; namespace?: string; serviceName?: string; port?: number; publicUrl?: string | null }, actorId?: string): Promise<void> {
     if (status !== 'ready' || !detail?.requirementId || !detail.serviceKey || !detail.targetId || !detail.namespace || !detail.serviceName || !detail.port) {
       const current = await this.prisma.requirementRouteEndpoint.findUnique({ where: { previewInstanceId }, select: { requirementId: true, serviceKey: true } });
       await this.prisma.$transaction([
@@ -50,7 +50,10 @@ export class PreviewRoutingService {
       && /^[a-z0-9]([-a-z0-9]*[a-z0-9])?$/.test(detail.serviceName)
       && detail.serviceName.length <= 63
       && Number.isInteger(detail.port) && detail.port >= 1 && detail.port <= 65535;
-    if (!canonical) return this.sync(previewInstanceId, 'invalid');
+    if (!canonical) {
+      await this.sync(previewInstanceId, 'invalid');
+      return;
+    }
     const configuredLeaseSeconds = Number(this.config.get('PREVIEW_ROUTE_LEASE_SECONDS', 90));
     const leaseSeconds = Number.isInteger(configuredLeaseSeconds) ? Math.min(300, Math.max(30, configuredLeaseSeconds)) : 90;
     const data = { requirementId: instance.requirementId!, serviceKey: instance.serviceKey!, targetId: instance.targetId!, namespace: detail.namespace, serviceName: detail.serviceName, port: detail.port, endpointUrl: `http://${detail.serviceName}.${detail.namespace}.svc.cluster.local:${detail.port}`, publicUrl: detail.publicUrl || null, leaseExpiresAt: new Date(Date.now() + leaseSeconds * 1_000) };

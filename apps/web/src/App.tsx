@@ -25,7 +25,6 @@ import { HistoryPanel } from "./components/HistoryPanel/HistoryPanel";
 import { BranchControl } from "./components/SourceControl/BranchControl";
 import { LogPanel } from "./components/LogPanel/LogPanel";
 import { LoginForm } from "./components/Auth/LoginForm";
-import { ModelSwitcher } from "./components/ModelSettings/ModelSwitcher";
 import { EditorTabs } from "./components/EditorTabs/EditorTabs";
 import { useEditorTabs } from "./store/editorTabs";
 import { SettingsLayout } from "./components/Settings/SettingsLayout";
@@ -50,6 +49,7 @@ const ModelsPage = lazy(() => import("./components/Settings/ModelsPage").then((m
 const DeployTargetsPage = lazy(() => import("./components/Settings/DeployTargetsPage").then((m) => ({ default: m.DeployTargetsPage })));
 const RegistriesPage = lazy(() => import("./components/Settings/RegistriesPage").then((m) => ({ default: m.RegistriesPage })));
 const AccountPage = lazy(() => import("./components/Settings/AccountPage").then((m) => ({ default: m.AccountPage })));
+const MonitoringConfigPage = lazy(() => import("./components/Settings/MonitoringConfigPage").then((m) => ({ default: m.MonitoringConfigPage })));
 const UsersPage = lazy(() => import("./components/Admin/UsersPage").then((m) => ({ default: m.UsersPage })));
 const RolesPage = lazy(() => import("./components/Admin/RolesPage").then((m) => ({ default: m.RolesPage })));
 const AuditPage = lazy(() => import("./components/Admin/AuditPage").then((m) => ({ default: m.AuditPage })));
@@ -115,6 +115,7 @@ export default function App() {
         <Route path="/settings" element={<SettingsLayout />}>
           <Route index element={<Navigate to="account" replace />} />
           <Route path="models" element={<PermissionGate anyOf={[ACCESS.models]}><ModelsPage /></PermissionGate>} />
+          <Route path="monitoring" element={<PermissionGate anyOf={[ACCESS.systemSettings]}><MonitoringConfigPage /></PermissionGate>} />
           <Route
             path="deploy-targets"
             element={<Navigate to="/resources/targets" replace />}
@@ -222,6 +223,8 @@ function WorkspacePage() {
         <div className="h-full">
           <ChatPanel
             sessionId={sessionId}
+            initialModelConfigId={session.data?.modelConfigId}
+            initialModelName={session.data?.modelName}
             onGenerated={handleGenerated}
             readOnly={project.data?.accessRole === "viewer"}
           />
@@ -302,7 +305,6 @@ function WorkspacePage() {
                     <ScrollText size={14} />
                     <span className="hidden 2xl:inline">日志</span>
                   </button>
-                  <ModelSwitcher sessionId={sessionId} />
                 </div>
               </div>
 
