@@ -35,6 +35,7 @@ export function CodeEditor({
   const baseline = draftState?.baseline ?? data?.content ?? "";
   const [formatting, setFormatting] = useState(false);
   const [formatErr, setFormatErr] = useState("");
+  const [saveErr, setSaveErr] = useState("");
   const [autoFormat, setAutoFormat] = useState(
     () => localStorage.getItem("autoFormat") !== "false", // 默认开
   );
@@ -51,6 +52,7 @@ export function CodeEditor({
   autoFormatRef.current = autoFormat;
   const monacoRef = useRef<any>(null);
   const editorRef = useRef<any>(null);
+  const savingRef = useRef(false);
 
   useEffect(() => {
     if (!monacoRef.current || !sessionId || !sourceIndex.data) return;
@@ -90,15 +92,17 @@ export function CodeEditor({
 
     loadedPath.current = data.path;
     setFormatErr("");
+    setSaveErr("");
     const p = data.path;
     // 切回一个仍有未保存草稿的文件时，直接恢复草稿，不用磁盘内容覆盖。
     if (userDirty) return;
     if (!readOnly && autoFormatRef.current && canFormat(p)) {
       formatCode(data.content, p)
-        .then((f) => {
-          syncDraft(p, f);
+        .then(async (f) => {
+          syncDraft(p, data.content);
           if (f !== data.content) {
-            save.mutate({ path: p, content: f });
+            setDraftContent(p, f);
+            await saveFile(p, f);
           }
         })
         .catch(() => {
@@ -107,7 +111,7 @@ export function CodeEditor({
     } else {
       syncDraft(p, data.content);
     }
-  }, [data, save, readOnly, syncDraft]);
+  }, [data, readOnly, syncDraft, setDraftContent]);
 
   const dirty = draft !== baseline;
 
@@ -120,14 +124,28 @@ export function CodeEditor({
     }
   }, [path]);
 
+  async function saveFile(filePath: string, content: string) {
+    if (savingRef.current) return;
+    savingRef.current = true;
+    setSaveErr("");
+    try {
+      await save.mutateAsync({ path: filePath, content });
+      markDraftSaved(filePath, content);
+    } catch (error) {
+      const timedOut = (error as { code?: string })?.code === "ECONNABORTED";
+      setSaveErr(timedOut ? "请求超时；请确认服务连接后重试，草稿仍保留" : errText(error));
+    } finally {
+      savingRef.current = false;
+    }
+  }
+
   function doSave() {
     if (readOnly) return;
     const p = pathRef.current;
     const stored = p ? useEditorTabs.getState().drafts[p] : undefined;
     if (p && stored && stored.content !== stored.baseline) {
       const content = stored.content;
-      save.mutate({ path: p, content });
-      markDraftSaved(p, content);
+      void saveFile(p, content);
     }
   }
 
@@ -302,6 +320,7 @@ export function CodeEditor({
             格式化失败
           </span>
         )}
+        {saveErr && <span className="max-w-48 truncate text-[10px] text-red-500" title={saveErr}>保存失败：{saveErr}</span>}
         {sourceIndex.data?.truncated && (
           <span
             className="truncate text-[10px] text-amber-600 dark:text-amber-400"

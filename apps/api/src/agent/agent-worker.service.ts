@@ -17,11 +17,18 @@ export class AgentWorkerService implements OnModuleInit, OnModuleDestroy {
   private worker!: Worker<GenerationJob, RunResult>;
   private queue!: Queue<GenerationJob, RunResult>;
   private stopping = false;
+  private delegated = false;
   private readonly closeConnections: Array<() => Promise<void>> = [];
 
   constructor(private readonly config: ConfigService, private readonly prisma: PrismaService, private readonly agent: AgentService, private readonly scheduler: GenerationSchedulerService, private readonly workspaceLock: DistributedWorkspaceLockService, private readonly workspaces: WorkspaceService) {}
 
   async onModuleInit() {
+    if (this.config.get<string>('AGENT_WORKER_DEDICATED') === 'true' &&
+        this.config.get<string>('PROCESS_ROLE') !== 'agent-worker') {
+      this.delegated = true;
+      this.logger.log('编码任务由独立 Agent Worker 领取');
+      return;
+    }
     const queueConnection = createGenerationQueueConnection(this.config);
     const workerConnection = createGenerationQueueConnection(this.config);
     this.queue = new Queue(GENERATION_QUEUE_NAME, { connection: queueConnection.connection });
@@ -82,19 +89,21 @@ export class AgentWorkerService implements OnModuleInit, OnModuleDestroy {
   }
 
   private async reconcileInterruptedTasks() {
-    const tasks = await this.prisma.task.findMany({ where: { status: { in: ['queued', 'running', 'cancelling'] } }, select: { id: true, status: true } });
+    // 多副本下，其他 Pod 可能正在执行 running/cancelling 任务；启动新副本不得改写其状态。
+    // BullMQ 自身负责 stalled job 恢复，这里只处理数据库里有排队记录而 Redis 已无任务的情况。
+    const olderThan = new Date(Date.now() - 60_000);
+    const tasks = await this.prisma.task.findMany({ where: { status: 'queued', createdAt: { lt: olderThan } }, select: { id: true, status: true } });
     for (const task of tasks) {
       const job = await this.queue.getJob(task.id);
-      if (task.status === 'cancelling') {
-        if (job) await job.remove().catch(() => undefined);
-        await this.prisma.task.update({ where: { id: task.id }, data: { status: 'cancelled', resultLog: 'Worker 重启时完成取消', finishedAt: new Date() } });
-        continue;
-      }
-      await this.prisma.task.update({ where: { id: task.id }, data: job ? { status: 'queued', finishedAt: null } : { status: 'failed', resultLog: 'Redis 中不存在对应任务，状态已自动校准。', finishedAt: new Date() } });
+      if (!job) await this.prisma.task.updateMany({
+        where: { id: task.id, status: 'queued' },
+        data: { status: 'failed', resultLog: 'Redis 中不存在对应任务，状态已自动校准。', finishedAt: new Date() },
+      });
     }
   }
 
   async health() {
+    if (this.delegated) return { available: true, status: 'delegated', redisMode: this.config.get<string>('REDIS_MODE', 'standalone') };
     if (this.stopping || !this.worker) {
       return { available: false, status: this.stopping ? 'stopping' : 'starting', redisMode: this.config.get<string>('REDIS_MODE', 'standalone') };
     }

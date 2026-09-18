@@ -82,6 +82,12 @@ export function KnowledgeBasePage() {
   const current = folderId
     ? tree.data?.folders.find((x) => x.id === folderId)
     : undefined;
+  const breadcrumb = [] as Array<{ id: string; name: string }>;
+  let cursor = current;
+  while (cursor) {
+    breadcrumb.unshift({ id: cursor.id, name: cursor.name });
+    cursor = tree.data?.folders.find((x) => x.id === cursor?.parentId);
+  }
   return (
     <main className="h-full overflow-y-auto p-5">
       <div className="mx-auto max-w-6xl">
@@ -103,22 +109,17 @@ export function KnowledgeBasePage() {
             }))}
           />
         </header>
-        <section className="card overflow-hidden">
-          <div className="flex items-center justify-between border-b p-4 dark:border-slate-800">
-            <div className="flex items-center gap-2 text-sm">
+        <section>
+          <div className="mb-5 flex flex-wrap items-center justify-between gap-3">
+            <nav aria-label="当前文件夹" className="flex min-w-0 flex-wrap items-center gap-1.5 text-sm">
               <button
                 className="font-semibold text-indigo-600"
                 onClick={() => setFolderId(undefined)}
               >
                 {tree.data?.team.name || "知识库"}
               </button>
-              {current && (
-                <>
-                  <ChevronRight size={14} />
-                  <span>{current.name}</span>
-                </>
-              )}
-            </div>
+              {breadcrumb.map((item, index) => <span key={item.id} className="flex min-w-0 items-center gap-1.5"><ChevronRight size={14} className="shrink-0 text-muted" /><button className={`max-w-48 truncate ${index === breadcrumb.length - 1 ? "font-semibold" : "text-muted hover:text-indigo-600"}`} onClick={() => setFolderId(item.id)} title={item.name}>{item.name}</button></span>)}
+            </nav>
             <div className="flex gap-2">
               <button
                 className="btn btn-ghost btn-sm"
@@ -138,24 +139,15 @@ export function KnowledgeBasePage() {
               </button>
             </div>
           </div>
-          <div className="divide-y divide-slate-100 dark:divide-slate-800">
-            {folderId && (
-              <button
-                className="flex w-full items-center gap-3 px-5 py-3 text-left text-sm text-muted hover:bg-slate-50 dark:hover:bg-slate-900"
-                onClick={() => setFolderId(current?.parentId || undefined)}
-              >
-                … 返回上级
-              </button>
-            )}
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
             {folders.map((folder) => (
               <button
                 key={folder.id}
-                className="flex w-full items-center gap-3 px-5 py-4 text-left hover:bg-slate-50 dark:hover:bg-slate-900"
+                className="card group flex min-h-32 flex-col justify-between p-5 text-left transition-colors hover:border-indigo-300 hover:bg-indigo-50/40 dark:hover:border-indigo-700 dark:hover:bg-indigo-500/5"
                 onClick={() => setFolderId(folder.id)}
               >
-                <Folder size={18} className="text-amber-500" />
-                <span className="text-sm font-medium">{folder.name}</span>
-                <ChevronRight size={14} className="ml-auto text-muted" />
+                <span className="icon-tile text-indigo-600 dark:text-indigo-300"><Folder size={20} /></span>
+                <span className="flex w-full min-w-0 items-center justify-between gap-2"><span className="truncate text-sm font-semibold" title={folder.name}>{folder.name}</span><ChevronRight size={16} className="shrink-0 text-muted group-hover:text-indigo-600" /></span>
               </button>
             ))}
             {docs.map((doc) => (
@@ -164,22 +156,21 @@ export function KnowledgeBasePage() {
                 href={`/knowledge/documents/${doc.id}`}
                 target="_blank"
                 rel="noopener noreferrer"
-                className="flex items-center gap-3 px-5 py-4 hover:bg-slate-50 dark:hover:bg-slate-900"
+                className="card group flex min-h-32 flex-col justify-between p-5 transition-colors hover:border-indigo-300 hover:bg-indigo-50/40 dark:hover:border-indigo-700 dark:hover:bg-indigo-500/5"
               >
-                <FileText size={18} className="text-indigo-500" />
-                <div>
-                  <div className="text-sm font-medium">{doc.title}</div>
-                  <div className="mt-1 text-[10px] text-muted">
+                <div className="flex items-start justify-between gap-2"><span className="icon-tile text-indigo-600 dark:text-indigo-300"><FileText size={20} /></span><BookOpenText size={16} className="text-muted group-hover:text-indigo-500" /></div>
+                <div className="min-w-0">
+                  <div className="truncate text-sm font-semibold" title={doc.title}>{doc.title}</div>
+                  <div className="mt-1 text-xs text-muted">
                     {doc.requirementId ? "需求文档" : "知识文档"} · v
                     {doc.version} ·{" "}
                     {new Date(doc.updatedAt).toLocaleString("zh-CN")}
                   </div>
                 </div>
-                <BookOpenText size={14} className="ml-auto text-muted" />
               </a>
             ))}
             {!folders.length && !docs.length && (
-              <div className="py-20 text-center text-sm text-muted">
+              <div className="card col-span-full py-20 text-center text-sm text-muted">
                 当前文件夹为空，可以新建文件夹或文档。
               </div>
             )}

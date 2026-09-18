@@ -1,4 +1,4 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../lib/api";
 
 export interface DeployStatus {
@@ -30,6 +30,23 @@ export interface DeployTarget {
   activePreviewInstances: number;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface DeployTargetStatus {
+  state: 'online' | 'offline' | 'disabled';
+  checkedAt: string;
+  message?: string;
+}
+
+export function useDeployTargetStatuses(targets: DeployTarget[]) {
+  return useQueries({
+    queries: targets.map((target) => ({
+      queryKey: ['deploy-target-status', target.id],
+      queryFn: async (): Promise<DeployTargetStatus> => (await api.get(`/deploy-targets/${target.id}/status`)).data,
+      refetchInterval: 10_000,
+      retry: false,
+    })),
+  });
 }
 
 export interface DeployTargetDetail extends DeployTarget {

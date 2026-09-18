@@ -18,7 +18,7 @@ function routeTitle(path: string) {
     ["/health", "平台健康"], ["/database-approvals", "数据库审批"], ["/deployments", "部署中心"],
     ["/scheduled-tasks", "定时任务"],
     ["/resources/targets", "部署目标"], ["/resources/registries", "镜像仓库"],
-    ["/settings/models", "模型配置"], ["/settings/account", "账户设置"],
+    ["/settings/models", "模型配置"], ["/settings/monitoring", "监控与日志"], ["/settings/account", "账户设置"],
     ["/admin/users", "用户管理"], ["/admin/roles", "角色权限"], ["/admin/audit", "审计日志"],
     ["/admin/project-cleanups", "项目任务"],
     ["/admin/task-dlq", "失败任务"], ["/admin/generation-queue", "生成队列"],

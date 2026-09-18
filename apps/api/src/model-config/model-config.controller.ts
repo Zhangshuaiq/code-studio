@@ -36,6 +36,11 @@ export class ModelConfigController {
     return this.configs.findAll(user.id);
   }
 
+  @Get(':id/models')
+  availableModels(@CurrentUser() user: AuthUser, @Param('id') id: string) {
+    return this.configs.availableModels(user.id, id);
+  }
+
   @Patch(':id')
   @Audit('model-config.update', 'model-config')
   update(

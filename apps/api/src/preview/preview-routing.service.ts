@@ -50,7 +50,10 @@ export class PreviewRoutingService {
       && /^[a-z0-9]([-a-z0-9]*[a-z0-9])?$/.test(detail.serviceName)
       && detail.serviceName.length <= 63
       && Number.isInteger(detail.port) && detail.port >= 1 && detail.port <= 65535;
-    if (!canonical) return this.sync(previewInstanceId, 'invalid');
+    if (!canonical) {
+      await this.sync(previewInstanceId, 'invalid');
+      return;
+    }
     const configuredLeaseSeconds = Number(this.config.get('PREVIEW_ROUTE_LEASE_SECONDS', 90));
     const leaseSeconds = Number.isInteger(configuredLeaseSeconds) ? Math.min(300, Math.max(30, configuredLeaseSeconds)) : 90;
     const data = { requirementId: instance.requirementId!, serviceKey: instance.serviceKey!, targetId: instance.targetId!, namespace: detail.namespace, serviceName: detail.serviceName, port: detail.port, endpointUrl: `http://${detail.serviceName}.${detail.namespace}.svc.cluster.local:${detail.port}`, publicUrl: detail.publicUrl || null, leaseExpiresAt: new Date(Date.now() + leaseSeconds * 1_000) };

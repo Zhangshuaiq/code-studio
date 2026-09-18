@@ -60,7 +60,7 @@ export function useSaveFile(sessionId?: string) {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (vars: { path: string; content: string }) =>
-      api.put(`/sessions/${sessionId}/files/content`, vars),
+      api.put(`/sessions/${sessionId}/files/content`, vars, { timeout: 30_000 }),
     onSuccess: (_res, vars) => {
       qc.invalidateQueries({ queryKey: ['file', sessionId, vars.path] });
       qc.invalidateQueries({ queryKey: ['files', sessionId] });

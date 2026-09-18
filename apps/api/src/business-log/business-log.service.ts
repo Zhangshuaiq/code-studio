@@ -951,6 +951,10 @@ export class BusinessLogService
   }
 
   async getHealth() {
+    const connection = await this.openSearch.connectionStatus();
+    if (!connection.enabled || !connection.configured) {
+      return { available: false, disabled: true, configured: false, source: connection.source };
+    }
     try {
       const [health, indices] = await Promise.all([
         this.openSearch.health(),

@@ -42,6 +42,11 @@ export class DeployTargetController {
     return this.targets.get(user.id, id);
   }
 
+  @Get(":id/status")
+  status(@CurrentUser() user: AuthUser, @Param("id") id: string) {
+    return this.targets.status(user.id, id);
+  }
+
   @Delete(":id")
   @RequirePermissions(PERMISSIONS.DEPLOY_TARGET_MANAGE)
   @Audit("deploy-target.delete", "deploy-target")

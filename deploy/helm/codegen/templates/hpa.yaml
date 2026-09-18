@@ -29,6 +29,22 @@ spec:
         name: cpu
         target: { type: Utilization, averageUtilization: {{ .Values.worker.autoscaling.targetCPUUtilizationPercentage }} }
 {{- end }}
+{{- if and .Values.agentWorker.enabled .Values.agentWorker.autoscaling.enabled }}
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "codegen.fullname" . }}-agent-worker
+spec:
+  scaleTargetRef: { apiVersion: apps/v1, kind: Deployment, name: {{ include "codegen.fullname" . }}-agent-worker }
+  minReplicas: {{ .Values.agentWorker.autoscaling.minReplicas }}
+  maxReplicas: {{ .Values.agentWorker.autoscaling.maxReplicas }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target: { type: Utilization, averageUtilization: {{ .Values.agentWorker.autoscaling.targetCPUUtilizationPercentage }} }
+{{- end }}
 {{- if .Values.web.autoscaling.enabled }}
 ---
 apiVersion: autoscaling/v2

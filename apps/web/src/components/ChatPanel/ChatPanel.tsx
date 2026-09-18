@@ -9,10 +9,10 @@ import {
   SendHorizontal,
   RotateCcw,
   Square,
-  Sparkles,
   UserRound,
 } from "lucide-react";
 import { api } from "../../lib/api";
+import { ModelSwitcher } from "../ModelSettings/ModelSwitcher";
 
 export interface ChatMessage {
   id: string;
@@ -28,7 +28,7 @@ const WELCOME: ChatMessage = {
   id: "welcome",
   role: "assistant",
   content:
-    "你好 👋 描述你想构建的应用或接口，我会生成代码、记录版本并自动启动预览。\n\n你也可以继续提出修改，例如「给列表加搜索和筛选」，我会在现有项目上迭代。",
+    "描述你希望完成的开发任务。我会先查看当前项目，再按需修改文件。你可以在下方选择平台和模型。",
 };
 
 // 历史任务 → 对话消息
@@ -52,16 +52,21 @@ function tasksToMessages(tasks: SessionTask[]): ChatMessage[] {
 
 export function ChatPanel({
   sessionId,
+  initialModelConfigId,
+  initialModelName,
   onGenerated,
   readOnly = false,
 }: {
   sessionId?: string;
+  initialModelConfigId?: string | null;
+  initialModelName?: string | null;
   onGenerated?: () => void;
   readOnly?: boolean;
 }) {
   const [messages, setMessages] = useState<ChatMessage[]>([WELCOME]);
   const [input, setInput] = useState("");
   const [running, setRunning] = useState(false);
+  const [modelReady, setModelReady] = useState(false);
   const [activeTaskId, setActiveTaskId] = useState<string>();
   const scrollRef = useRef<HTMLDivElement>(null);
   const qc = useQueryClient();
@@ -93,13 +98,13 @@ export function ChatPanel({
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
     const text = input.trim();
-    if (!text || running || !sessionId || readOnly) return;
+    if (!text || running || !sessionId || readOnly || !modelReady) return;
     setInput("");
     await executePrompt(text);
   }
 
   async function executePrompt(text: string) {
-    if (!text || running || !sessionId || readOnly) return;
+    if (!text || running || !sessionId || readOnly || !modelReady) return;
 
     const userMsg: ChatMessage = {
       id: crypto.randomUUID(),
@@ -168,17 +173,17 @@ export function ChatPanel({
     }
   }
 
-  const disabled = running || !sessionId || readOnly;
+  const disabled = running || !sessionId || readOnly || !modelReady;
 
   return (
-    <div className="flex h-full flex-col bg-gradient-to-b from-white to-slate-50/60 dark:from-slate-900 dark:to-slate-950/50">
-      <header className="panel flex min-h-[58px] items-center gap-3 border-b px-4">
-        <span className="grid h-9 w-9 place-items-center rounded-xl bg-gradient-to-br from-indigo-500 to-violet-600 text-white shadow-[0_8px_18px_-8px_rgba(79,70,229,0.9)]">
-          <Sparkles size={17} />
+    <div className="flex h-full flex-col bg-white dark:bg-slate-950">
+      <header className="flex min-h-[58px] items-center gap-3 border-b border-slate-200 px-4 dark:border-slate-800">
+        <span className="grid h-8 w-8 place-items-center rounded-lg border border-slate-200 bg-slate-50 text-slate-700 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200">
+          <Bot size={17} />
         </span>
         <div className="min-w-0">
           <h2 className="text-sm font-bold text-slate-900 dark:text-white">
-            AI 助手
+            项目对话
           </h2>
           <div className="mt-0.5 flex items-center gap-1.5 text-[10px] text-slate-400">
             <CircleDot
@@ -189,7 +194,7 @@ export function ChatPanel({
               ? "只读成员，可查看历史"
               : running
                 ? "正在执行任务"
-                : "已连接，随时可以开始"}
+                : modelReady ? "就绪" : "请选择模型"}
           </div>
         </div>
       </header>
@@ -205,9 +210,9 @@ export function ChatPanel({
 
       <form
         onSubmit={handleSubmit}
-        className="border-t border-slate-200/80 bg-white/85 p-3 backdrop-blur-xl dark:border-slate-800 dark:bg-slate-900/85"
+        className="border-t border-slate-200/80 bg-white p-3 dark:border-slate-800 dark:bg-slate-950"
       >
-        <div className="rounded-2xl border border-slate-200 bg-white p-2 shadow-[0_10px_30px_-18px_rgba(15,23,42,0.45)] transition focus-within:border-indigo-400 focus-within:ring-4 focus-within:ring-indigo-500/10 dark:border-slate-700 dark:bg-slate-950/70 dark:focus-within:border-indigo-500">
+        <div className="rounded-2xl border border-slate-200 bg-white p-2 shadow-sm transition focus-within:border-slate-400 focus-within:ring-2 focus-within:ring-slate-200/60 dark:border-slate-700 dark:bg-slate-900 dark:focus-within:border-slate-500">
           <textarea
             value={input}
             disabled={readOnly}
@@ -223,15 +228,13 @@ export function ChatPanel({
               readOnly
                 ? "当前项目角色为只读，不能发起代码生成"
                 : sessionId
-                ? "描述你的需求，例如：做一个计数器，点按钮加一…"
+                ? "向智能体描述你的任务…"
                 : "正在准备工作区…"
             }
             className="w-full resize-none bg-transparent px-2 py-1.5 text-sm leading-6 text-slate-800 outline-none placeholder:text-slate-400 dark:text-slate-100 dark:placeholder:text-slate-500"
           />
-          <div className="mt-1 flex items-center justify-between gap-2 px-1">
-            <span className="text-[10px] text-slate-400">
-              Enter 发送 · Shift+Enter 换行
-            </span>
+          <div className="mt-1 flex flex-wrap items-center justify-between gap-2 px-1">
+            <ModelSwitcher sessionId={sessionId} initialConfigId={initialModelConfigId} initialModelName={initialModelName} disabled={running || readOnly} onReady={setModelReady}/>
             {running && activeTaskId ? (
               <button type="button" onClick={cancelTask} className="btn btn-ghost btn-sm shrink-0 rounded-xl px-3" title="取消当前任务"><Square size={12} />取消任务</button>
             ) : (
@@ -242,6 +245,7 @@ export function ChatPanel({
             )}
           </div>
         </div>
+        <p className="mt-1 px-1 text-[10px] text-slate-400">Enter 发送 · Shift+Enter 换行 · 使用个人 API 额度</p>
       </form>
     </div>
   );
@@ -257,7 +261,7 @@ function MessageBubble({ message, onRetry, retryDisabled }: { message: ChatMessa
         className={`mt-0.5 grid h-7 w-7 shrink-0 place-items-center rounded-xl ${
           isUser
             ? "bg-slate-800 text-white dark:bg-slate-700"
-            : "bg-gradient-to-br from-indigo-500 to-violet-600 text-white shadow-sm"
+            : "border border-slate-200 bg-white text-slate-600 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300"
         }`}
       >
         {isUser ? <UserRound size={13} /> : <Bot size={14} />}
@@ -265,8 +269,8 @@ function MessageBubble({ message, onRetry, retryDisabled }: { message: ChatMessa
       <div
         className={`max-w-[85%] whitespace-pre-wrap px-3.5 py-2.5 text-[13px] leading-5 shadow-sm ${
           isUser
-            ? "rounded-2xl rounded-tr-md bg-gradient-to-br from-indigo-600 to-violet-600 text-white shadow-[0_8px_20px_-12px_rgba(79,70,229,0.8)]"
-            : "rounded-2xl rounded-tl-md border border-slate-200/80 bg-white text-slate-700 dark:border-slate-700/80 dark:bg-slate-800/80 dark:text-slate-100"
+            ? "rounded-2xl rounded-tr-md bg-slate-100 text-slate-900 dark:bg-slate-800 dark:text-slate-100"
+            : "rounded-2xl rounded-tl-md text-slate-700 dark:text-slate-100"
         } ${message.pending ? "animate-pulse" : "animate-fade-in"}`}
       >
         <div>{message.content}</div>

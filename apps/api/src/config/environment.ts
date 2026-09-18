@@ -1,4 +1,5 @@
 import type { ConfigModuleOptions } from '@nestjs/config';
+import { isAbsolute } from 'node:path';
 import { parsePreviousJwtSecrets } from '../auth/jwt-keys';
 import {
   DEPENDENCY_ACCESS_POLICIES,
@@ -9,6 +10,7 @@ import {
 const integerRules: Record<string, { min: number; max: number }> = {
   API_PORT: { min: 1, max: 65535 },
   WORKER_HEALTH_PORT: { min: 1, max: 65535 },
+  AGENT_WORKER_HEALTH_PORT: { min: 1, max: 65535 },
   REDIS_PORT: { min: 1, max: 65535 },
   REDIS_DB: { min: 0, max: 15 },
   AGENT_WORKER_CONCURRENCY: { min: 1, max: 100 },
@@ -61,7 +63,7 @@ const integerRules: Record<string, { min: number; max: number }> = {
   LSP_SESSION_TTL_SECONDS: { min: 60, max: 86_400 },
 };
 
-const booleanKeys = ['AUTO_PREVIEW', 'GENERATION_VERIFY', 'AGENT_USE_HOST_LOGIN', 'RATE_LIMIT_ENABLED', 'RATE_LIMIT_FAIL_OPEN', 'OTEL_ENABLED', 'SELF_REGISTRATION_ENABLED', 'PROJECT_CLEANUP_WORKER_ENABLED', 'K8S_GENERATION_REQUIRE_IMAGE_DIGEST', 'K8S_GENERATION_REQUIRE_DEPENDENCY_PROXY', 'MCP_ENABLED', 'MCP_READ_TOOLS_ENABLED', 'LSP_ENABLED'];
+const booleanKeys = ['AUTO_PREVIEW', 'GENERATION_VERIFY', 'AGENT_USE_HOST_LOGIN', 'AGENT_WORKER_DEDICATED', 'RATE_LIMIT_ENABLED', 'RATE_LIMIT_FAIL_OPEN', 'OTEL_ENABLED', 'SELF_REGISTRATION_ENABLED', 'PROJECT_CLEANUP_WORKER_ENABLED', 'K8S_GENERATION_REQUIRE_IMAGE_DIGEST', 'K8S_GENERATION_REQUIRE_DEPENDENCY_PROXY', 'MCP_ENABLED', 'MCP_READ_TOOLS_ENABLED', 'LSP_ENABLED'];
 
 export function validateEnvironment(input: Record<string, unknown>) {
   const env = { ...input } as Record<string, string>;
@@ -100,12 +102,12 @@ export function validateEnvironment(input: Record<string, unknown>) {
   if (!['standalone', 'cluster'].includes(redisMode)) {
     errors.push('REDIS_MODE 仅支持 standalone 或 cluster');
   }
-  const generationExecutor = env.GENERATION_EXECUTOR || 'kubernetes';
-  if (!['docker', 'kubernetes'].includes(generationExecutor)) {
-    errors.push('GENERATION_EXECUTOR 仅支持 docker 或 kubernetes');
+  const generationExecutor = env.GENERATION_EXECUTOR || 'local';
+  if (!['docker', 'kubernetes', 'local'].includes(generationExecutor)) {
+    errors.push('GENERATION_EXECUTOR 仅支持 local、docker 或 kubernetes');
   }
-  if (env.PROCESS_ROLE && !['api', 'worker'].includes(env.PROCESS_ROLE)) {
-    errors.push('PROCESS_ROLE 仅支持 api 或 worker');
+  if (env.PROCESS_ROLE && !['api', 'worker', 'agent-worker'].includes(env.PROCESS_ROLE)) {
+    errors.push('PROCESS_ROLE 仅支持 api、worker 或 agent-worker');
   }
   if (env.BUILD_GIT_SHA && !/^[a-f0-9]{7,64}$/i.test(env.BUILD_GIT_SHA)) errors.push('BUILD_GIT_SHA 必须是 7-64 位十六进制 Git SHA');
   if (env.BUILD_TIME && !Number.isFinite(Date.parse(env.BUILD_TIME))) errors.push('BUILD_TIME 必须是合法的 ISO 时间');
@@ -150,6 +152,9 @@ export function validateEnvironment(input: Record<string, unknown>) {
     errors.push('REDIS_CLUSTER_SCALE_READS 仅支持 master、slave 或 all');
   }
   if (nodeEnv === 'production') {
+    if (env.AGENT_WORKER_DEDICATED === 'true' && !isAbsolute(env.AGENT_STATE_ROOT || '')) {
+      errors.push('独立 Agent Worker 生产环境的 API 与 Worker 必须配置绝对路径 AGENT_STATE_ROOT，并挂载同一共享存储');
+    }
     if (env.LOCAL_PREVIEW_ENABLED === 'true') {
       errors.push('生产环境禁止启用 LOCAL_PREVIEW_ENABLED，必须使用 Kubernetes Preview');
     }
@@ -158,7 +163,7 @@ export function validateEnvironment(input: Record<string, unknown>) {
     }
     if (env.WEB_ORIGIN === '*') errors.push('生产环境 WEB_ORIGIN 不允许使用通配符');
     if (env.AGENT_USE_HOST_LOGIN === 'true') {
-      errors.push('生产环境禁止 AGENT_USE_HOST_LOGIN，必须显式注入受管 AI 凭证');
+      errors.push('生产环境禁止 AGENT_USE_HOST_LOGIN；Codex 应由每位用户自行连接账号');
     }
     if (generationExecutor === 'kubernetes') {
       if (env.K8S_GENERATION_REQUIRE_IMAGE_DIGEST === 'false') {

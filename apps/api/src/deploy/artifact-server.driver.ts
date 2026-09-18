@@ -26,6 +26,11 @@ export interface ArtifactUploadResult {
 export class ArtifactServerDriver {
   constructor(private readonly config: ArtifactServerConfig) {}
 
+  async probe(): Promise<void> {
+    const client = await this.connect();
+    client.end();
+  }
+
   async upload(
     localFile: string,
     onProgress?: (transferred: number, total: number) => void,

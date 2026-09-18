@@ -37,7 +37,8 @@ export class PlatformHealthService {
     ]);
     const dependencies = { database, redis, generationExecutor, openSearch, tempo, prometheus };
     const values = Object.values(dependencies);
-    const healthy = values.filter((item) => item.available).length;
+    const requiredValues = values.filter((item) => !('disabled' in item && item.disabled));
+    const healthy = requiredValues.filter((item) => item.available).length;
     const [failedProjectCleanups, unacknowledgedProjectCleanups] = database.available
       ? await this.prisma.$transaction([
           this.prisma.project.count({ where: { status: 'deletion_failed' } }),
@@ -50,7 +51,7 @@ export class PlatformHealthService {
         : null,
     ].filter(Boolean);
     return {
-      status: healthy === values.length ? 'healthy' : healthy ? 'degraded' : 'unavailable',
+      status: healthy === requiredValues.length ? 'healthy' : healthy ? 'degraded' : 'unavailable',
       checkedAt,
       uptimeSeconds: Math.floor(process.uptime()),
       build: {

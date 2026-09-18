@@ -35,12 +35,14 @@ import { McpModule } from "./mcp/mcp.module";
 import { McpApprovalModule } from "./mcp-approval/mcp-approval.module";
 import { LspModule } from "./lsp/lsp.module";
 import { KnowledgeModule } from "./knowledge/knowledge.module";
+import { MonitoringConfigModule } from "./monitoring-config/monitoring-config.module";
 
 @Module({
   imports: [
     ConfigModule.forRoot(environmentConfigOptions),
     PrismaModule,
     CryptoModule,
+    MonitoringConfigModule,
     ProjectAccessModule,
     WorkspaceModule,
     AuthModule,

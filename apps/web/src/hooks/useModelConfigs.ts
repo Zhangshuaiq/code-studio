@@ -17,9 +17,9 @@ export interface ModelConfig {
 export interface CreateModelConfigInput {
   label: string;
   engine: string;
-  baseUrl: string;
-  model: string;
-  apiKey: string;
+  baseUrl?: string;
+  model?: string;
+  apiKey?: string;
   isDefault?: boolean;
 }
 
@@ -52,5 +52,10 @@ export function useModelConfigMutations() {
     onSuccess: invalidate,
   });
 
-  return { create, setDefault, remove };
+  const updateKey = useMutation({
+    mutationFn: ({ id, apiKey }: { id: string; apiKey: string }) => api.patch(`/model-configs/${id}`, { apiKey }),
+    onSuccess: invalidate,
+  });
+
+  return { create, setDefault, remove, updateKey };
 }

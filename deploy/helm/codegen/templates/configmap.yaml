@@ -5,7 +5,7 @@
     {{- end }}
   {{- end }}
 {{- end }}
-{{- $multiReplica := or (gt (int .Values.api.replicaCount) 1) (gt (int .Values.worker.replicaCount) 1) .Values.api.autoscaling.enabled .Values.worker.autoscaling.enabled }}
+{{- $multiReplica := or (gt (int .Values.api.replicaCount) 1) (gt (int .Values.worker.replicaCount) 1) .Values.api.autoscaling.enabled .Values.worker.autoscaling.enabled (and .Values.agentWorker.enabled (or (gt (int .Values.agentWorker.replicaCount) 1) .Values.agentWorker.autoscaling.enabled)) }}
 {{- if and $multiReplica (not .Values.persistence.enabled) }}
   {{- fail "API/Worker 多副本必须启用共享工作区 PVC，禁止使用各 Pod 独立 emptyDir" }}
 {{- end }}
@@ -94,6 +94,8 @@ data:
   OTEL_RESOURCE_ATTRIBUTES: {{ .Values.config.otel.resourceAttributes | quote }}
   SANDBOX_PROJECTS_ROOT: /data/projects
   SANDBOX_WORKSPACES_ROOT: /data/workspaces
+  AGENT_STATE_ROOT: /data/agent-state
+  AGENT_WORKER_DEDICATED: {{ .Values.agentWorker.enabled | quote }}
   DEPLOY_WORKSPACES_ROOT: /data/deployments
   DATABASE_BACKUP_DIR: /data/backups/databases
   GENERATION_EXECUTOR: {{ .Values.runtime.generationExecutor | quote }}

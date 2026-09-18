@@ -320,11 +320,11 @@ model ModelConfig {
   id           String   @id @default(uuid())
   userId       String
   user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  label        String // 用户起的名字，如 "GLM Flash"
-  provider     String   @default("openai-compatible") // 凭证类型；现仅 openai-compatible
-  engine       String   @default("simple") // 生成引擎: simple(一把梭) | aider(智能体增量)
+  label        String // 用户起的连接名称，如 "我的 GLM"
+  provider     String   @default("openai-compatible") // 平台类型
+  engine       String   @default("simple") // agent 平台或旧版执行引擎
   baseUrl      String
-  model        String
+  model        String // 旧版配置的模型；新平台连接为空，选择存 Session.modelName
   encryptedKey String // AES-256-GCM 加密后的 api key
   isDefault    Boolean  @default(false) // 新会话默认用哪套
   createdAt    DateTime @default(now())
@@ -570,6 +570,7 @@ model Session {
   workspaceBranch String? // users/<username>-<shortId>；创建者通常为项目默认分支
   agentContextId  String? // Claude Agent SDK 的会话/上下文标识，用于多轮对话延续
   modelConfigId   String? // 本会话使用的模型配置（为空则取用户默认）
+  modelName       String? // 本会话在对话框中选择的具体 API 模型
   modelConfig     ModelConfig? @relation(fields: [modelConfigId], references: [id], onDelete: SetNull)
   createdAt       DateTime     @default(now())
 

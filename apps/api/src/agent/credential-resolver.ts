@@ -51,6 +51,11 @@ export class AgentCredentialResolver {
     }
   }
 
+  /** Claude 订阅登录尚未获准集成；入口保留，但绝不复用平台全局账号。 */
+  resolveServerClaudeCode(): AgentCredential {
+    throw new BadRequestException('Claude 订阅账号连接尚未开放；平台不会使用共享账号代用户执行');
+  }
+
   /**
    * 平台凭证，优先级：
    *  1) ANTHROPIC_API_KEY（走 API 计费）

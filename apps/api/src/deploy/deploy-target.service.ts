@@ -11,6 +11,10 @@ import { posix } from "path";
 import { CreateDeployTargetDto, UpdateDeployTargetDto } from "./dto/deploy-target.dto";
 import { Prisma } from "@prisma/client";
 import { assertSafeKubeconfig } from "../k8s/kubeconfig-policy";
+import Docker from 'dockerode';
+import { ArtifactServerDriver } from './artifact-server.driver';
+import { diagnosticMessage } from '../common/redact-diagnostic';
+import { SandboxService } from '../sandbox/sandbox.service';
 
 export const TARGET_KINDS = [
   "local-docker",
@@ -74,6 +78,7 @@ export class DeployTargetService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly crypto: CryptoService,
+    private readonly sandbox: SandboxService,
   ) {}
 
   async create(
@@ -83,6 +88,8 @@ export class DeployTargetService {
     const kind = input.kind as TargetKind;
     if (!TARGET_KINDS.includes(kind))
       throw new BadRequestException({ code: "DEPLOY_TARGET_KIND_INVALID", message: "不支持的目标类型" });
+    if (kind === 'local-docker')
+      throw new BadRequestException({ code: 'DEPLOY_TARGET_KIND_RETIRED', message: '本机 Docker 不再支持新建，请选择 Kubernetes 集群' });
     const config = mergeTargetConfig(kind, {}, input.config, false);
     validateConfig(kind, config);
     await this.validateRegistryReference(userId, kind, config);
@@ -129,6 +136,41 @@ export class DeployTargetService {
       ...this.view(row),
       config: publicConfig(row.kind as TargetKind, config),
     };
+  }
+
+  async status(userId: string, id: string) {
+    const target = await this.resolveConfig(userId, id);
+    const checkedAt = new Date().toISOString();
+    if (!target.enabled) return { state: 'disabled', checkedAt };
+    const config = target.config;
+    try {
+      const check = async () => {
+        if (target.kind === 'k8s') {
+          assertSafeKubeconfig(String(config.kubeconfig || ''));
+          const kube = new k8s.KubeConfig();
+          kube.loadFromString(String(config.kubeconfig));
+          await kube.makeApiClient(k8s.CoreV1Api).readNamespace({ name: String(config.namespace || 'default') });
+        } else if (target.kind === 'server-artifact') {
+          await new ArtifactServerDriver(config as unknown as ConstructorParameters<typeof ArtifactServerDriver>[0]).probe();
+        } else {
+          const docker = target.kind === 'local-docker'
+            ? this.sandbox.getDocker()
+            : target.kind === 'docker-tcp'
+              ? new Docker({ host: String(config.host), port: Number(config.port) || 2375, protocol: config.tls ? 'https' : 'http' })
+              : new Docker({ protocol: 'ssh', host: String(config.host), port: Number(config.port) || 22, username: String(config.username), sshOptions: { privateKey: String(config.privateKey), ...(config.passphrase ? { passphrase: String(config.passphrase) } : {}) } } as Docker.DockerOptions);
+          await docker.ping();
+        }
+      };
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await Promise.race([check(), new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error('连接超时')), 5000); })]);
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
+      return { state: 'online', checkedAt };
+    } catch (error) {
+      return { state: 'offline', checkedAt, message: diagnosticMessage(error, [String(config.privateKey || ''), String(config.passphrase || '')], '连接失败') };
+    }
   }
 
   async remove(userId: string, id: string) {

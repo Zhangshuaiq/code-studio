@@ -67,7 +67,7 @@ spec:
         values: [{{ .Release.Name }}]
       - key: app.kubernetes.io/component
         operator: In
-        values: [api, worker, migration]
+        values: [api, worker, agent-worker, migration]
   policyTypes: [Egress]
   egress:
     - to:

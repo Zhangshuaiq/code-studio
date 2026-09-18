@@ -13,3 +13,15 @@ spec:
 ---
 {{- end }}
 {{- end }}
+{{- if and .Values.agentWorker.enabled .Values.agentWorker.pdb.enabled }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "codegen.fullname" . }}-agent-worker
+spec:
+  minAvailable: {{ .Values.agentWorker.pdb.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "codegen.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: agent-worker
+{{- end }}

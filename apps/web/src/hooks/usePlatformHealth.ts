@@ -5,6 +5,8 @@ export interface DependencyHealth {
   available: boolean;
   latencyMs?: number;
   error?: string;
+  disabled?: boolean;
+  configured?: boolean;
   [key: string]: unknown;
 }
 

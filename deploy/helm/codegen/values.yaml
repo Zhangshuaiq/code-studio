@@ -49,6 +49,21 @@ worker:
     targetCPUUtilizationPercentage: 70
   pdb: { enabled: true, minAvailable: 1 }
 
+# 独立编码 Worker：与 API/通用 Worker 分离，多个副本共享工作区和 CLI 会话状态。
+agentWorker:
+  enabled: true
+  replicaCount: 2
+  concurrency: 2
+  resources:
+    requests: { cpu: 500m, memory: 1Gi }
+    limits: { cpu: "4", memory: 4Gi }
+  autoscaling:
+    enabled: false
+    minReplicas: 2
+    maxReplicas: 20
+    targetCPUUtilizationPercentage: 70
+  pdb: { enabled: true, minAvailable: 1 }
+
 web:
   replicaCount: 2
   revisionHistoryLimit: 5
@@ -70,6 +85,7 @@ web:
 service:
   apiPort: 3000
   workerHealthPort: 3001
+  agentWorkerHealthPort: 3002
   webPort: 8080
 
 build:

@@ -1,10 +1,12 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type DragEvent } from "react";
 import {
   ArrowLeft,
   FilePlus2,
   FileText,
   Folder,
   FolderPlus,
+  ChevronDown,
+  ChevronRight,
   Save,
   Search,
 } from "lucide-react";
@@ -21,7 +23,7 @@ import {
 } from "../../hooks/useKnowledge";
 import { useNavigate, useParams } from "react-router-dom";
 import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
-import { Select } from "../common/Select";
+import { FolderPicker } from "./FolderPicker";
 import { useFeedback } from "../common/FeedbackProvider";
 import { errText } from "../Settings/ui";
 export function KnowledgeDocumentPage() {
@@ -35,6 +37,8 @@ export function KnowledgeDocumentPage() {
   const [content, setContent] = useState("");
   const [summary, setSummary] = useState("");
   const [search, setSearch] = useState("");
+  const [moveOpen, setMoveOpen] = useState(false);
+  const editorScrollRef = useRef<HTMLElement>(null);
   const results = useKnowledgeSearch(search);
   const editor = useEditor({
     extensions: [
@@ -61,14 +65,22 @@ export function KnowledgeDocumentPage() {
       setContent(doc.contentMarkdown || "");
     }
   }, [editor, doc?.id, doc?.contentMarkdown]);
-  const outline = useMemo(
-    () =>
-      content.split("\n").flatMap((line) => {
-        const match = /^(#{1,6})\s+(.+)$/.exec(line);
-        return match ? [{ level: match[1].length, title: match[2] }] : [];
-      }),
-    [content],
-  );
+  const outline = useMemo(() => {
+    const headings: Array<{ level: number; title: string; pos: number }> = [];
+    editor?.state.doc.descendants((node, pos) => {
+      if (node.type.name === "heading") {
+        headings.push({ level: Number(node.attrs.level), title: node.textContent, pos });
+      }
+    });
+    return headings;
+  }, [editor, content, doc?.id]);
+  const jumpToHeading = (pos: number) => {
+    const container = editorScrollRef.current;
+    const heading = editor?.view.nodeDOM(pos);
+    if (!(heading instanceof HTMLElement) || !container) return;
+    const top = container.scrollTop + heading.getBoundingClientRect().top - container.getBoundingClientRect().top - 24;
+    container.scrollTo({ top: Math.max(0, top), behavior: "smooth" });
+  };
   if (query.isLoading)
     return (
       <div className="grid h-screen place-items-center text-sm text-muted">
@@ -121,6 +133,17 @@ export function KnowledgeDocumentPage() {
       title: value.trim(),
     });
     navigate(`/knowledge/documents/${response.data.id}`);
+  };
+  const moveDocument = async (documentId: string, folderId: string | null) => {
+    const source = tree.data?.documents.find((item) => item.id === documentId);
+    if (!source || (source.folderId || null) === folderId) return;
+    try {
+      await mutations.updateDocument.mutateAsync({ id: documentId, folderId });
+      setMoveOpen(false);
+      toast("文档已移动", { tone: "success" });
+    } catch (e) {
+      toast(errText(e), { title: "移动失败", tone: "error" });
+    }
   };
   return (
     <main className="flex h-screen flex-col overflow-hidden bg-white dark:bg-slate-950">
@@ -194,24 +217,10 @@ export function KnowledgeDocumentPage() {
         </div>
         <div className="mt-3 flex items-center gap-3">
           <span className="text-xs text-muted">所属文件夹</span>
-          <Select
-            size="sm"
-            className="w-56"
-            value={doc.folderId || "root"}
-            options={[
-              { value: "root", label: "知识库根目录" },
-              ...(tree.data?.folders || []).map((x) => ({
-                value: x.id,
-                label: x.name,
-              })),
-            ]}
-            onChange={(value) =>
-              void mutations.updateDocument.mutateAsync({
-                id: doc.id,
-                folderId: value === "root" ? null : value,
-              })
-            }
-          />
+          <span className="max-w-48 truncate text-xs" title={tree.data?.folders.find((x) => x.id === doc.folderId)?.name || "知识库根目录"}>
+            {tree.data?.folders.find((x) => x.id === doc.folderId)?.name || "知识库根目录"}
+          </span>
+          <button type="button" className="btn btn-ghost btn-sm" onClick={() => setMoveOpen(true)}>移动至…</button>
           <span className="text-[10px] text-muted">
             创建人 {name(doc.createdBy)} · 最后更新 {name(doc.updatedBy)} · v
             {doc.version}
@@ -222,19 +231,19 @@ export function KnowledgeDocumentPage() {
         <Panel defaultSize={22} minSize={14} maxSize={35}>
           <aside className="h-full overflow-y-auto bg-slate-50/60 p-3 dark:bg-slate-900/40">
             <Tree
-              parentId={undefined}
               folders={tree.data?.folders || []}
               documents={tree.data?.documents || []}
               activeId={doc.id}
               open={(id) => navigate(`/knowledge/documents/${id}`)}
               addFolder={createFolder}
               addDocument={createDocument}
+              moveDocument={moveDocument}
             />
           </aside>
         </Panel>
         <PanelResizeHandle className="w-1 cursor-col-resize bg-slate-200 hover:bg-indigo-400 dark:bg-slate-800" />
         <Panel defaultSize={58} minSize={35}>
-          <section className="h-full overflow-y-auto">
+          <section ref={editorScrollRef} className="h-full overflow-y-auto">
             <EditorContent editor={editor} />
           </section>
         </Panel>
@@ -247,15 +256,7 @@ export function KnowledgeDocumentPage() {
                 key={index}
                 className="block w-full truncate py-1.5 text-left text-xs text-muted hover:text-indigo-600"
                 style={{ paddingLeft: (item.level - 1) * 12 }}
-                onClick={() => {
-                  const heading = editor?.view.dom.querySelectorAll(
-                    "h1,h2,h3,h4,h5,h6",
-                  )[index] as HTMLElement | undefined;
-                  heading?.scrollIntoView({
-                    behavior: "smooth",
-                    block: "center",
-                  });
-                }}
+                onClick={() => jumpToHeading(item.pos)}
               >
                 {item.title}
               </button>
@@ -271,91 +272,83 @@ export function KnowledgeDocumentPage() {
           placeholder="本次修改说明（可选）"
         />
       </div>
+      {moveOpen && <FolderPicker key={doc.id} folders={tree.data?.folders || []} currentId={doc.folderId} teamName={doc.team?.name || "当前团队"} pending={mutations.updateDocument.isPending} onCancel={() => setMoveOpen(false)} onConfirm={(folderId) => void moveDocument(doc.id, folderId)} />}
     </main>
   );
 }
 const name = (u?: { username: string; displayName?: string | null }) =>
   u?.displayName || u?.username || "—";
 
+const DOCUMENT_DRAG_TYPE = "application/x-code-studio-knowledge-document";
+
 function Tree({
-  parentId,
   folders,
   documents,
   activeId,
   open,
   addFolder,
   addDocument,
+  moveDocument,
 }: {
-  parentId?: string;
   folders: Array<{ id: string; parentId?: string | null; name: string }>;
   documents: Array<{ id: string; folderId?: string | null; title: string }>;
   activeId: string;
   open: (id: string) => void;
   addFolder: (id?: string) => Promise<void>;
   addDocument: (id?: string) => Promise<void>;
+  moveDocument: (documentId: string, folderId: string | null) => Promise<void>;
 }) {
-  const children = folders.filter(
-    (item) => (item.parentId || undefined) === parentId,
-  );
-  const docs = documents.filter(
-    (item) => (item.folderId || undefined) === parentId,
-  );
-  return (
-    <div
-      className={
-        parentId
-          ? "ml-3 border-l border-slate-200 pl-2 dark:border-slate-700"
-          : ""
-      }
-    >
-      <div className="mb-1 flex items-center justify-between">
-        <span className="text-[10px] text-muted">
-          {parentId ? "" : "知识库文件"}
-        </span>
-        <span className="flex">
-          <button
-            className="icon-btn h-6 w-6"
-            title="在此新建文件夹"
-            onClick={() => void addFolder(parentId)}
-          >
-            <FolderPlus size={13} />
-          </button>
-          <button
-            className="icon-btn h-6 w-6"
-            title="在此新建文档"
-            onClick={() => void addDocument(parentId)}
-          >
-            <FilePlus2 size={13} />
-          </button>
-        </span>
-      </div>
-      {children.map((folder) => (
-        <div key={folder.id}>
-          <div className="flex items-center gap-1 py-1 text-xs font-medium">
-            <Folder size={13} className="text-amber-500" />
-            {folder.name}
-          </div>
-          <Tree
-            parentId={folder.id}
-            folders={folders}
-            documents={documents}
-            activeId={activeId}
-            open={open}
-            addFolder={addFolder}
-            addDocument={addDocument}
-          />
+  const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+  const [dropTarget, setDropTarget] = useState<string | null | undefined>();
+  const toggle = (id: string) => setCollapsed((current) => {
+    const next = new Set(current);
+    if (next.has(id)) next.delete(id); else next.add(id);
+    return next;
+  });
+  const canDrop = (event: DragEvent<HTMLElement>) => event.dataTransfer.types.includes(DOCUMENT_DRAG_TYPE);
+  const dropProps = (folderId: string | null) => ({
+    onDragOver: (event: DragEvent<HTMLElement>) => {
+      if (!canDrop(event)) return;
+      event.preventDefault();
+      event.dataTransfer.dropEffect = "move";
+      setDropTarget(folderId);
+    },
+    onDragLeave: (event: DragEvent<HTMLElement>) => {
+      if (!event.currentTarget.contains(event.relatedTarget as Node)) setDropTarget(undefined);
+    },
+    onDrop: (event: DragEvent<HTMLElement>) => {
+      if (!canDrop(event)) return;
+      event.preventDefault();
+      event.stopPropagation();
+      setDropTarget(undefined);
+      const documentId = event.dataTransfer.getData(DOCUMENT_DRAG_TYPE);
+      if (documents.some((item) => item.id === documentId)) void moveDocument(documentId, folderId);
+    },
+  });
+  const render = (folderId: string | null, depth: number): React.ReactNode => {
+    const children = folders.filter((item) => (item.parentId || null) === folderId);
+    const docs = documents.filter((item) => (item.folderId || null) === folderId);
+    return <>
+      {children.map((folder) => <div key={folder.id}>
+        <div {...dropProps(folder.id)} className={`group flex h-7 items-center gap-1 rounded pr-1 text-xs hover:bg-white dark:hover:bg-slate-800 ${dropTarget === folder.id ? "bg-indigo-100 ring-1 ring-indigo-400 dark:bg-indigo-500/20" : ""}`} style={{ paddingLeft: depth * 12 }}>
+          <button type="button" className="grid h-5 w-4 shrink-0 place-items-center" aria-label={collapsed.has(folder.id) ? "展开文件夹" : "收起文件夹"} onClick={() => toggle(folder.id)}>{collapsed.has(folder.id) ? <ChevronRight size={12} /> : <ChevronDown size={12} />}</button>
+          <Folder size={13} className="shrink-0 text-amber-500" />
+          <button type="button" className="min-w-0 flex-1 truncate text-left font-medium" title={folder.name} onClick={() => toggle(folder.id)}>{folder.name}</button>
+          <button type="button" className="invisible grid h-5 w-5 shrink-0 place-items-center group-hover:visible focus:visible" title="在此新建文件夹" aria-label={`在${folder.name}中新建文件夹`} onClick={() => void addFolder(folder.id)}><FolderPlus size={12} /></button>
+          <button type="button" className="invisible grid h-5 w-5 shrink-0 place-items-center group-hover:visible focus:visible" title="在此新建文档" aria-label={`在${folder.name}中新建文档`} onClick={() => void addDocument(folder.id)}><FilePlus2 size={12} /></button>
         </div>
-      ))}
-      {docs.map((item) => (
-        <button
-          key={item.id}
-          onClick={() => open(item.id)}
-          className={`flex w-full items-center gap-1 rounded px-1.5 py-1.5 text-left text-xs ${item.id === activeId ? "bg-indigo-100 text-indigo-700 dark:bg-indigo-500/20" : "hover:bg-white dark:hover:bg-slate-800"}`}
-        >
-          <FileText size={12} />
-          <span className="truncate">{item.title}</span>
-        </button>
-      ))}
+        {!collapsed.has(folder.id) && render(folder.id, depth + 1)}
+      </div>)}
+      {docs.map((item) => <button key={item.id} type="button" draggable onDragStart={(event) => { event.dataTransfer.setData(DOCUMENT_DRAG_TYPE, item.id); event.dataTransfer.effectAllowed = "move"; }} onDragEnd={() => setDropTarget(undefined)} onClick={() => open(item.id)} className={`flex h-7 w-full items-center gap-1.5 rounded pr-1 text-left text-xs ${item.id === activeId ? "bg-indigo-100 text-indigo-700 dark:bg-indigo-500/20" : "hover:bg-white dark:hover:bg-slate-800"}`} style={{ paddingLeft: depth * 12 + 18 }} title={`${item.title}（可拖拽至文件夹）`}><FileText size={12} className="shrink-0" /><span className="truncate">{item.title}</span></button>)}
+    </>;
+  };
+  return (
+    <div>
+      <div {...dropProps(null)} className={`mb-1 flex h-7 items-center justify-between rounded px-1 ${dropTarget === null ? "bg-indigo-100 ring-1 ring-indigo-400 dark:bg-indigo-500/20" : ""}`}>
+        <span className="text-[10px] text-muted">知识库文件 · 拖至此处移入根目录</span>
+        <span className="flex"><button type="button" className="icon-btn h-5 w-5" title="在根目录新建文件夹" onClick={() => void addFolder()}><FolderPlus size={12} /></button><button type="button" className="icon-btn h-5 w-5" title="在根目录新建文档" onClick={() => void addDocument()}><FilePlus2 size={12} /></button></span>
+      </div>
+      {render(null, 0)}
     </div>
   );
 }

@@ -18,18 +18,21 @@ export class CreateModelConfigDto {
   provider?: string;
 
   @IsOptional()
-  @IsIn(['simple', 'aider'])
+  @IsIn(['simple', 'aider', 'codex', 'claude-code', 'deepseek-agent', 'glm-agent'])
   engine?: string;
 
+  @IsOptional()
   @IsString()
-  baseUrl!: string;
+  baseUrl?: string;
 
+  @IsOptional()
   @IsString()
-  model!: string;
+  model?: string;
 
+  @IsOptional()
   @IsString()
   @MinLength(1)
-  apiKey!: string; // 明文进来，落库前加密；接口永不回传
+  apiKey?: string; // 仅 API 模式需要；接口永不回传
 
   @IsOptional()
   @IsBoolean()

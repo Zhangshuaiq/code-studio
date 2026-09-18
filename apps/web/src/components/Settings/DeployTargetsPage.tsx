@@ -23,6 +23,7 @@ import {
   type DeployTarget,
   useDeployTarget,
   useDeployTargets,
+  useDeployTargetStatuses,
   useDeployTargetOps,
   useRegistries,
 } from "../../hooks/useDeploy";
@@ -46,13 +47,8 @@ const KIND_LABEL: Record<string, string> = {
   k8s: "Kubernetes 集群",
   "server-artifact": "产物直传服务器 (jar/war)",
 };
-const READY_KINDS = new Set([
-  "local-docker",
-  "docker-tcp",
-  "docker-ssh",
-  "k8s",
-  "server-artifact",
-]);
+const READY_KINDS = new Set(Object.keys(KIND_LABEL));
+const CREATE_KINDS = Object.entries(KIND_LABEL).filter(([kind]) => kind !== 'local-docker');
 const KUBECONFIG_COMMAND = "kubectl config view --raw --minify --flatten";
 
 const KIND_DESCRIPTION: Record<string, string> = {
@@ -67,6 +63,8 @@ const KIND_DESCRIPTION: Record<string, string> = {
 export function DeployTargetsPage() {
   const navigate = useNavigate();
   const { data: targets = [] } = useDeployTargets();
+  const statusQueries = useDeployTargetStatuses(targets);
+  const statuses = new Map(targets.map((target, index) => [target.id, statusQueries[index]]));
   const { create, update, remove } = useDeployTargetOps();
   const { data: registries = [] } = useRegistries();
   const { data: projects = [] } = useDeploymentProjects();
@@ -74,11 +72,11 @@ export function DeployTargetsPage() {
 
   const [showForm, setShowForm] = useState(false);
   const [selectedTargetId, setSelectedTargetId] = useState<string>();
-  const [kind, setKind] = useState("local-docker");
+  const [kind, setKind] = useState("k8s");
   const [name, setName] = useState("");
   const [scope, setScope] = useState("platform");
   const [teamId, setTeamId] = useState("");
-  const [purposes, setPurposes] = useState<string[]>(["preview", "deploy"]);
+  const [purposes, setPurposes] = useState<string[]>(["deploy"]);
   const [labels, setLabels] = useState("");
   const [maxInstances, setMaxInstances] = useState("10");
   const [capacityCpu, setCapacityCpu] = useState("");
@@ -244,7 +242,7 @@ export function DeployTargetsPage() {
     <div>
       <PageHeader
         title="运行资源"
-        desc="统一维护本机 Docker、远程 Docker、服务器和 Kubernetes，并为预览设置实例与容量上限。连接凭证加密存储。"
+        desc="统一维护 Kubernetes、远程 Docker 和产物服务器，并为预览设置实例与容量上限。连接凭证加密存储。"
         action={
           <button
             onClick={() => {
@@ -273,7 +271,7 @@ export function DeployTargetsPage() {
                 <Select
                   value={kind}
                   onChange={handleKindChange}
-                  options={Object.entries(KIND_LABEL).map(([value, label]) => ({
+                  options={CREATE_KINDS.map(([value, label]) => ({
                     value,
                     label,
                   }))}
@@ -762,11 +760,14 @@ export function DeployTargetsPage() {
       <div className="space-y-2">
         {targets.length === 0 && (
           <EmptyState>
-            还没有运行资源。点右上角「新建资源」添加本机 Docker、远程
-            Docker、Kubernetes 集群或产物服务器。
+            还没有运行资源。点右上角「新建资源」添加 Kubernetes 集群、远程
+            Docker 或产物服务器。
           </EmptyState>
         )}
-        {targets.map((t) => (
+        {targets.map((t) => {
+          const statusQuery = statuses.get(t.id);
+          const state = !t.enabled ? 'disabled' : statusQuery?.isError ? 'unknown' : statusQuery?.data?.state || 'checking';
+          return (
           <div
             key={t.id}
             className="card flex items-center gap-4 px-4 py-4 transition hover:border-indigo-200 hover:shadow-lg dark:hover:border-indigo-500/30"
@@ -779,16 +780,12 @@ export function DeployTargetsPage() {
                 <div className="truncate text-sm font-semibold">{t.name}</div>
                 <span
                   className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${
-                    READY_KINDS.has(t.kind) && t.enabled
+                    state === 'online'
                       ? "bg-emerald-50 text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-300"
-                      : "bg-amber-50 text-amber-700 dark:bg-amber-500/10 dark:text-amber-300"
+                      : state === 'offline' ? "bg-red-50 text-red-700 dark:bg-red-500/10 dark:text-red-300" : "bg-amber-50 text-amber-700 dark:bg-amber-500/10 dark:text-amber-300"
                   }`}
                 >
-                  {!t.enabled
-                    ? "已停用"
-                    : READY_KINDS.has(t.kind)
-                      ? "可用"
-                      : "暂未接入"}
+                  {state === 'disabled' ? '已停用' : state === 'online' ? '在线' : state === 'offline' ? '离线' : state === 'checking' ? '检测中' : '状态未知'}
                 </span>
               </div>
               <div className="mt-0.5 truncate text-xs text-muted">
@@ -825,6 +822,7 @@ export function DeployTargetsPage() {
                 <CalendarDays size={11} />
                 {new Date(t.createdAt).toLocaleString("zh-CN")}
               </div>
+              {t.enabled && <div className="mt-1 text-[10px] text-muted" title={statusQuery?.data?.message}>{statusQuery?.data?.checkedAt ? `最近检测 ${new Date(statusQuery.data.checkedAt).toLocaleTimeString('zh-CN')}` : '等待首次检测'}{statusQuery?.data?.message ? ` · ${statusQuery.data.message}` : ''}</div>}
             </div>
             <button
               onClick={() => toggleEnabled(t)}
@@ -854,7 +852,7 @@ export function DeployTargetsPage() {
               <Trash2 size={15} />
             </button>
           </div>
-        ))}
+        );})}
       </div>
 
       {selectedTargetId && (
