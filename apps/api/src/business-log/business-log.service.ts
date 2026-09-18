@@ -578,10 +578,8 @@ export class BusinessLogService
       dto.projectId,
     );
     const aggs = response.aggregations ?? {};
-    const hitsTotal = response.hits?.total;
-    const total = Number(
-      typeof hitsTotal === "number" ? hitsTotal : hitsTotal?.value ?? 0,
-    );
+    const hitTotal = response.hits?.total;
+    const total = typeof hitTotal === 'number' ? hitTotal : Number(hitTotal?.value ?? 0);
     const successful = Number(aggs.successful?.doc_count ?? 0);
     const failed = Number(aggs.failed?.doc_count ?? 0);
     const rate = (ok: number, count: number) => count ? (ok / count) * 100 : 0;
