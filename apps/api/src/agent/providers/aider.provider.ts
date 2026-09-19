@@ -101,13 +101,13 @@ export class AiderProvider implements GenerationProvider {
     // 现有源码文件（作为 aider 的编辑上下文显式加入）
     const files = await listSourceFiles(cwd);
 
-    // 把 runtime 脚手架规则拼进指令，保证冷启动产物可跑
+    // 已有仓库只遵循真实文件结构；空项目才采用运行时脚手架模板。
     const message = [
       prompt,
       '',
       // 弱模型（如 glm-4-flash）常把文件名写成占位 path/to/xxx，这里明确纠正
       'IMPORTANT: Use exact relative file paths from the project root, e.g. `src/App.jsx` or `index.html`. Never use a placeholder prefix like `path/to/`.',
-      ...(runtime.scaffoldRules?.length
+      ...(files.length === 0 && runtime.scaffoldRules?.length
         ? ['', 'Project rules:', ...runtime.scaffoldRules.map((r) => `- ${r}`)]
         : []),
     ].join('\n');

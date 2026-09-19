@@ -129,6 +129,18 @@ export class AgentQueueService implements OnModuleInit, OnModuleDestroy {
     return this.waitFor(job, onEvent, signal);
   }
 
+  /** SSE 断线或反代缓冲时的轻量状态兜底，同时返回最近一条流式事件。 */
+  async liveStatus(userId: string, taskId: string) {
+    const task = await this.agent.getTask(userId, taskId);
+    const job = await this.queue.getJob(taskId);
+    return {
+      taskId,
+      status: task.status,
+      log: ['succeeded', 'failed', 'cancelled', 'timed_out'].includes(task.status) ? task.resultLog ?? '' : undefined,
+      progress: job?.progress && typeof job.progress === 'object' ? job.progress : null,
+    };
+  }
+
   async cancel(userId: string, taskId: string) {
     const task = await this.agent.getTask(userId, taskId);
     const job = await this.queue.getJob(taskId);

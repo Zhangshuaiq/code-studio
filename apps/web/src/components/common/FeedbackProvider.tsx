@@ -213,9 +213,6 @@ export function FeedbackProvider({ children }: { children: ReactNode }) {
       {dialog && (
         <div
           className="fixed inset-0 z-[110] flex items-center justify-center bg-slate-950/55 p-4 backdrop-blur-sm"
-          onMouseDown={(event) => {
-            if (event.target === event.currentTarget) cancelDialog();
-          }}
         >
           <div
             role="dialog"

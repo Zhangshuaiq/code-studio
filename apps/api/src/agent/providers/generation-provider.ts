@@ -1,7 +1,7 @@
 import type { ProjectRuntime } from '../../sandbox/language-runtime';
 
 export interface AgentEvent {
-  kind: 'text' | 'tool_use' | 'result' | 'system';
+  kind: 'text' | 'tool_use' | 'result' | 'system' | 'reasoning';
   text?: string;
   toolName?: string;
   toolInput?: unknown;

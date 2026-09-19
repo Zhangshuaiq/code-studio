@@ -62,6 +62,24 @@ export class GitController {
     return this.git.branches(root);
   }
 
+  @Get('remote-branches')
+  async remoteBranches(@CurrentUser() user: AuthUser, @Param('id') sessionId: string) {
+    const context = await this.remoteContext(user.id, sessionId, false);
+    const credential = await this.settings.optionalCredentialForRemote(user.id, context.remote.remoteUrl);
+    return { list: await this.git.remoteBranches(context.root, { remoteUrl: context.remote.remoteUrl, username: credential?.username, token: credential?.token ?? '' }) };
+  }
+
+  @Post('remote-checkout')
+  @RequirePermissions(PERMISSIONS.PROJECT_WRITE)
+  async checkoutRemote(@CurrentUser() user: AuthUser, @Param('id') sessionId: string, @Body() body: BranchNameDto) {
+    await this.access.requireSession(user.id, sessionId, 'edit');
+    const context = await this.remoteContext(user.id, sessionId, false);
+    const credential = await this.settings.optionalCredentialForRemote(user.id, context.remote.remoteUrl);
+    const identity = await this.settings.resolveIdentity(user.id);
+    await this.git.checkoutRemoteBranch(context.root, body.name.trim(), { remoteUrl: context.remote.remoteUrl, username: credential?.username, token: credential?.token ?? '', identity });
+    return { ok: true, branch: body.name.trim() };
+  }
+
   /** 新建并切到分支 */
   @Post("branches")
   @RequirePermissions(PERMISSIONS.PROJECT_WRITE)
@@ -246,7 +264,7 @@ export class GitController {
     }
   }
 
-  /** 本地分支相对项目默认远程分支的 ahead/behind 与冲突状态。 */
+  /** 当前本地分支相对同名远程分支的 ahead/behind 与冲突状态。 */
   @Get("sync-status")
   async syncStatus(
     @CurrentUser() user: AuthUser,
@@ -258,7 +276,7 @@ export class GitController {
       where: { projectId },
     });
     if (!remote) return null;
-    return this.git.remoteStatus(root, remote.branch);
+    return this.git.remoteStatus(root, (await this.git.currentBranch(root)) || remote.branch);
   }
 
   /** 读取远端最新状态，不改动工作区文件。 */
@@ -270,14 +288,15 @@ export class GitController {
   ) {
     await this.access.requireSession(user.id, sessionId, "edit");
     const context = await this.remoteContext(user.id, sessionId);
+    const branch = (await this.git.currentBranch(context.root)) || context.remote.branch;
     return this.git.fetchRemote(context.root, {
       remoteUrl: context.remote.remoteUrl,
-      branch: context.remote.branch,
+      branch,
       ...context.credential,
     });
   }
 
-  /** 合并项目默认远程分支；冲突时保留现场交给在线编辑器处理。 */
+  /** 合并当前分支的同名远程分支；冲突时保留现场交给在线编辑器处理。 */
   @Post("sync")
   @RequirePermissions(PERMISSIONS.PROJECT_WRITE)
   @Audit("project.git.sync", "project")
@@ -288,9 +307,10 @@ export class GitController {
     await this.access.requireSession(user.id, sessionId, "edit");
     const context = await this.remoteContext(user.id, sessionId);
     const identity = await this.settings.resolveIdentity(user.id);
+    const branch = (await this.git.currentBranch(context.root)) || context.remote.branch;
     return this.git.syncRemote(context.root, {
       remoteUrl: context.remote.remoteUrl,
-      branch: context.remote.branch,
+      branch,
       identity,
       ...context.credential,
     });
@@ -305,10 +325,11 @@ export class GitController {
     await this.access.requireSession(user.id, sessionId, "edit");
     const context = await this.remoteContext(user.id, sessionId, false);
     const identity = await this.settings.resolveIdentity(user.id);
+    const branch = (await this.git.currentBranch(context.root)) || context.remote.branch;
     return this.git.continueMerge(
       context.root,
       identity,
-      context.remote.branch,
+      branch,
     );
   }
 
@@ -352,7 +373,7 @@ export class GitController {
   ) {
     await this.access.requireSession(user.id, sessionId, "edit");
     const context = await this.remoteContext(user.id, sessionId, false);
-    return this.git.abortMerge(context.root, context.remote.branch);
+    return this.git.abortMerge(context.root, (await this.git.currentBranch(context.root)) || context.remote.branch);
   }
 
   /** 仅允许项目创建者把尚无业务代码的主工作区初始化为远程仓库内容。 */

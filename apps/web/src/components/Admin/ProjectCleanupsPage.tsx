@@ -1,7 +1,8 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { AlertTriangle, ChevronLeft, ChevronRight, RefreshCw, RotateCcw } from 'lucide-react';
+import { AlertTriangle, ChevronLeft, ChevronRight, RefreshCw, RotateCcw, Trash2 } from 'lucide-react';
 import { useState } from 'react';
 import { api } from '../../lib/api';
+import { useFeedback } from '../common/FeedbackProvider';
 
 interface CleanupItem {
   id: string;
@@ -14,6 +15,7 @@ interface CleanupItem {
   deletionAcknowledgedAt?: string | null;
   deletionAcknowledgedByName?: string | null;
   deletionAcknowledgementNote?: string | null;
+  canPurgeMissingFiles?: boolean;
   user: { username: string; displayName?: string | null };
   team?: { name: string } | null;
 }
@@ -45,6 +47,7 @@ interface ImportPage extends Omit<CleanupPage, 'items'> {
 
 export function ProjectCleanupsPage() {
   const client = useQueryClient();
+  const { confirm, toast } = useFeedback();
   const [page, setPage] = useState(1);
   const [acknowledgeId, setAcknowledgeId] = useState('');
   const [acknowledgementNote, setAcknowledgementNote] = useState('');
@@ -58,6 +61,23 @@ export function ProjectCleanupsPage() {
     mutationFn: (id: string) => api.post(`/admin/project-cleanups/${id}/retry`),
     onSuccess: () => client.invalidateQueries({ queryKey: ['project-cleanups'] }),
   });
+  const purge = useMutation({
+    mutationFn: (id: string) => api.delete(`/admin/project-cleanups/${id}/missing-records`),
+    onSuccess: () => {
+      for (const key of ['project-cleanups', 'projects', 'teams', 'admin-projects']) client.invalidateQueries({ queryKey: [key] });
+      toast('项目及数据库关联记录已清除', { tone: 'success' });
+    },
+    onError: (error: any) => toast(error?.response?.data?.message || '清除失败，请刷新后重试', { tone: 'error' }),
+  });
+  async function confirmPurge(item: CleanupItem) {
+    if (!await confirm({
+      title: '清除缺失目录的项目记录',
+      message: `将先停止「${item.name}」仍在运行的部署，再永久删除项目及其会话、任务、成员、部署记录等关联内容。已确认当前共享存储中没有项目文件；旧路径如位于其他主机，平台无法替你删除那里的文件。此操作不可恢复。`,
+      confirmText: '永久清除记录',
+      tone: 'danger',
+    })) return;
+    purge.mutate(item.id);
+  }
   const acknowledge = useMutation({
     mutationFn: () => api.patch(`/admin/project-cleanups/${acknowledgeId}/acknowledge`, { note: acknowledgementNote }),
     onSuccess: () => {
@@ -88,7 +108,7 @@ export function ProjectCleanupsPage() {
     <div className="mb-3"><div className="eyebrow">Resource reaper</div><h2 className="mt-1 text-lg font-bold">资源回收任务</h2></div>
     {!!query.data?.items.some((item) => item.status === 'deletion_failed' && !item.deletionAcknowledgedAt) && <div className="card mb-4 grid gap-3 p-4 md:grid-cols-[260px_1fr_auto]"><select className="input" value={acknowledgeId} onChange={(event) => setAcknowledgeId(event.target.value)}><option value="">选择需要确认的失败项目</option>{query.data.items.filter((item) => item.status === 'deletion_failed' && !item.deletionAcknowledgedAt).map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select><input className="input" maxLength={2000} value={acknowledgementNote} onChange={(event) => setAcknowledgementNote(event.target.value)} placeholder="填写排查结果或后续处置计划" /><button className="btn btn-secondary" disabled={!acknowledgeId || !acknowledgementNote.trim() || acknowledge.isPending} onClick={() => acknowledge.mutate()}>确认失败</button></div>}
     {!!query.data?.items.some((item) => item.deletionAcknowledgedAt) && <div className="mb-4 space-y-2">{query.data.items.filter((item) => item.deletionAcknowledgedAt).map((item) => <div key={item.id} className="rounded-xl bg-emerald-50 p-3 text-xs text-emerald-700 dark:bg-emerald-950/30 dark:text-emerald-200">{item.name}：{item.deletionAcknowledgedByName} 于 {new Date(item.deletionAcknowledgedAt!).toLocaleString('zh-CN')} 确认——{item.deletionAcknowledgementNote}</div>)}</div>}
-    <div className="space-y-3">{query.data?.items.map((item) => <article key={item.id} className="card p-5"><div className="flex items-start gap-4"><span className={`grid h-10 w-10 place-items-center rounded-xl ${item.status === 'deletion_failed' ? 'bg-red-50 text-red-500 dark:bg-red-500/10' : 'bg-amber-50 text-amber-600 dark:bg-amber-500/10'}`}><AlertTriangle size={18} /></span><div className="min-w-0 flex-1"><div className="flex flex-wrap items-center gap-2"><h2 className="font-bold">{item.name}</h2><span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-semibold dark:bg-slate-800">{item.status}</span></div><div className="mt-1 flex flex-wrap gap-3 text-xs text-muted"><span>创建人：{item.user.displayName || item.user.username}</span><span>项目组：{item.team?.name || '个人项目'}</span><span>尝试：{item.deletionAttempts}</span>{item.deletionNextAttemptAt && <span>下次重试：{new Date(item.deletionNextAttemptAt).toLocaleString('zh-CN')}</span>}</div>{item.deletionError && <pre className="mt-3 max-h-32 overflow-auto whitespace-pre-wrap rounded-xl bg-red-50 p-3 text-xs text-red-700 dark:bg-red-950/30 dark:text-red-200">{item.deletionError}</pre>}</div>{item.status === 'deletion_failed' && <button className="btn btn-secondary btn-sm" disabled={retry.isPending} onClick={() => retry.mutate(item.id)}><RotateCcw size={13} />重新回收</button>}</div></article>)}{!query.isLoading && !query.data?.items.length && <div className="card py-16 text-center text-sm text-muted">没有待处理的项目资源</div>}</div>
+    <div className="space-y-3">{query.data?.items.map((item) => <article key={item.id} className="card p-5"><div className="flex items-start gap-4"><span className={`grid h-10 w-10 place-items-center rounded-xl ${item.status === 'deletion_failed' ? 'bg-red-50 text-red-500 dark:bg-red-500/10' : 'bg-amber-50 text-amber-600 dark:bg-amber-500/10'}`}><AlertTriangle size={18} /></span><div className="min-w-0 flex-1"><div className="flex flex-wrap items-center gap-2"><h2 className="font-bold">{item.name}</h2><span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-semibold dark:bg-slate-800">{item.status}</span></div><div className="mt-1 flex flex-wrap gap-3 text-xs text-muted"><span>创建人：{item.user.displayName || item.user.username}</span><span>项目组：{item.team?.name || '个人项目'}</span><span>尝试：{item.deletionAttempts}</span>{item.deletionNextAttemptAt && <span>下次重试：{new Date(item.deletionNextAttemptAt).toLocaleString('zh-CN')}</span>}</div>{item.deletionError && <pre className="mt-3 max-h-32 overflow-auto whitespace-pre-wrap rounded-xl bg-red-50 p-3 text-xs text-red-700 dark:bg-red-950/30 dark:text-red-200">{item.deletionError}</pre>}</div>{item.status === 'deletion_failed' && <div className="flex flex-col gap-2"><button className="btn btn-secondary btn-sm" disabled={retry.isPending} onClick={() => retry.mutate(item.id)}><RotateCcw size={13} />重新回收</button>{item.canPurgeMissingFiles && <button className="btn btn-danger btn-sm" disabled={purge.isPending} onClick={() => void confirmPurge(item)}><Trash2 size={13} />清除关联记录</button>}</div>}</div></article>)}{!query.isLoading && !query.data?.items.length && <div className="card py-16 text-center text-sm text-muted">没有待处理的项目资源</div>}</div>
     <Pager page={page} pages={query.data?.pages} hasNext={query.data?.hasNext} onPage={setPage}/>
   </div>;
 }

@@ -53,7 +53,7 @@ export function useProjectMutations() {
   const create = useMutation({
     mutationFn: (input: {
       source: 'blank' | 'git';
-      name: string;
+      name?: string;
       language: string;
       teamId?: string;
       repositoryUrl?: string;

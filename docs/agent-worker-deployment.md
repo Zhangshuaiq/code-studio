@@ -2,6 +2,18 @@
 
 项目对话请求先进入 API 和 Redis 生成队列；真正的 Codex、Claude Agent SDK 编码进程只在编码 Worker 所在机器或 Pod 内启动。CLI 随平台依赖自动部署，浏览器所在机器无需安装 CLI。API 副本不决定任务执行节点。通用 Worker 在 `AGENT_WORKER_DEDICATED=true` 时不领取编码任务。
 
+## 对话实时状态与恢复
+
+浏览器先调用 `POST /api/agent/run/start` 获取任务 ID，再订阅 `GET /api/agent/tasks/:id/stream`。Worker 用 BullMQ progress 推送可公开的模型文本、Codex 推理摘要和工具事件；页面同时每 1.5 秒查询 `GET /api/agent/tasks/:id/live`，用于 SSE 断线或反向代理缓冲时的兜底。进度事件带序号，避免 SSE 与轮询重复显示。刷新页面后从会话任务历史识别运行中任务，恢复 `Working (Xm Ys)` 计时并按原任务 ID 重连，不会再次提交任务。最终结果由任务持久化日志覆盖临时流内容；原始内部推理不会展示。
+
+成功对话只刷新代码树与 Git 历史，不自动打开运行日志或部署预览。已有仓库不自动补齐根目录 `package.json` 等模板文件；智能体应先读取真实多子项目结构，再按需求修改。
+
+## 远程分支与失败项目清理
+
+Git 分支菜单直接查询远程 heads，公开仓库可匿名读取，私有仓库使用当前用户 Git 凭据。选择远程分支时先 fetch 再 checkout 到当前用户工作区；后续同步针对当前分支的同名远程分支，不更改项目级默认分支。
+
+管理员「项目后台任务」对目录缺失且资源回收失败的项目提供「清除关联记录」。API 必须再次确认当前共享卷上的项目目录、用户工作区、部署工作区均不存在；仍有运行中预览时拒绝，仍有运行中部署时先尝试停止真实资源，停止失败则保留数据库记录。确认后删除项目记录，数据库外键级联清理会话、任务及其他关联记录。旧路径若位于其他主机，平台无法保证删除那台机器上的文件，因此界面会明确提示这是不可恢复的记录清理操作。
+
 ## 部署方式
 
 - Kubernetes：Helm 默认创建 `agent-worker` Deployment。它使用平台 Worker 镜像，镜像构建时通过 npm 依赖自动带上 Codex SDK/CLI 和 Claude Agent SDK/CLI，不需要在节点手工安装。可用 `agentWorker.replicaCount` 独立扩容；工作区 PVC 必须支持且已验证 ReadWriteMany。

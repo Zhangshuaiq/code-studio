@@ -121,21 +121,35 @@ export class ClaudeAgentProvider implements GenerationProvider {
           settingSources: [],
           strictMcpConfig: true,
           maxTurns: Number(this.config.get('AGENT_MAX_TURNS', 30)),
+          includePartialMessages: true,
           resume: resumeId,
           env: childEnv,
           abortController,
         },
       });
 
+      let pendingPartialText = '';
       for await (const message of stream as AsyncIterable<AnyMessage>) {
         // SDK 工具执行发生在消息迭代之间；每次恢复迭代时立即检查其落盘结果。
         await assertWorkspaceWithinLimits(cwd, limits);
         if (message.session_id) contextId = message.session_id;
         switch (message.type) {
+          case 'stream_event': {
+            const delta = (message as AnyMessage & { event?: { type?: string; delta?: { type?: string; text?: string } } }).event?.delta;
+            if (delta?.type === 'text_delta' && delta.text) {
+              pendingPartialText += delta.text;
+              push({ kind: 'text', text: delta.text });
+            }
+            break;
+          }
           case 'assistant': {
             for (const block of message.message?.content ?? []) {
               if (block.type === 'text' && block.text) {
-                push({ kind: 'text', text: block.text });
+                if (!pendingPartialText) push({ kind: 'text', text: block.text });
+                else if (block.text.startsWith(pendingPartialText)) {
+                  const remainder = block.text.slice(pendingPartialText.length);
+                  if (remainder) push({ kind: 'text', text: remainder });
+                }
               } else if (block.type === 'tool_use') {
                 push({
                   kind: 'tool_use',
@@ -144,6 +158,7 @@ export class ClaudeAgentProvider implements GenerationProvider {
                 });
               }
             }
+            pendingPartialText = '';
             break;
           }
           case 'result':
@@ -171,20 +186,7 @@ export class ClaudeAgentProvider implements GenerationProvider {
 }
 
 function buildSystemAppend(runtime: ProjectRuntime): string {
-  const base = `你是一个代码项目生成助手。目标：在当前工作目录（已挂载为容器 /workspace）中生成或修改「${runtime.displayName}」项目。只做用户要求的改动，保持结构清晰、可运行。`;
-  if (runtime.category === 'frontend') {
-    return `${base}
-- 这是一个前端项目，生成后会用 dev server 实时预览。
-- 使用标准 Vite + React 结构（package.json、vite.config、src/、index.html）。
-- 确保 "npm install && npm run dev" 能启动，页面能在浏览器打开。
-- 依赖尽量精简、用主流稳定版本，避免冷启动装包过慢。`;
-  }
-  if (runtime.category === 'backend') {
-    return `${base}
-- 使用标准 Maven 目录结构（src/main/java、src/main/resources、pom.xml）。
-- 生成的代码要能通过 "${runtime.buildCommand}" 编译。`;
-  }
-  return base;
+  return `你是代码项目助手。项目登记的运行类型是「${runtime.displayName}」，但实际仓库可能包含多个语言和子项目。先读取当前工作目录的文件结构及已有构建清单，再按用户需求修改。尊重现有子项目目录和工具链；不要因为根目录缺少某种清单就自行添加模板、迁移结构或改写无关文件。只有用户明确要求新建项目或确实需要某个文件来完成本次任务时，才新增该文件。`;
 }
 
 // Agent SDK 消息的最小结构

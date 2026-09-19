@@ -1,8 +1,9 @@
-import { BadRequestException, Injectable, Logger } from "@nestjs/common";
+import { BadRequestException, ConflictException, Injectable, Logger } from "@nestjs/common";
 import { execFile } from "child_process";
 import { promisify } from "util";
-import { mkdir, readFile, writeFile } from "fs/promises";
+import { mkdir, readFile, readdir, writeFile } from "fs/promises";
 import { dirname, join, resolve, sep } from "path";
+import { existsSync, realpathSync } from 'fs';
 import type { GitIdentity } from "./git-settings.service";
 import { redactDiagnosticText } from "../common/redact-diagnostic";
 import { ConfigService } from "@nestjs/config";
@@ -116,27 +117,40 @@ export class GitService {
     });
   }
 
+  /** 禁止 Git 向上查找到平台仓库或其他项目仓库。 */
+  async assertRepositoryRoot(cwd: string): Promise<void> {
+    if (existsSync(cwd)) {
+      try {
+        const { stdout } = await this.git(cwd, ['rev-parse', '--show-toplevel']);
+        if (realpathSync(stdout.trim()) === realpathSync(cwd)) return;
+      } catch {
+        // 目录不存在或不是 Git 仓库时也按同一错误处理。
+      }
+    }
+    throw new ConflictException({ code: 'PROJECT_GIT_ROOT_MISMATCH', message: '项目目录不是独立 Git 仓库，已拒绝操作以保护其他项目代码' });
+  }
+
   /** 确保项目卷是个 git 仓库（首次 init + 写 .gitignore）。 */
   async ensureRepo(
     cwd: string,
     identity: GitIdentity,
     initialBranch = "main",
   ): Promise<void> {
-    try {
-      await this.git(cwd, ["rev-parse", "--is-inside-work-tree"]);
-      return; // 已是仓库
-    } catch {
-      /* 需要初始化 */
+    try { await this.assertRepositoryRoot(cwd); return; } catch (error) {
+      if (existsSync(join(cwd, '.git'))) throw error;
     }
+    if ((await readdir(cwd)).length) throw new ConflictException({ code: 'PROJECT_WORKSPACE_NOT_EMPTY', message: '项目目录存在文件但不是独立 Git 仓库，已停止初始化以保护现有文件' });
     try {
       assertBranchName(initialBranch);
       await this.git(cwd, ["init", "-q", "-b", initialBranch]);
+      await this.assertRepositoryRoot(cwd);
       await this.git(cwd, ["config", "commit.gpgsign", "false"]);
       await writeFile(join(cwd, ".gitignore"), GITIGNORE, "utf8");
       await this.git(cwd, ["add", ".gitignore"]);
       await this.commit(cwd, "初始化项目", identity);
     } catch (err) {
       this.logger.warn(`git 初始化失败 ${cwd}: ${err}`);
+      throw err;
     }
   }
 
@@ -179,6 +193,32 @@ export class GitService {
       /* 无提交时可能没有分支 */
     }
     return { current, list };
+  }
+
+  /** 直接查询远端 heads，不依赖本地是否已 fetch/checkout。 */
+  async remoteBranches(cwd: string, opts: { remoteUrl: string; username?: string; token: string }): Promise<string[]> {
+    const authed = injectCreds(opts.remoteUrl, opts.username, opts.token);
+    try {
+      const { stdout } = await this.git(cwd, ['ls-remote', '--heads', authed]);
+      return stdout.split('\n').map((line) => line.match(/^\S+\s+refs\/heads\/(.+)$/)?.[1]).filter((name): name is string => !!name).sort();
+    } catch (error) {
+      throw new BadRequestException({ code: 'GIT_REMOTE_BRANCHES_FAILED', message: redact(gitError(error, '读取远程分支失败'), opts.token) });
+    }
+  }
+
+  /** 把指定远端分支取回当前用户工作区，再切换到对应本地分支。 */
+  async checkoutRemoteBranch(cwd: string, name: string, opts: { remoteUrl: string; username?: string; token: string; identity: GitIdentity }): Promise<void> {
+    assertBranchName(name);
+    const authed = injectCreds(opts.remoteUrl, opts.username, opts.token);
+    try {
+      await this.git(cwd, ['fetch', '--no-tags', authed, `+refs/heads/${name}:${remoteTrackingRef(name)}`]);
+      await this.commitPending(cwd, opts.identity);
+      const local = await this.branches(cwd);
+      if (local.list.includes(name)) await this.git(cwd, ['checkout', name]);
+      else await this.git(cwd, ['checkout', '-b', name, remoteTrackingRef(name)]);
+    } catch (error) {
+      throw new BadRequestException({ code: 'GIT_REMOTE_CHECKOUT_FAILED', message: redact(gitError(error, '切换远程分支失败'), opts.token) });
+    }
   }
 
   /** 只读工作树状态，供受控查询使用；不执行 add/commit/checkout。 */
@@ -585,6 +625,7 @@ export class GitService {
       branch: string;
     },
   ) {
+    await this.assertRepositoryRoot(cwd);
     if (await this.hasWorkspaceCode(cwd)) {
       throw new BadRequestException({ code: 'GIT_IMPORT_WORKSPACE_NOT_EMPTY', message: '当前工作区已经包含代码，不能执行远程仓库导入；请保留现有代码并在工作区使用同步功能' });
     }
@@ -599,6 +640,7 @@ export class GitService {
   }
 
   async hasWorkspaceCode(cwd: string): Promise<boolean> {
+    await this.assertRepositoryRoot(cwd);
     const tracked = (await this.git(cwd, ["ls-files"])).stdout
       .split("\n")
       .map((item) => item.trim())

@@ -11,7 +11,6 @@ import { GenerationExecutorService } from './generation-executor.service';
 import { ModelConfigService } from '../model-config/model-config.service';
 import { GitService, FileChange } from '../git/git.service';
 import { GitSettingsService } from '../git/git-settings.service';
-import { ensureScaffold } from '../sandbox/scaffold';
 import { ClaudeAgentProvider } from './providers/claude-agent.provider';
 import { SimpleLlmProvider } from './providers/simple-llm.provider';
 import { AiderProvider } from './providers/aider.provider';
@@ -142,6 +141,7 @@ export class AgentService {
     let log = '';
     for (const e of result.events) {
       if (e.kind === 'text') log += e.text ?? '';
+      else if (e.kind === 'reasoning') log += `\n思考摘要：${e.text ?? ''}`;
       else if (e.kind === 'tool_use')
         log += `\n» ${e.toolName}(${redactDiagnosticText(short(e.toolInput))})`;
       else if (e.kind === 'result') log += `\n\n${e.text ?? ''}`;
@@ -156,22 +156,6 @@ export class AgentService {
       handle.volumePath,
       workspaceLimits((key, fallback) => Number(this.config.get(key, fallback))),
     );
-
-    // 生成成功 → 确定性兜底补齐脚手架（弱模型常漏 package.json 等），再提交
-    if (status === 'succeeded') {
-      signal?.throwIfAborted();
-      try {
-        const repaired = await ensureScaffold(handle.runtime, handle.volumePath);
-        if (repaired.length) {
-          const note = `已自动补齐缺失文件: ${repaired.join(', ')}`;
-          this.logger.warn(`${note} (session=${sessionId})`);
-          log += `\n\n⚙ ${note}`;
-          onEvent?.({ kind: 'result', text: note });
-        }
-      } catch (err) {
-        this.logger.warn(`脚手架兜底失败 session=${sessionId}: ${err}`);
-      }
-    }
 
     if (status === 'succeeded') {
       await assertWorkspaceWithinLimits(
@@ -253,6 +237,8 @@ export class AgentService {
             status: terminalStatus,
             ...(error instanceof WorkspaceQuotaError
               ? { failureCode: 'workspace_quota_exceeded' }
+              : signal?.reason instanceof Error && signal.reason.name === 'WorkspaceResourceLimitError'
+                ? { failureCode: 'disk_limit' }
               : {}),
             resultLog: terminalStatus === 'cancelled' ? '任务已由用户取消' : terminalStatus === 'timed_out' ? `任务执行超时: ${message}` : `任务执行异常: ${message}`,
             finishedAt: new Date(),

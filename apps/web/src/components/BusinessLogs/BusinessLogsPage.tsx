@@ -1033,7 +1033,6 @@ function Modal({
   return (
     <div
       className="fixed inset-0 z-50 grid place-items-center bg-slate-950/35 p-4 backdrop-blur-sm"
-      onMouseDown={(event) => event.target === event.currentTarget && onClose()}
     >
       <div
         className={`card max-h-[88vh] w-full overflow-hidden ${wide ? "max-w-4xl" : "max-w-2xl"}`}

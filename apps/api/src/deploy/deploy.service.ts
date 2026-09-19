@@ -443,6 +443,16 @@ export class DeployService {
     return this.stopDeployment(userId, projectId);
   }
 
+  /** 仅供管理员清理失败项目：按部署目标所有者身份停止真实运行资源。 */
+  async stopProjectForCleanup(projectId: string) {
+    const deployment = await this.prisma.deployment.findUnique({ where: { projectId }, select: { targetId: true, deployedById: true } });
+    if (!deployment) return { status: 'stopped' };
+    const target = deployment.targetId
+      ? await this.prisma.deployTarget.findUnique({ where: { id: deployment.targetId }, select: { userId: true } })
+      : null;
+    return this.stopDeployment(target?.userId ?? deployment.deployedById ?? '', projectId);
+  }
+
   private async stopDeployment(userId: string, projectId: string) {
     const d = await this.prisma.deployment.findUnique({
       where: { projectId },

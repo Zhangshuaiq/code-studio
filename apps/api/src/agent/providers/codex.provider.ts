@@ -58,6 +58,7 @@ export class CodexProvider implements GenerationProvider {
     let isError = false;
     let hasAnswer = false;
     const streamedMessages = new Map<string, string>();
+    const streamedReasoning = new Map<string, string>();
     const forwardMessage = (item: { id: string; type: 'agent_message'; text: string }) => {
       const previous = streamedMessages.get(item.id) ?? '';
       // SDK 的 item.updated.text 是当前完整快照，向前端只发送新增部分。
@@ -77,9 +78,19 @@ export class CodexProvider implements GenerationProvider {
         if (event.type === 'thread.started') contextId = event.thread_id;
         else if (event.type === 'item.updated' && event.item.type === 'agent_message') {
           forwardMessage(event.item);
+        } else if (event.type === 'item.updated' && event.item.type === 'reasoning') {
+          const previous = streamedReasoning.get(event.item.id) ?? '';
+          const current = event.item.text;
+          if (current.startsWith(previous) && current.length > previous.length) push({ kind: 'reasoning', text: current.slice(previous.length) });
+          else if (current !== previous) push({ kind: 'reasoning', text: current });
+          streamedReasoning.set(event.item.id, current);
         } else if (event.type === 'item.completed') {
           await assertWorkspaceWithinLimits(cwd, limits);
           if (event.item.type === 'agent_message') forwardMessage(event.item);
+          else if (event.item.type === 'reasoning') {
+            const previous = streamedReasoning.get(event.item.id) ?? '';
+            if (!previous) push({ kind: 'reasoning', text: event.item.text });
+          }
           else this.forwardItem(event, push);
         } else if (event.type === 'turn.failed' || event.type === 'error') {
           isError = true;

@@ -225,9 +225,8 @@ export function AccountPage() {
       {showCredentialForm && (
         <div
           className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4 backdrop-blur-sm"
-          onClick={() => setShowCredentialForm(false)}
         >
-          <div className="card w-full max-w-lg p-6" onClick={(event) => event.stopPropagation()}>
+          <div className="card w-full max-w-lg p-6">
             <div className="mb-5">
               <div className="eyebrow">Personal credential</div>
               <h2 className="mt-1 text-lg font-bold">{editing ? '修改' : '添加'} Git 推送凭据</h2>

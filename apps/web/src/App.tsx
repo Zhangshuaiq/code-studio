@@ -50,6 +50,7 @@ const DeployTargetsPage = lazy(() => import("./components/Settings/DeployTargets
 const RegistriesPage = lazy(() => import("./components/Settings/RegistriesPage").then((m) => ({ default: m.RegistriesPage })));
 const AccountPage = lazy(() => import("./components/Settings/AccountPage").then((m) => ({ default: m.AccountPage })));
 const MonitoringConfigPage = lazy(() => import("./components/Settings/MonitoringConfigPage").then((m) => ({ default: m.MonitoringConfigPage })));
+const WorkspaceStoragePage = lazy(() => import("./components/Settings/WorkspaceStoragePage").then((m) => ({ default: m.WorkspaceStoragePage })));
 const UsersPage = lazy(() => import("./components/Admin/UsersPage").then((m) => ({ default: m.UsersPage })));
 const RolesPage = lazy(() => import("./components/Admin/RolesPage").then((m) => ({ default: m.RolesPage })));
 const AuditPage = lazy(() => import("./components/Admin/AuditPage").then((m) => ({ default: m.AuditPage })));
@@ -116,6 +117,7 @@ export default function App() {
           <Route index element={<Navigate to="account" replace />} />
           <Route path="models" element={<PermissionGate anyOf={[ACCESS.models]}><ModelsPage /></PermissionGate>} />
           <Route path="monitoring" element={<PermissionGate anyOf={[ACCESS.systemSettings]}><MonitoringConfigPage /></PermissionGate>} />
+          <Route path="workspace-storage" element={<PermissionGate anyOf={[ACCESS.systemSettings]}><WorkspaceStoragePage /></PermissionGate>} />
           <Route
             path="deploy-targets"
             element={<Navigate to="/resources/targets" replace />}
@@ -202,7 +204,6 @@ function WorkspacePage() {
 
   function handleGenerated() {
     setTab("code");
-    setLogOpen(true); // 运行后自动弹出日志
     if (sessionId) {
       qc.invalidateQueries({ queryKey: ["preview", sessionId] });
       qc.invalidateQueries({ queryKey: ["files", sessionId] }); // 文件树

@@ -6,8 +6,8 @@ import {
 } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { execFile } from "child_process";
-import { existsSync } from "fs";
-import { mkdir, rm, writeFile } from "fs/promises";
+import { existsSync, realpathSync } from "fs";
+import { mkdir, readdir, rm, writeFile } from "fs/promises";
 import { dirname, join, resolve } from "path";
 import { promisify } from "util";
 import { PrismaService } from "../prisma/prisma.service";
@@ -59,7 +59,7 @@ export class WorkspaceService {
   /** 为当前用户创建/恢复独立 Git worktree；项目创建者沿用项目主工作区。 */
   async existingProjectPath(project: StoredProjectLocation): Promise<string> {
     const path = this.storage.assertAvailable(project);
-    if (!existsSync(path) || !await this.gitOk(path, ['rev-parse', '--is-inside-work-tree'])) {
+    if (!await this.isRepositoryRoot(path)) {
       throw new ConflictException('项目工作区不存在或不是 Git 仓库');
     }
     return path;
@@ -73,11 +73,11 @@ export class WorkspaceService {
     let session = await this.access.requireSession(userId, sessionId, "read", { allowProjectImport });
     const logicalPath = this.storage.userPath(session.project, userId);
     if (session.project.status === 'migrating') {
-      if (!existsSync(logicalPath) || !await this.gitOk(logicalPath, ['rev-parse', '--is-inside-work-tree'])) throw new ConflictException({ code: 'PROJECT_MIGRATING', message: '项目迁移中，当前工作区暂不可读取' });
+      if (!await this.isRepositoryRoot(logicalPath)) throw new ConflictException({ code: 'PROJECT_MIGRATING', message: '项目迁移中，当前工作区暂不可读取' });
       return { path: logicalPath, branch: session.workspaceBranch || 'main', isolated: session.project.userId !== userId };
     }
     if (session.project.userId !== userId) this.storage.assertUserWorkspaceAvailable(logicalPath, session.workspacePath);
-    if (existsSync(logicalPath) && await this.gitOk(logicalPath, ['rev-parse', '--is-inside-work-tree'])) {
+    if (await this.isRepositoryRoot(logicalPath)) {
       const current = await this.currentBranch(logicalPath);
       const branch =
         current ||
@@ -99,7 +99,7 @@ export class WorkspaceService {
     session = await this.access.requireSession(userId, sessionId, "read", { allowProjectImport });
     const currentPath = this.storage.userPath(session.project, userId);
     if (session.project.userId !== userId) this.storage.assertUserWorkspaceAvailable(currentPath, session.workspacePath);
-    if (existsSync(currentPath) && await this.gitOk(currentPath, ['rev-parse', '--is-inside-work-tree'])) {
+    if (await this.isRepositoryRoot(currentPath)) {
       const current = await this.currentBranch(currentPath);
       const branch = current || session.workspaceBranch || session.project.remote?.branch || "main";
       return { path: currentPath, branch, isolated: session.project.userId !== userId };
@@ -107,9 +107,7 @@ export class WorkspaceService {
     const identity = await this.resolveIdentity(userId);
     const canonical = this.storage.assertAvailable(session.project);
     const defaultBranch = session.project.remote?.branch || "main";
-    const canonicalReady =
-      existsSync(canonical) &&
-      (await this.gitOk(canonical, ["rev-parse", "--is-inside-work-tree"]));
+    const canonicalReady = await this.isRepositoryRoot(canonical);
     if (session.accessRole !== "owner" && !canonicalReady) {
       throw new BadRequestException(
         "项目主工作区尚未初始化，请由项目创建者先打开项目或导入远程仓库",
@@ -125,7 +123,7 @@ export class WorkspaceService {
 
     const desired = this.storage.userPath(session.project, userId);
     const branch = userBranch(session.user.username, userId);
-    if (!existsSync(join(desired, ".git"))) {
+    if (!await this.isRepositoryRoot(desired)) {
       if (existsSync(desired)) {
         throw new BadRequestException(
           `用户工作区目录已存在但不是有效 Git worktree：${desired}`,
@@ -152,6 +150,7 @@ export class WorkspaceService {
         ]);
       }
     }
+    if (!await this.isRepositoryRoot(desired)) throw new ConflictException('用户工作区不是独立 Git worktree，已停止操作');
     await this.saveWorkspace(sessionId, branch);
       return { path: desired, branch, isolated: true };
     });
@@ -183,7 +182,7 @@ export class WorkspaceService {
     const target = join(this.deploymentsRoot, projectId, safeEnvironment);
     await mkdir(dirname(target), { recursive: true });
     await this.git(canonical, ["worktree", "prune"]);
-    if (!existsSync(join(target, ".git"))) {
+    if (!await this.isRepositoryRoot(target)) {
       if (existsSync(target)) {
         throw new BadRequestException(
           `部署工作区目录已存在但不是有效 Git worktree：${target}`,
@@ -200,6 +199,7 @@ export class WorkspaceService {
       await this.git(target, ["checkout", "--detach", branch]);
       await this.git(target, ["reset", "--hard", branch]);
     }
+    if (!await this.isRepositoryRoot(target)) throw new ConflictException('部署工作区不是独立 Git worktree，已停止操作');
       return target;
     });
   }
@@ -214,6 +214,22 @@ export class WorkspaceService {
       this.removeProjectFilesLocked(project),
     );
     });
+  }
+
+  /** 管理员清除孤儿记录前的只读校验：任何仍存在的工作区都不能被当作“目录缺失”。 */
+  async projectFilesMissing(project: StoredProjectLocation): Promise<boolean> {
+    if (!existsSync(this.storage.projectsRoot)) return false;
+    const canonical = this.storage.projectPath(project);
+    if (existsSync(canonical) || (project.volumePath && existsSync(project.volumePath))) return false;
+    const sessions = await this.prisma.session.findMany({ where: { projectId: project.id }, select: { userId: true, workspacePath: true } });
+    if (sessions.some((session) => session.userId !== project.userId) && !existsSync(this.workspacesRoot)) return false;
+    for (const session of sessions) {
+      if (session.workspacePath && existsSync(session.workspacePath)) return false;
+      if (session.userId !== project.userId && existsSync(this.storage.userPath(project, session.userId))) return false;
+    }
+    const deploymentPath = resolve(this.deploymentsRoot, project.id);
+    this.storage.assertInside(this.deploymentsRoot, deploymentPath);
+    return !existsSync(deploymentPath);
   }
 
   private async withWorkspaceLocks<T>(projectId: string, userIds: string[], index: number, task: () => Promise<T>): Promise<T> {
@@ -253,8 +269,12 @@ export class WorkspaceService {
     identity: { name: string; email: string },
   ) {
     await mkdir(path, { recursive: true });
-    if (!(await this.gitOk(path, ["rev-parse", "--is-inside-work-tree"]))) {
+    if (!await this.isRepositoryRoot(path)) {
+      if (existsSync(join(path, '.git')) || (await readdir(path)).length) {
+        throw new ConflictException({ code: 'PROJECT_WORKSPACE_NOT_EMPTY', message: '项目目录存在文件但不是独立 Git 仓库，已停止初始化以保护现有文件' });
+      }
       await this.git(path, ["init", "-q", "-b", defaultBranch]);
+      if (!await this.isRepositoryRoot(path)) throw new ConflictException('项目 Git 仓库初始化失败，已停止操作');
       await writeFile(join(path, ".gitignore"), WORKSPACE_GITIGNORE, "utf8");
       await this.git(path, ["add", ".gitignore"]);
       await this.commit(path, "初始化项目", identity);
@@ -330,6 +350,16 @@ export class WorkspaceService {
     try {
       await this.git(cwd, args);
       return true;
+    } catch {
+      return false;
+    }
+  }
+
+  private async isRepositoryRoot(path: string): Promise<boolean> {
+    if (!existsSync(path)) return false;
+    try {
+      const { stdout } = await this.git(path, ['rev-parse', '--show-toplevel']);
+      return realpathSync(stdout.trim()) === realpathSync(path);
     } catch {
       return false;
     }

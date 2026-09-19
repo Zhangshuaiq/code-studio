@@ -322,7 +322,7 @@ function ProjectCard({
           <Trash2 size={14} />
         </button>}
       </div>
-      {deleteOpen && <div className="fixed inset-0 z-[120] flex items-center justify-center bg-slate-950/55 p-4 backdrop-blur-sm" onMouseDown={(event) => event.target === event.currentTarget && setDeleteOpen(false)}>
+      {deleteOpen && <div className="fixed inset-0 z-[120] flex items-center justify-center bg-slate-950/55 p-4 backdrop-blur-sm">
         <div role="dialog" aria-modal="true" aria-labelledby={`delete-project-${project.id}`} className="card w-full max-w-md overflow-hidden" onClick={(event) => event.stopPropagation()}>
           <div className="flex items-start gap-3 px-5 pb-4 pt-5">
             <span className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-red-50 text-red-600 dark:bg-red-500/10 dark:text-red-300"><Trash2 size={18} /></span>
@@ -395,11 +395,11 @@ function NewProjectModal({
   const [defaultBranch, setDefaultBranch] = useState("");
 
   async function handleCreate() {
-    if (!name.trim() || (source === "git" && !repositoryUrl.trim())) return;
+    if ((source === "blank" && !name.trim()) || (source === "git" && !repositoryUrl.trim())) return;
     try {
       const p = await create.mutateAsync({
         source,
-        name: name.trim(),
+        name: name.trim() || undefined,
         language,
         teamId: teamId || undefined,
         repositoryUrl: source === "git" ? repositoryUrl.trim() : undefined,
@@ -415,7 +415,6 @@ function NewProjectModal({
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4 backdrop-blur-sm"
-      onClick={onClose}
     >
       <div
         className="card animate-fade-in w-full max-w-xl overflow-hidden p-0"
@@ -449,13 +448,13 @@ function NewProjectModal({
             </div>
           </div>
           <div>
-            <label className="label mb-1.5">项目名称</label>
+            <label className="label mb-1.5">项目名称{source === "git" ? "（可选）" : ""}</label>
             <input
               autoFocus
               value={name}
               onChange={(e) => setName(e.target.value)}
               onKeyDown={(e) => e.key === "Enter" && handleCreate()}
-              placeholder="例如 customer-portal"
+              placeholder={source === "git" ? "留空则使用 Git 仓库名称" : "例如 customer-portal"}
               className="input"
             />
           </div>
@@ -548,7 +547,7 @@ function NewProjectModal({
           </button>
           <button
             onClick={handleCreate}
-            disabled={!name.trim() || (source === "git" && !repositoryUrl.trim()) || create.isPending}
+            disabled={(source === "blank" && !name.trim()) || (source === "git" && !repositoryUrl.trim()) || create.isPending}
             className="btn btn-primary"
           >
             {create.isPending ? "提交中…" : (source === "git" ? "开始后台导入" : "创建项目")}
@@ -601,7 +600,6 @@ function ProjectRepositoryModal({
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4 backdrop-blur-sm"
-      onClick={onClose}
     >
       <div
         className="card animate-fade-in w-full max-w-lg overflow-hidden p-0"

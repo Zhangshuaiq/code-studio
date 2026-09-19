@@ -9,7 +9,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { CreateProjectDto } from './dto/create-project.dto';
 import { UpdateProjectDto } from './dto/update-project.dto';
 import { SetProjectRepositoryDto } from './dto/set-project-repository.dto';
-import { assertRepositoryUrl } from '../git/git-url';
+import { assertRepositoryUrl, repositoryName } from '../git/git-url';
 import {
   normalizeProjectRole,
   ProjectAccessService,
@@ -59,11 +59,13 @@ export class ProjectService {
     const repositoryUrl = source === 'git'
       ? assertRepositoryUrl(dto.repositoryUrl!)
       : undefined;
+    const name = dto.name?.trim() || (repositoryUrl ? repositoryName(repositoryUrl) : '');
+    if (!name || name.length > 64) throw new BadRequestException({ code: 'PROJECT_NAME_INVALID', message: '请填写 1–64 个字符的项目名称' });
     const ready = await this.prisma.$transaction(async (tx) => {
       const project = await tx.project.create({
         data: {
           userId,
-          name: dto.name,
+          name,
           language,
           status: source === 'git' ? 'import_queued' : 'active',
           teamId: dto.teamId,
