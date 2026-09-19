@@ -15,10 +15,15 @@ const ROLE_RANK: Record<ProjectRole, number> = {
 export class ProjectAccessService {
   constructor(private readonly prisma: PrismaService) {}
 
-  visibleWhere(userId: string) {
-    return {
+  visibleWhere(userId: string, isAdmin = false) {
+    return isAdmin ? {} : {
       OR: [{ userId }, { members: { some: { userId } } }],
     };
+  }
+
+  /** 平台管理员拥有跨项目管理权；不改变项目的真实创建者。 */
+  async isPlatformAdmin(userId: string): Promise<boolean> {
+    return (await this.prisma.user.count({ where: { id: userId, roles: { some: { name: 'admin' } } } })) > 0;
   }
 
   async requireProject(
@@ -38,11 +43,12 @@ export class ProjectAccessService {
     });
     if (!project) throw new NotFoundException({ code: 'PROJECT_NOT_FOUND', message: '项目不存在' });
     const role: ProjectRole | null =
-      project.userId === userId
+      project.userId === userId || await this.isPlatformAdmin(userId)
         ? 'owner'
         : normalizeRole(project.members[0]?.role);
     if (!role) throw new NotFoundException({ code: 'PROJECT_NOT_FOUND_OR_INACCESSIBLE', message: '项目不存在或无权访问' });
     if (project.status.startsWith('deleting') || project.status === 'deletion_failed') throw new ConflictException({ code: 'PROJECT_DELETING', message: '项目正在删除或等待资源回收' });
+    if (project.status === 'migrating' && capability !== 'read') throw new ConflictException({ code: 'PROJECT_MIGRATING', message: '项目迁移中，工作区暂不可保存或修改' });
     if (['import_queued', 'importing'].includes(project.status)) throw new ConflictException({ code: 'PROJECT_IMPORT_IN_PROGRESS', message: '项目代码正在导入，完成后才能操作工作区' });
     if (project.status === 'import_failed' && !options.allowImportFailed) throw new ConflictException({ code: 'PROJECT_IMPORT_FAILED', message: '项目代码导入失败，请先修正仓库配置并重新导入' });
     this.assertCapability(role, capability);
@@ -72,10 +78,11 @@ export class ProjectAccessService {
     });
     if (!session) throw new NotFoundException({ code: 'SESSION_NOT_FOUND_OR_INACCESSIBLE', message: '会话不存在或不属于当前用户' });
     if (session.project.status.startsWith('deleting') || session.project.status === 'deletion_failed') throw new ConflictException({ code: 'PROJECT_DELETING', message: '项目正在删除或等待资源回收' });
+    if (session.project.status === 'migrating' && capability !== 'read') throw new ConflictException({ code: 'PROJECT_MIGRATING', message: '项目迁移中，工作区暂不可保存或修改' });
     if (!options.allowProjectImport && ['import_queued', 'importing'].includes(session.project.status)) throw new ConflictException({ code: 'PROJECT_IMPORT_IN_PROGRESS', message: '项目代码正在导入，完成后才能操作工作区' });
     if (session.project.status === 'import_failed') throw new ConflictException({ code: 'PROJECT_IMPORT_FAILED', message: '项目代码导入失败，请先修正仓库配置并重新导入' });
     const role: ProjectRole | null =
-      session.project.userId === userId
+      session.project.userId === userId || await this.isPlatformAdmin(userId)
         ? 'owner'
         : normalizeRole(session.project.members[0]?.role);
     if (!role) throw new NotFoundException({ code: 'PROJECT_NOT_FOUND_OR_INACCESSIBLE', message: '项目不存在或无权访问' });

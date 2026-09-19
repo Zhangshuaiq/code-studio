@@ -19,6 +19,19 @@ export class CodexAccountController {
     return this.accounts.status(user.id);
   }
 
+  @Get('host-login')
+  @Header('Cache-Control', 'no-store')
+  hostLoginStatus() {
+    return this.accounts.hostLoginStatus();
+  }
+
+  @Post('bind-host')
+  @Header('Cache-Control', 'no-store')
+  @Audit('codex-account.bind-host', 'codex-account')
+  bindHostLogin(@CurrentUser() user: AuthUser) {
+    return this.accounts.bindHostLogin(user.id);
+  }
+
   @Post('device-login')
   @Header('Cache-Control', 'no-store')
   @Audit('codex-account.login', 'codex-account')

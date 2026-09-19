@@ -6,6 +6,7 @@ import { diagnosticMessage, redactDiagnosticText } from '../../common/redact-dia
 import { assertWorkspaceWithinLimits, workspaceLimits } from '../../common/workspace-quota';
 import { AgentEvent, GenerationInput, GenerationProvider, GenerationResult } from './generation-provider';
 import { AgentRuntimeStateService } from '../agent-runtime-state.service';
+import { CodexAccountService } from '../codex-account.service';
 
 // API 使用 CommonJS 构建；Codex SDK 只发布 ESM，因此保留原生动态 import。
 const importCodex = new Function('return import("@openai/codex-sdk")') as
@@ -13,15 +14,21 @@ const importCodex = new Function('return import("@openai/codex-sdk")') as
 
 @Injectable()
 export class CodexProvider implements GenerationProvider {
-  constructor(private readonly config: ConfigService, private readonly state: AgentRuntimeStateService) {}
+  constructor(
+    private readonly config: ConfigService,
+    private readonly state: AgentRuntimeStateService,
+    private readonly accounts: CodexAccountService,
+  ) {}
 
   async generate(input: GenerationInput): Promise<GenerationResult> {
     const { prompt, cwd, resumeId, onEvent, signal } = input;
     signal?.throwIfAborted();
     const limits = workspaceLimits((key, fallback) => Number(this.config.get(key, fallback)));
     await assertWorkspaceWithinLimits(cwd, limits);
-    if (!input.credentials?.apiKey) throw new Error('请先配置个人 OpenAI API Key');
-    const secrets: string[] = [input.credentials.apiKey];
+    const cliLogin = input.credentials?.engine === 'codex-cli';
+    if (!cliLogin && !input.credentials?.apiKey) throw new Error('请先配置个人 OpenAI API Key');
+    if (cliLogin) await this.accounts.assertConnected(input.userId);
+    const secrets: string[] = input.credentials?.apiKey ? [input.credentials.apiKey] : [];
     const events: AgentEvent[] = [];
     const push = (event: AgentEvent) => {
       const safe = { ...event, text: redactDiagnosticText(event.text, secrets) };
@@ -30,14 +37,18 @@ export class CodexProvider implements GenerationProvider {
     };
 
     const { Codex } = await importCodex();
-    const codexHome = await this.state.home(input.userId, 'codex-api');
+    const codexHome = await this.state.home(input.userId, cliLogin ? 'codex' : 'codex-api');
     const env = restrictedChildEnvironment({
       CODEX_HOME: codexHome,
     });
-    const codex = new Codex({ apiKey: input.credentials.apiKey, env: env as Record<string, string>, config: { cli_auth_credentials_store: 'ephemeral' } });
+    const codex = new Codex({
+      ...(cliLogin ? {} : { apiKey: input.credentials!.apiKey }),
+      env: env as Record<string, string>,
+      config: { cli_auth_credentials_store: cliLogin ? 'file' : 'ephemeral' },
+    });
     const options = {
       workingDirectory: cwd,
-      model: input.credentials.model,
+      model: input.credentials?.model || undefined,
       sandboxMode: 'workspace-write' as const,
       approvalPolicy: 'never' as const,
       networkAccessEnabled: false,
@@ -46,15 +57,41 @@ export class CodexProvider implements GenerationProvider {
     let contextId = resumeId;
     let isError = false;
     let hasAnswer = false;
+    const streamedMessages = new Map<string, string>();
+    const streamedReasoning = new Map<string, string>();
+    const forwardMessage = (item: { id: string; type: 'agent_message'; text: string }) => {
+      const previous = streamedMessages.get(item.id) ?? '';
+      // SDK 的 item.updated.text 是当前完整快照，向前端只发送新增部分。
+      if (item.text.startsWith(previous)) {
+        const delta = item.text.slice(previous.length);
+        if (delta) push({ kind: 'text', text: delta });
+      } else if (item.text !== previous) {
+        push({ kind: 'text', text: item.text });
+      }
+      streamedMessages.set(item.id, item.text);
+      hasAnswer = true;
+    };
     try {
       const stream = await thread.runStreamed(prompt, { signal });
       for await (const event of stream.events) {
         signal?.throwIfAborted();
         if (event.type === 'thread.started') contextId = event.thread_id;
-        else if (event.type === 'item.completed') {
+        else if (event.type === 'item.updated' && event.item.type === 'agent_message') {
+          forwardMessage(event.item);
+        } else if (event.type === 'item.updated' && event.item.type === 'reasoning') {
+          const previous = streamedReasoning.get(event.item.id) ?? '';
+          const current = event.item.text;
+          if (current.startsWith(previous) && current.length > previous.length) push({ kind: 'reasoning', text: current.slice(previous.length) });
+          else if (current !== previous) push({ kind: 'reasoning', text: current });
+          streamedReasoning.set(event.item.id, current);
+        } else if (event.type === 'item.completed') {
           await assertWorkspaceWithinLimits(cwd, limits);
-          this.forwardItem(event, push);
-          if (event.item.type === 'agent_message') hasAnswer = true;
+          if (event.item.type === 'agent_message') forwardMessage(event.item);
+          else if (event.item.type === 'reasoning') {
+            const previous = streamedReasoning.get(event.item.id) ?? '';
+            if (!previous) push({ kind: 'reasoning', text: event.item.text });
+          }
+          else this.forwardItem(event, push);
         } else if (event.type === 'turn.failed' || event.type === 'error') {
           isError = true;
           push({ kind: 'result', text: event.type === 'error' ? event.message : event.error.message });

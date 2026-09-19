@@ -57,9 +57,9 @@ data:
   SANDBOX_REACT_NATIVE_IMAGE: {{ .Values.runtime.images.reactNative | quote }}
   PROJECT_CLEANUP_WORKER_ENABLED: "true"
   PROJECT_CLEANUP_MAX_ATTEMPTS: {{ .Values.worker.projectCleanupMaxAttempts | quote }}
-  WORKSPACE_MAX_SOURCE_FILES: {{ .Values.config.workspace.maxSourceFiles | quote }}
-  WORKSPACE_MAX_FILE_BYTES: {{ .Values.config.workspace.maxFileBytes | quote }}
-  WORKSPACE_MAX_SOURCE_BYTES: {{ .Values.config.workspace.maxSourceBytes | quote }}
+  AGENT_MAX_WORKSPACE_GROWTH_FILES: {{ .Values.config.workspace.maxTaskGrowthFiles | quote }}
+  AGENT_MAX_WORKSPACE_GROWTH_BYTES: {{ .Values.config.workspace.maxTaskGrowthBytes | quote }}
+  AGENT_MIN_FREE_DISK_BYTES: {{ .Values.config.workspace.minFreeDiskBytes | quote }}
   WORKSPACE_LOCK_LEASE_MS: {{ .Values.config.workspace.lockLeaseMs | quote }}
   WORKSPACE_LOCK_WAIT_MS: {{ .Values.config.workspace.lockWaitMs | quote }}
   GIT_COMMAND_TIMEOUT_MS: {{ .Values.config.gitCommandTimeoutMs | quote }}

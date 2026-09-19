@@ -42,8 +42,57 @@ model KnowledgeDocument {
   createdAt       DateTime                    @default(now())
   updatedAt       DateTime                    @updatedAt
   revisions       KnowledgeDocumentRevision[]
+  accessMode      String                      @default("inherit") // inherit | custom
+  accessGrants    KnowledgeDocumentGrant[]
+  accessRequests  KnowledgePermissionRequest[]
 
   @@index([teamId, folderId, updatedAt])
+}
+
+model KnowledgeBaseGrant {
+  id          String   @id @default(uuid())
+  teamId      String
+  team        Team     @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  granteeKind String   // team | user
+  granteeId   String
+  canView     Boolean  @default(false)
+  canEdit     Boolean  @default(false)
+  canDelete   Boolean  @default(false)
+  createdAt   DateTime @default(now())
+
+  @@unique([teamId, granteeKind, granteeId])
+  @@index([granteeKind, granteeId])
+}
+
+model KnowledgeDocumentGrant {
+  id          String            @id @default(uuid())
+  documentId  String
+  document    KnowledgeDocument @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  granteeKind String            // team | user
+  granteeId   String
+  canView     Boolean           @default(false)
+  canEdit     Boolean           @default(false)
+  canDelete   Boolean           @default(false)
+  createdAt   DateTime          @default(now())
+
+  @@unique([documentId, granteeKind, granteeId])
+  @@index([granteeKind, granteeId])
+}
+
+model KnowledgePermissionRequest {
+  id          String            @id @default(uuid())
+  documentId  String
+  document    KnowledgeDocument @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  requesterId String
+  requester   User              @relation("KnowledgePermissionRequester", fields: [requesterId], references: [id], onDelete: Cascade)
+  permission  String            // view | edit | delete
+  message     String?           @db.VarChar(500)
+  status      String            @default("pending") // pending | approved | rejected
+  createdAt   DateTime          @default(now())
+  handledAt   DateTime?
+
+  @@unique([documentId, requesterId])
+  @@index([status, createdAt])
 }
 
 model KnowledgeDocumentRevision {
@@ -103,6 +152,8 @@ model User {
   createdKnowledgeDocuments  KnowledgeDocument[]         @relation("KnowledgeDocumentCreator")
   updatedKnowledgeDocuments  KnowledgeDocument[]         @relation("KnowledgeDocumentUpdater")
   knowledgeDocumentRevisions KnowledgeDocumentRevision[]
+  knowledgePermissionRequests KnowledgePermissionRequest[] @relation("KnowledgePermissionRequester")
+  createdTeams               Team[]                         @relation("TeamCreator")
 }
 
 model JavaTaskApplication {
@@ -369,8 +420,10 @@ model Project {
   user                        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
   name                        String
   language                    String    @default("java") // 预留多语言
-  status                      String    @default("active") // "active" | "archived"
-  volumePath                  String // 项目文件在宿主机上的挂载路径
+  status                      String    @default("active") // active | archived | migrating | import_* | deleting* | deletion_failed
+  volumePath                  String // 旧版绝对路径，仅用于迁移兼容；新项目为空
+  storageKey                  String @default("primary") // 当前部署映射到共享工作区卷
+  storagePath                 String // 卷内相对路径，当前为项目 ID
   createdAt                   DateTime  @default(now())
   deletionStartedAt           DateTime?
   deletionError               String?   @db.Text
@@ -838,6 +891,9 @@ model Team {
   id          String   @id @default(uuid())
   name        String   @unique
   description String?
+  createdById String?
+  createdBy   User?    @relation("TeamCreator", fields: [createdById], references: [id], onDelete: SetNull)
+  knowledgeAccessMode String @default("default") // default | custom
   createdAt   DateTime @default(now())
 
   members            User[]              @relation("TeamMembers")
@@ -847,6 +903,7 @@ model Team {
   requirements       Requirement[]
   knowledgeFolders   KnowledgeFolder[]
   knowledgeDocuments KnowledgeDocument[]
+  knowledgeBaseGrants KnowledgeBaseGrant[]
 }
 
 // 数据源：MySQL/Redis/MongoDB 等外部数据库连接配置。凭证加密存储。

@@ -1,24 +1,18 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
 import { existsSync, realpathSync } from 'node:fs';
-import { isAbsolute, join, relative, resolve } from 'node:path';
+import { isAbsolute, join, relative } from 'node:path';
 import { GitService } from '../git/git.service';
 import { ProjectAccessService } from '../project-access/project-access.service';
 import { isMcpReadablePath } from './mcp-file-policy';
+import { WorkspaceStorageService } from './workspace-storage.service';
 
 @Injectable()
 export class WorkspaceMcpFacade {
-  private readonly projectsRoot: string;
-  private readonly workspacesRoot: string;
-
   constructor(
-    config: ConfigService,
+    private readonly storage: WorkspaceStorageService,
     private readonly access: ProjectAccessService,
     private readonly git: GitService,
-  ) {
-    this.projectsRoot = resolve(config.get<string>('SANDBOX_PROJECTS_ROOT', '.data/projects'));
-    this.workspacesRoot = resolve(config.get<string>('SANDBOX_WORKSPACES_ROOT', '.data/workspaces'));
-  }
+  ) {}
 
   async get(userId: string, sessionId: string) {
     const session = await this.access.requireSession(userId, sessionId, 'read');
@@ -94,9 +88,8 @@ export class WorkspaceMcpFacade {
     session: Awaited<ReturnType<ProjectAccessService['requireSession']>>,
     userId: string,
   ) {
-    if (!session.workspacePath) return null;
-    const path = resolve(session.workspacePath);
-    const root = session.project.userId === userId ? this.projectsRoot : this.workspacesRoot;
+    const path = this.storage.userPath(session.project, userId);
+    const root = session.project.userId === userId ? this.storage.projectsRoot : this.storage.workspacesRoot;
     const rel = relative(root, path);
     if (!rel || rel.startsWith('..') || isAbsolute(rel)) return null;
     if (!existsSync(path) || !existsSync(join(path, '.git'))) return null;

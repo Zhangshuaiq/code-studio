@@ -1,10 +1,11 @@
 import { useAuth } from '../store/auth';
 
 export interface AgentEvent {
-  kind: 'text' | 'tool_use' | 'result' | 'system';
+  kind: 'text' | 'tool_use' | 'result' | 'system' | 'reasoning';
   text?: string;
   toolName?: string;
   toolInput?: unknown;
+  sequence?: number;
 }
 
 export interface DoneResult {
@@ -20,18 +21,16 @@ interface Handlers {
   onError?: (msg: string) => void;
 }
 
-// 流式调用 /agent/run/stream：用 fetch 读取 SSE 流（支持 POST + 鉴权头）
+// 先提交任务取得 ID，再订阅；刷新时可直接按 ID 恢复，不重复创建任务。
 export async function streamAgentRun(
   sessionId: string,
   prompt: string,
   handlers: Handlers,
 ): Promise<void> {
   const token = useAuth.getState().token;
-  let taskId: string | undefined;
-  let terminal = false;
   let res: Response;
   try {
-    res = await fetch('/api/agent/run/stream', {
+    res = await fetch('/api/agent/run/start', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -43,36 +42,94 @@ export async function streamAgentRun(
     handlers.onError?.(String(e));
     return;
   }
+  if (!res.ok) {
+    handlers.onError?.(`任务提交失败 (HTTP ${res.status})`);
+    return;
+  }
+  const started = await res.json() as { taskId: string };
+  handlers.onQueued?.(started.taskId);
+  await watchAgentTask(started.taskId, handlers);
+}
 
-  if (!(await validateResponse(res, handlers))) return;
-  await consume(res);
-
-  // POST 已成功入队后只按 taskId 恢复订阅；绝不重放原始生成请求。
-  for (let attempt = 1; !terminal && taskId && attempt <= 3; attempt += 1) {
-    await delay(attempt * 1_000);
+export async function watchAgentTask(taskId: string, handlers: Handlers, signal?: AbortSignal): Promise<void> {
+  const token = useAuth.getState().token;
+  let terminal = false;
+  let lastSequence = 0;
+  const seenUnsequenced = new Set<string>();
+  let pollTimer: number | undefined;
+  const streamController = new AbortController();
+  const stop = () => streamController.abort();
+  signal?.addEventListener('abort', stop, { once: true });
+  if (signal?.aborted) stop();
+  const finish = (result: DoneResult) => {
+    if (terminal || streamController.signal.aborted) return;
+    terminal = true;
+    handlers.onDone?.(result);
+    streamController.abort();
+  };
+  const forward = (event: AgentEvent) => {
+    if (terminal || streamController.signal.aborted) return;
+    if (event.sequence) {
+      if (event.sequence <= lastSequence) return;
+      lastSequence = event.sequence;
+    } else {
+      // 兼容仍在旧 Worker 中运行的任务：轮询和 SSE 可能反复送来同一条进度。
+      const fingerprint = JSON.stringify([event.kind, event.text, event.toolName, event.toolInput]);
+      if (seenUnsequenced.has(fingerprint)) return;
+      seenUnsequenced.add(fingerprint);
+    }
+    handlers.onEvent?.(event);
+  };
+  const poll = async () => {
+    if (terminal || streamController.signal.aborted) return;
     try {
-      res = await fetch(`/api/agent/tasks/${encodeURIComponent(taskId)}/stream`, {
+      const response = await fetch(`/api/agent/tasks/${encodeURIComponent(taskId)}/live`, {
         headers: token ? { Authorization: `Bearer ${token}` } : {},
       });
+      if (!response.ok) return;
+      const live = await response.json() as { taskId: string; status: string; log?: string; progress?: AgentEvent };
+      if (streamController.signal.aborted) return;
+      if (live.progress) forward(live.progress);
+      if (['succeeded', 'failed', 'cancelled', 'timed_out'].includes(live.status)) {
+        finish({ taskId: live.taskId, status: live.status === 'succeeded' ? 'succeeded' : 'failed', log: live.log ?? '' });
+      }
+    } catch { /* 下一轮继续检查，不重复提交任务。 */ }
+  };
+  pollTimer = window.setInterval(() => void poll(), 1_500);
+  try {
+  // 独立订阅已有任务；断线只重连 taskId，绝不重放原始生成请求。
+  for (let attempt = 0; !terminal && !streamController.signal.aborted; attempt += 1) {
+    await poll();
+    if (terminal) break;
+    if (attempt) await delay(Math.min(attempt, 5) * 1_000);
+    try {
+      const res = await fetch(`/api/agent/tasks/${encodeURIComponent(taskId)}/stream`, {
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+        signal: streamController.signal,
+      });
+      if (!(await validateResponse(res, handlers, false))) {
+        if (res.status === 401) {
+          terminal = true;
+          break;
+        }
+        continue;
+      }
+      await consume(res);
     } catch {
       continue;
     }
-    if (!(await validateResponse(res, handlers, attempt === 3))) {
-      if (res.status === 401) {
-        terminal = true;
-        break;
-      }
-      continue;
-    }
-    await consume(res);
   }
 
-  if (!terminal) {
+  if (!terminal && !streamController.signal.aborted) {
     handlers.onError?.(
       taskId
         ? '实时连接已中断，任务仍在后台执行，可在任务中心查看最终结果'
         : '请求连接已中断，请确认任务是否成功提交',
     );
+  }
+  } finally {
+    if (pollTimer !== undefined) window.clearInterval(pollTimer);
+    signal?.removeEventListener('abort', stop);
   }
 
   async function consume(response: Response) {
@@ -95,16 +152,15 @@ export async function streamAgentRun(
           try {
             const msg = JSON.parse(json);
             if (msg.type === 'queued') {
-              taskId = msg.taskId;
               handlers.onQueued?.(msg.taskId);
             } else if (msg.type === 'event') {
-              handlers.onEvent?.(msg.event);
+              forward(msg.event);
             } else if (msg.type === 'done') {
-              terminal = true;
-              handlers.onDone?.(msg);
+              finish(msg);
             } else if (msg.type === 'error') {
               terminal = true;
               handlers.onError?.(msg.message);
+              streamController.abort();
             }
           } catch {
             // 单个非法事件不应中止仍在工作的任务流。

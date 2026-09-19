@@ -7,6 +7,7 @@ export interface SessionTask {
   status: string; // queued | running | cancelling | succeeded | failed | cancelled | timed_out
   resultLog?: string | null;
   createdAt: string;
+  startedAt?: string | null;
   finishedAt?: string | null;
 }
 

@@ -50,6 +50,13 @@ export class AgentController {
     return this.queue.waitFor(job);
   }
 
+  /** 立即返回任务 ID；前端随后独立订阅事件，避免 POST SSE 被代理缓冲。 */
+  @Post('run/start')
+  async start(@CurrentUser() user: AuthUser, @Body() dto: RunTaskDto) {
+    const { task } = await this.queue.enqueue(user.id, dto.sessionId, dto.prompt);
+    return { taskId: task.id, status: task.status };
+  }
+
   /** 流式生成：SSE 实时把生成过程逐条推给前端（对话/日志实时可见） */
   @Post('run/stream')
   async runStream(
@@ -107,6 +114,12 @@ export class AgentController {
   @RequirePermissions(PERMISSIONS.PROJECT_READ)
   task(@CurrentUser() user: AuthUser, @Param('id') taskId: string) {
     return this.agent.getTask(user.id, taskId);
+  }
+
+  @Get('tasks/:id/live')
+  @RequirePermissions(PERMISSIONS.PROJECT_READ)
+  liveTask(@CurrentUser() user: AuthUser, @Param('id') taskId: string) {
+    return this.queue.liveStatus(user.id, taskId);
   }
 
   /** SSE 断线恢复：重新订阅已有任务，不会重复创建生成任务。 */

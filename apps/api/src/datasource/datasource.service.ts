@@ -16,6 +16,10 @@ export class DatasourceService {
     private readonly crypto: CryptoService,
   ) {}
 
+  private async isPlatformAdmin(userId: string) {
+    return (await this.prisma.user.count({ where: { id: userId, roles: { some: { name: 'admin' } } } })) > 0;
+  }
+
   async resolveForDeployment(userId: string, id: string, teamId: string | null) {
     const row = await this.prisma.datasource.findFirst({
       where: { id, ...(teamId ? { teamId } : {}), members: { some: { userId } } },
@@ -31,9 +35,10 @@ export class DatasourceService {
 
   // 根据用户所属项目组 + 显式授权过滤数据源
   async listDatasources(userId: string, query: DatasourceListQueryDto) {
-    // 用户可见的数据源：被授权的（通过 DatasourceMember）
+    // 管理员可以看到并清理项目组下所有数据源；普通用户仍按显式授权过滤。
+    const isAdmin = await this.isPlatformAdmin(userId);
     const where = {
-        members: { some: { userId } },
+        ...(!isAdmin ? { members: { some: { userId } } } : {}),
         ...(query.category ? { category: query.category } : {}),
     };
     const [items, total] = await this.prisma.$transaction([
@@ -60,10 +65,11 @@ export class DatasourceService {
   }
 
   async getDatasource(id: string, userId: string) {
+    const isAdmin = await this.isPlatformAdmin(userId);
     const ds = await this.prisma.datasource.findFirst({
       where: {
         id,
-        members: { some: { userId } }, // 必须被授权
+        ...(!isAdmin ? { members: { some: { userId } } } : {}),
       },
       include: {
         team: {

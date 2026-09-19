@@ -188,7 +188,9 @@ docker build -t sandbox-python:1.0 sandbox-images/python
 - `aider`：通过本机 Aider 子进程做仓库感知的增量编辑。可通过 `AIDER_BIN` 指定可执行文件路径。
 - `claude-agent`：provider 代码仍保留，供后续平台凭证模式扩展；当前 UI/API 的模型配置只接受 OpenAI 兼容配置，正常生成流程要求先配置 BYOK 模型。
 
-成功生成后，系统会补齐必要脚手架、创建 Git 提交，并在 `AUTO_PREVIEW=true` 时异步启动预览。
+成功生成后，系统会创建 Git 提交，但不会自动补齐脚手架文件；已有项目由智能体读取真实目录结构并按任务需要修改。预览不会自动启动，用户可在工作区点击「部署预览」。
+
+项目对话提交后立即取得任务 ID，并用 SSE 实时展示可公开的模型输出、推理摘要与工具进度；轮询负责断线兜底。刷新页面会按已有任务 ID 恢复 `Working` 计时和订阅，不重复提交任务。对话完成只刷新代码和历史，不自动打开运行日志。Git 菜单可查看并检出远程分支。管理员可在确认共享存储目录缺失且真实运行资源已停止后，清除删除失败项目的数据库关联记录。具体安全边界见 [独立编码 Worker](docs/agent-worker-deployment.md)。
 
 ## Git 仓库与用户身份
 
@@ -338,8 +340,8 @@ npm run seed:runtime-demo --workspace=apps/api # 可选：写入运行资源/部
 - kubeconfig 应使用最小权限 ServiceAccount，不要直接提供长期有效的 `cluster-admin` 凭证。
 - 数据源查询接口允许执行用户提交的 SQL/命令，只应授权给可信用户，并使用低权限数据库账号。数据源密码只在服务端解密，详情接口不会回传；编辑时密码留空表示保留原值。
 - Git、数据库原生工具、SSH/SFTP、部署及 AI Provider 的外部诊断统一去除 ANSI，并对私钥、Authorization、Cookie、URL 凭证、JWT 和已知密钥脱敏；持久化任务日志同样只保存脱敏后的受限长度内容。
-- 手动保存和 Simple LLM 批量生成在落盘前执行源码工作区配额检查，默认限制 2,000 个源码文件、单文件 2 MiB、源码总量 100 MiB；依赖目录、构建产物和 Git 数据不计入源码配额，且文件 API 禁止通过符号链接或内部目录读写卷外内容。可通过 `WORKSPACE_MAX_SOURCE_FILES`、`WORKSPACE_MAX_FILE_BYTES`、`WORKSPACE_MAX_SOURCE_BYTES` 调整。
-- Aider 执行期间每秒审计工作区配额，Claude Agent 在每轮工具结果后审计，并在构建和提交前统一复核。外部 AI 子进程只继承网络代理、证书等必要环境，不会继承数据库、JWT、Registry 等平台密钥；保留的 Claude Provider 仅允许仓库读写工具，禁止 Shell 和网络工具。
+- 普通保存、导入和预览不再按整个工作区的文件数或容量拒绝写入；文件 API 仍禁止路径越界、通过符号链接或内部目录读写卷外内容。编码任务每 10 秒监测一次本次源码净增长及共享卷可用空间，默认在新增超过 20,000 文件、净增长超过 2 GiB 或可用空间低于 1 GiB 时停止该任务，不删除已有文件；可用 `AGENT_MAX_WORKSPACE_GROWTH_FILES`、`AGENT_MAX_WORKSPACE_GROWTH_BYTES`、`AGENT_MIN_FREE_DISK_BYTES` 调整。
+- 编码 Worker 仍有执行超时和并发控制；外部 AI 子进程只继承网络代理、证书等必要环境，不会继承数据库、JWT、Registry 等平台密钥；保留的 Claude Provider 仅允许仓库读写工具，禁止 Shell 和网络工具。
 - Docker 沙箱限制进程数和 `/tmp` 容量，命令输出只保留受限尾部。Kubernetes 构建门禁把 PVC 源码以只读方式挂载，复制到带 `sizeLimit` 的独立 `emptyDir` 后构建，同时设置 ephemeral-storage request/limit；依赖和构建产物不再写回共享源码 PVC。
 - Kubernetes 生成 Job 使用独立的 `networkPolicy.generationEgressCidrs`/`generationExtraEgress`，不会继承 API/Worker 的宽出口；默认仅允许 DNS。生产应指向内部 npm/PyPI/Maven 镜像或受控 egress gateway，Chart 默认拒绝生成 Job 使用 `0.0.0.0/0`、`::/0`。Job 关闭 Service Links，并可通过 `runtime.kubernetes.nodeSelector`、`tolerations` 调度到专用执行节点。
 - 默认依赖策略 `proxy-upstream` 在所有环境强制配置 npm、PyPI、Maven 内部代理，允许代理获取并缓存上游缺失依赖；`proxy-cache-only` 仍强制走代理，但上游开关由代理平台管理；`direct` 是显式可选的直连策略。生产 Kubernetes 的代理地址必须为 HTTPS。Maven settings 仅生成在本次 Job 的临时卷中，代理 URL 不允许内嵌凭证，NetworkPolicy 还需放行代理或受控出口的精确目标。

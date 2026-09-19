@@ -282,6 +282,15 @@ export function useBranches(sessionId?: string) {
   });
 }
 
+export function useRemoteBranches(sessionId?: string, enabled = true) {
+  return useQuery<{ list: string[] }>({
+    queryKey: ['git-remote-branches', sessionId],
+    enabled: !!sessionId && enabled,
+    queryFn: async () => (await api.get(`/sessions/${sessionId}/git/remote-branches`)).data,
+    staleTime: 30_000,
+  });
+}
+
 // 分支变更后需要刷新的所有查询（代码/预览/历史都变了）
 function invalidateAfterBranch(
   qc: ReturnType<typeof useQueryClient>,
@@ -294,6 +303,7 @@ function invalidateAfterBranch(
     "commits",
     "git-branch",
     "git-branches",
+    "git-remote-branches",
     "git-sync-status",
     "preview",
   ]) {
@@ -313,12 +323,16 @@ export function useBranchOps(sessionId?: string) {
       api.post(`/sessions/${sessionId}/git/checkout`, { name }),
     onSuccess: () => invalidateAfterBranch(qc, sessionId),
   });
+  const checkoutRemote = useMutation({
+    mutationFn: (name: string) => api.post(`/sessions/${sessionId}/git/remote-checkout`, { name }),
+    onSuccess: () => invalidateAfterBranch(qc, sessionId),
+  });
   const remove = useMutation({
     mutationFn: (name: string) =>
       api.post(`/sessions/${sessionId}/git/branches/${name}/delete`),
     onSuccess: () => invalidateAfterBranch(qc, sessionId),
   });
-  return { create, checkout, remove };
+  return { create, checkout, checkoutRemote, remove };
 }
 
 export function usePush(sessionId?: string) {

@@ -116,6 +116,13 @@ export class AdminController {
     return this.admin.retryProjectCleanup(id);
   }
 
+  @Delete('project-cleanups/:id/missing-records')
+  @RequirePermissions(PERMISSIONS.SYSTEM_SETTING_MANAGE)
+  @Audit('project.cleanup.purge-missing-records', 'project')
+  purgeMissingProject(@Param('id') id: string) {
+    return this.admin.purgeMissingProject(id);
+  }
+
   @Patch('project-cleanups/:id/acknowledge')
   @RequirePermissions(PERMISSIONS.SYSTEM_SETTING_MANAGE)
   @Audit('project.cleanup.acknowledge', 'project')

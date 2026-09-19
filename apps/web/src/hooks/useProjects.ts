@@ -32,12 +32,7 @@ export function useProjects() {
     queryKey: ['projects'],
     enabled: !!token,
     queryFn: async () => (await api.get('/projects', { params: { pageSize: 200 } })).data.items,
-    refetchInterval: (query) =>
-      query.state.data?.some((project) =>
-        ['import_queued', 'importing'].includes(project.status),
-      )
-        ? 3_000
-        : false,
+    refetchInterval: 5_000,
   });
 }
 
@@ -47,6 +42,7 @@ export function useProject(id?: string) {
     queryKey: ['project', id],
     enabled: !!token && !!id,
     queryFn: async () => (await api.get(`/projects/${id}`)).data,
+    refetchInterval: 5_000,
   });
 }
 
@@ -57,7 +53,7 @@ export function useProjectMutations() {
   const create = useMutation({
     mutationFn: (input: {
       source: 'blank' | 'git';
-      name: string;
+      name?: string;
       language: string;
       teamId?: string;
       repositoryUrl?: string;
@@ -83,7 +79,11 @@ export function useProjectMutations() {
     mutationFn: (id: string) => api.post(`/projects/${id}/import/retry`),
     onSuccess: invalidate,
   });
-  return { create, update, remove, retryImport };
+  const keepLocalImport = useMutation({
+    mutationFn: (id: string) => api.post(`/projects/${id}/import/keep-local`),
+    onSuccess: invalidate,
+  });
+  return { create, update, remove, retryImport, keepLocalImport };
 }
 
 export interface ProjectRepository {

@@ -15,6 +15,8 @@ import {
 import { PageQueryDto, pageArgs, pageResult } from '../common/dto/page-query.dto';
 import { ProjectCleanupListQueryDto, ProjectImportListQueryDto } from './dto/admin.dto';
 import type { AuthUser } from '../auth/jwt.strategy';
+import { WorkspaceService } from '../workspace/workspace.service';
+import { DeployService } from '../deploy/deploy.service';
 
 export interface CreateUserInput {
   username: string;
@@ -32,7 +34,7 @@ export interface UpdateUserInput {
 
 @Injectable()
 export class AdminService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(private readonly prisma: PrismaService, private readonly workspaces: WorkspaceService, private readonly deploy: DeployService) {}
 
   // ---- 用户 ----
 
@@ -196,6 +198,10 @@ export class AdminService {
         orderBy: [{ status: 'asc' }, { deletionNextAttemptAt: 'asc' }],
         select: {
           id: true,
+          userId: true,
+          storageKey: true,
+          storagePath: true,
+          volumePath: true,
           name: true,
           status: true,
           deletionStartedAt: true,
@@ -213,7 +219,30 @@ export class AdminService {
       }),
       this.prisma.project.count({ where }),
     ]);
-    return pageResult(items, total, query);
+    return pageResult(await Promise.all(items.map(async (item) => ({
+      ...item,
+      canPurgeMissingFiles: item.status === 'deletion_failed' && await this.workspaces.projectFilesMissing(item).catch(() => false),
+    }))), total, query);
+  }
+
+  /** 仅清除已确认无文件的失败项目记录，关联表由数据库外键级联回收。 */
+  async purgeMissingProject(id: string) {
+    const project = await this.prisma.project.findUnique({ where: { id } });
+    if (!project || project.status !== 'deletion_failed') {
+      throw new ConflictException({ code: 'PROJECT_CLEANUP_NOT_FAILED', message: '只能清除资源回收失败的项目' });
+    }
+    if (!await this.workspaces.projectFilesMissing(project)) {
+      throw new ConflictException({ code: 'PROJECT_FILES_STILL_PRESENT', message: '仍发现项目文件或工作区，不能仅清除关联记录；请重新回收或先迁移文件' });
+    }
+    const activePreviews = await this.prisma.previewInstance.count({ where: { session: { projectId: id }, status: { in: ['running', 'starting'] } } });
+    if (activePreviews) {
+      throw new ConflictException({ code: 'PROJECT_RUNTIME_STILL_ACTIVE', message: '项目仍存在运行中的预览，不能仅清除关联记录' });
+    }
+    const activeDeployment = await this.prisma.deployment.count({ where: { projectId: id, status: { in: ['running', 'building'] } } });
+    if (activeDeployment) await this.deploy.stopProjectForCleanup(id);
+    const result = await this.prisma.project.deleteMany({ where: { id, status: 'deletion_failed' } });
+    if (!result.count) throw new ConflictException({ code: 'PROJECT_CLEANUP_STATE_CHANGED', message: '项目状态已变化，请刷新后重试' });
+    return { ok: true, removedProjectId: id };
   }
 
   async retryProjectCleanup(id: string) {

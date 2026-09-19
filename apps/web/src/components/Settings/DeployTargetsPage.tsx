@@ -1022,9 +1022,6 @@ function TargetDetailModal({
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/55 p-4 backdrop-blur-sm"
-      onMouseDown={(event) => {
-        if (event.target === event.currentTarget) onClose();
-      }}
     >
       <div className="card animate-fade-in max-h-[88vh] w-full max-w-6xl overflow-y-auto">
         <div className="sticky top-0 z-10 flex items-start justify-between gap-4 border-b border-slate-200/80 bg-white/95 px-5 py-4 backdrop-blur dark:border-slate-800 dark:bg-slate-900/95">

@@ -147,7 +147,6 @@ export function GitRemoteModal({
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/55 p-4 backdrop-blur-sm"
-      onClick={onClose}
     >
       <div
         className="card animate-fade-in max-h-[92vh] w-full max-w-2xl overflow-y-auto p-0"

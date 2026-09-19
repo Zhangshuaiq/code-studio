@@ -6,6 +6,7 @@ import {
   Folder,
   FolderPlus,
   Plus,
+  Trash2,
 } from "lucide-react";
 import {
   useKnowledgeMutations,
@@ -21,7 +22,7 @@ export function KnowledgeBasePage() {
   const [folderId, setFolderId] = useState<string>();
   const tree = useKnowledgeTree(teamId);
   const mutations = useKnowledgeMutations(teamId);
-  const { prompt, toast } = useFeedback();
+  const { prompt, toast, confirm } = useFeedback();
   useEffect(() => {
     if (!teamId && teams.data?.[0]) setTeamId(teams.data[0].id);
   }, [teamId, teams.data]);
@@ -141,14 +142,17 @@ export function KnowledgeBasePage() {
           </div>
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
             {folders.map((folder) => (
-              <button
+              <div
                 key={folder.id}
                 className="card group flex min-h-32 flex-col justify-between p-5 text-left transition-colors hover:border-indigo-300 hover:bg-indigo-50/40 dark:hover:border-indigo-700 dark:hover:bg-indigo-500/5"
-                onClick={() => setFolderId(folder.id)}
               >
-                <span className="icon-tile text-indigo-600 dark:text-indigo-300"><Folder size={20} /></span>
-                <span className="flex w-full min-w-0 items-center justify-between gap-2"><span className="truncate text-sm font-semibold" title={folder.name}>{folder.name}</span><ChevronRight size={16} className="shrink-0 text-muted group-hover:text-indigo-600" /></span>
-              </button>
+                <span className="flex items-start justify-between gap-2"><span className="icon-tile text-indigo-600 dark:text-indigo-300"><Folder size={20} /></span><button className="btn btn-ghost btn-sm text-red-600" title={`删除文件夹 ${folder.name}`} onClick={async () => {
+                  if (!await confirm({ title: "删除文件夹", message: `确定删除空文件夹「${folder.name}」？`, confirmText: "删除", tone: "danger" })) return;
+                  try { await mutations.deleteFolder.mutateAsync(folder.id); toast("文件夹已删除", { tone: "success" }); }
+                  catch (error) { toast(errText(error), { tone: "error", title: "删除失败" }); }
+                }}><Trash2 size={14} /></button></span>
+                <button className="flex w-full min-w-0 items-center justify-between gap-2 text-left" onClick={() => setFolderId(folder.id)}><span className="truncate text-sm font-semibold" title={folder.name}>{folder.name}</span><ChevronRight size={16} className="shrink-0 text-muted group-hover:text-indigo-600" /></button>
+              </div>
             ))}
             {docs.map((doc) => (
               <a

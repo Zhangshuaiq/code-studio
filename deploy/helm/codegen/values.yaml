@@ -124,9 +124,9 @@ config:
     pipIndexUrl: ""
     mavenMirrorUrl: ""
   workspace:
-    maxSourceFiles: 2000
-    maxFileBytes: 2097152
-    maxSourceBytes: 104857600
+    maxTaskGrowthFiles: 20000
+    maxTaskGrowthBytes: 2147483648
+    minFreeDiskBytes: 1073741824
     lockLeaseMs: 60000
     lockWaitMs: 30000
   gitCommandTimeoutMs: 600000

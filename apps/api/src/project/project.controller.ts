@@ -45,6 +45,13 @@ export class ProjectController {
     return this.projects.retryImport(user.id, id);
   }
 
+  @Post(':id/import/keep-local')
+  @RequirePermissions(PERMISSIONS.PROJECT_WRITE)
+  @Audit('project.git-import.keep-local', 'project')
+  keepLocalAfterImportFailure(@CurrentUser() user: AuthUser, @Param('id') id: string) {
+    return this.projects.keepLocalAfterImportFailure(user.id, id);
+  }
+
   @Get()
   findAll(@CurrentUser() user: AuthUser, @Query() query: PageQueryDto) {
     return this.projects.findAll(user.id, query);

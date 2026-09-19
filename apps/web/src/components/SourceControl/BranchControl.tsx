@@ -18,6 +18,7 @@ import {
 } from "lucide-react";
 import {
   useBranches,
+  useRemoteBranches,
   useBranchOps,
   usePush,
   useRemote,
@@ -32,6 +33,7 @@ import { GitRemoteModal } from "../HistoryPanel/GitRemoteModal";
 
 type PendingOperation =
   | { kind: "checkout"; branch: string }
+  | { kind: "remote-checkout"; branch: string }
   | { kind: "create"; branch: string }
   | { kind: "sync" };
 
@@ -55,6 +57,7 @@ export function BranchControl({
   const branches = useBranches(sessionId);
   const branchOps = useBranchOps(sessionId);
   const remote = useRemote(sessionId);
+  const remoteBranches = useRemoteBranches(sessionId, !!remote.data?.remoteUrl);
   const syncStatus = useRemoteSyncStatus(sessionId);
   const syncOps = useRemoteSyncOps(sessionId);
   const push = usePush(sessionId);
@@ -97,6 +100,10 @@ export function BranchControl({
       keyword ? branch.toLowerCase().includes(keyword) : true,
     );
   }, [branches.data?.list, filter]);
+  const filteredRemoteBranches = useMemo(() => {
+    const keyword = filter.trim().toLowerCase();
+    return (remoteBranches.data?.list ?? []).filter((branch) => !keyword || branch.toLowerCase().includes(keyword));
+  }, [remoteBranches.data?.list, filter]);
 
   useEffect(() => {
     if (!open) return;
@@ -190,6 +197,10 @@ export function BranchControl({
         await branchOps.checkout.mutateAsync(operation.branch);
         await refreshWorkspaceFiles();
         setNotice(`已切换到 ${operation.branch}`);
+      } else if (operation.kind === "remote-checkout") {
+        await branchOps.checkoutRemote.mutateAsync(operation.branch);
+        await refreshWorkspaceFiles();
+        setNotice(`已从远端检出并切换到 ${operation.branch}`);
       } else if (operation.kind === "create") {
         await branchOps.create.mutateAsync(operation.branch);
         await refreshWorkspaceFiles();
@@ -331,6 +342,7 @@ export function BranchControl({
   const branchBusy =
     operationBusy ||
     branchOps.checkout.isPending ||
+    branchOps.checkoutRemote.isPending ||
     branchOps.create.isPending ||
     branchOps.remove.isPending;
 
@@ -517,7 +529,7 @@ export function BranchControl({
                   <input
                     value={filter}
                     onChange={(event) => setFilter(event.target.value)}
-                    placeholder="搜索本地分支"
+                    placeholder="搜索本地和远程分支"
                     className="input h-8 pl-8 text-xs"
                     autoFocus
                   />
@@ -584,6 +596,31 @@ export function BranchControl({
                     })
                   )}
                 </div>
+                {remote.data?.remoteUrl && (
+                  <div className="mt-3 border-t border-slate-200 pt-2 dark:border-slate-700">
+                    <div className="mb-1 flex items-center justify-between px-2 text-[9px] font-bold uppercase tracking-[0.14em] text-muted">
+                      <span>Remote branches</span>
+                      <button type="button" onClick={() => void remoteBranches.refetch()} className="text-indigo-600 hover:underline dark:text-indigo-300">刷新</button>
+                    </div>
+                    {remoteBranches.isLoading ? (
+                      <p className="px-2 py-2 text-xs text-muted">正在读取远程分支…</p>
+                    ) : remoteBranches.isError ? (
+                      <p className="px-2 py-2 text-xs text-red-500">远程分支读取失败，请检查凭据或点击刷新</p>
+                    ) : !filteredRemoteBranches.length ? (
+                      <p className="px-2 py-2 text-xs text-muted">没有匹配的远程分支</p>
+                    ) : (
+                      <div className="max-h-48 overflow-y-auto">
+                        {filteredRemoteBranches.map((branch) => (
+                          <button key={branch} type="button" onClick={() => requestOperation({ kind: 'remote-checkout', branch })} disabled={readOnly || branchBusy || mergeInProgress || branch === currentBranch} className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-xs text-slate-600 hover:bg-slate-100 disabled:opacity-50 dark:text-slate-300 dark:hover:bg-slate-800" title={`检出远程分支 ${branch}`}>
+                            {branch === currentBranch ? <Check size={13} /> : <GitBranch size={13} />}
+                            <span className="truncate">{branch}</span>
+                            <span className="ml-auto text-[10px] text-muted">{branch === currentBranch ? '当前' : 'Checkout'}</span>
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
 
               <button
@@ -673,7 +710,7 @@ function UnsavedSwitchDialog({
   onDiscard: () => void;
 }) {
   const target =
-    operation.kind === "checkout"
+    operation.kind === "checkout" || operation.kind === "remote-checkout"
       ? `切换到 ${operation.branch}`
       : operation.kind === "create"
         ? `创建并切换到 ${operation.branch}`

@@ -4,6 +4,8 @@ import { Prisma } from '@prisma/client';
 import { AddMembersDto, CreateTeamDto, UpdateTeamDto } from './dto/team.dto';
 import { PageQueryDto, pageArgs, pageResult } from '../common/dto/page-query.dto';
 
+const PROJECT_CLEANUP_STATUSES = ['deleting', 'deleting_cleanup', 'deletion_failed'];
+
 @Injectable()
 export class TeamService {
   constructor(private readonly prisma: PrismaService) {}
@@ -21,7 +23,19 @@ export class TeamService {
     }),
       this.prisma.team.count(),
     ]);
-    return pageResult(items, total, query);
+    const cleanupCounts = items.length ? await this.prisma.project.groupBy({
+      by: ['teamId'],
+      where: { teamId: { in: items.map((team) => team.id) }, status: { in: PROJECT_CLEANUP_STATUSES } },
+      _count: { _all: true },
+    }) : [];
+    const cleanupByTeam = new Map(cleanupCounts.map((entry) => [entry.teamId, entry._count._all]));
+    return pageResult(items.map((team) => ({
+      ...team,
+      projectCounts: {
+        visible: team._count.projects - (cleanupByTeam.get(team.id) ?? 0),
+        cleanup: cleanupByTeam.get(team.id) ?? 0,
+      },
+    })), total, query);
   }
 
   async getTeam(id: string) {
@@ -29,7 +43,7 @@ export class TeamService {
       where: { id },
       include: {
         members: { take: 500, select: { id: true, username: true, email: true } },
-        projects: { take: 500, select: { id: true, name: true } },
+        projects: { where: { status: { notIn: PROJECT_CLEANUP_STATUSES } }, take: 500, select: { id: true, name: true } },
         datasources: { take: 500, select: { id: true, name: true, type: true } },
       },
     });
@@ -37,9 +51,9 @@ export class TeamService {
     return team;
   }
 
-  async createTeam(dto: CreateTeamDto) {
+  async createTeam(dto: CreateTeamDto, createdById?: string) {
     try {
-      return await this.prisma.team.create({ data: { name: dto.name, description: dto.description } });
+      return await this.prisma.team.create({ data: { name: dto.name, description: dto.description, createdById } });
     } catch (error) {
       this.rethrowTeamConflict(error);
     }
@@ -59,17 +73,48 @@ export class TeamService {
       await this.prisma.$transaction(async (tx) => {
         const team = await tx.team.findUnique({
           where: { id },
-          select: { _count: { select: { projects: true, datasources: true, deployTargets: true } } },
+          select: { id: true },
         });
         if (!team) throw new NotFoundException({ code: 'TEAM_NOT_FOUND', message: '项目组不存在' });
+        const [projects, datasources, deployTargets, requirements, knowledgeFolders, knowledgeDocuments] = await Promise.all([
+          tx.project.findMany({ where: { teamId: id, status: { notIn: PROJECT_CLEANUP_STATUSES } }, select: { id: true, name: true, status: true, deletionError: true } }),
+          tx.datasource.findMany({ where: { teamId: id }, select: { id: true, name: true } }),
+          tx.deployTarget.findMany({ where: { teamId: id }, select: { id: true, name: true } }),
+          tx.requirement.findMany({ where: { teamId: id }, select: { id: true, title: true } }),
+          tx.knowledgeFolder.findMany({ where: { teamId: id }, select: { id: true, name: true, parentId: true } }),
+          tx.knowledgeDocument.findMany({ where: { teamId: id }, select: { id: true, title: true } }),
+        ]);
         const blockers = {
-          projects: team._count.projects,
-          datasources: team._count.datasources,
-          deployTargets: team._count.deployTargets,
+          projects: projects.length,
+          datasources: datasources.length,
+          deployTargets: deployTargets.length,
+          requirements: requirements.length,
+          knowledgeFolders: 0,
+          knowledgeDocuments: knowledgeDocuments.length,
         };
         if (Object.values(blockers).some((count) => count > 0)) {
-          throw new ConflictException({ code: 'TEAM_DELETE_BLOCKED', message: '项目组仍关联项目、数据源或部署目标，不能删除', blockers });
+          throw new ConflictException({
+            code: 'TEAM_DELETE_BLOCKED',
+            message: '项目组仍有关联资源，不能删除',
+            blockers,
+            blockerDetails: { projects, datasources, deployTargets, requirements, knowledgeFolders: [], knowledgeDocuments },
+          });
         }
+        // 没有知识文档时，文件夹只是空目录结构。按叶子到根删除，避免自引用外键限制。
+        const remainingFolders = new Map(knowledgeFolders.map((folder) => [folder.id, folder]));
+        while (remainingFolders.size) {
+          const parentIds = new Set([...remainingFolders.values()].map((folder) => folder.parentId).filter(Boolean));
+          const leaves = [...remainingFolders.keys()].filter((folderId) => !parentIds.has(folderId));
+          if (!leaves.length) throw new ConflictException({ code: 'TEAM_KNOWLEDGE_FOLDER_CYCLE', message: '知识文件夹层级异常，不能删除项目组' });
+          await tx.knowledgeFolder.deleteMany({ where: { id: { in: leaves } } });
+          leaves.forEach((folderId) => remainingFolders.delete(folderId));
+        }
+        // 删除中的项目不是可用资源。保留其项目和回收状态，只解除项目组归属；
+        // 项目清理 Worker 按项目 ID 继续重试，与项目组生命周期解耦。
+        await tx.project.updateMany({
+          where: { teamId: id, status: { in: PROJECT_CLEANUP_STATUSES } },
+          data: { teamId: null },
+        });
         await tx.team.delete({ where: { id } });
       }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
     } catch (error) {

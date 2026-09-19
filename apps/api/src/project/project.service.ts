@@ -5,13 +5,11 @@ import {
   NotFoundException,
   ForbiddenException,
 } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
-import { join, resolve } from 'path';
 import { PrismaService } from '../prisma/prisma.service';
 import { CreateProjectDto } from './dto/create-project.dto';
 import { UpdateProjectDto } from './dto/update-project.dto';
 import { SetProjectRepositoryDto } from './dto/set-project-repository.dto';
-import { assertRepositoryUrl } from '../git/git-url';
+import { assertRepositoryUrl, repositoryName } from '../git/git-url';
 import {
   normalizeProjectRole,
   ProjectAccessService,
@@ -27,7 +25,6 @@ import { DeployService } from '../deploy/deploy.service';
 export class ProjectService {
   constructor(
     private readonly prisma: PrismaService,
-    private readonly config: ConfigService,
     private readonly access: ProjectAccessService,
     private readonly workspaces: WorkspaceService,
     private readonly git: GitService,
@@ -62,19 +59,19 @@ export class ProjectService {
     const repositoryUrl = source === 'git'
       ? assertRepositoryUrl(dto.repositoryUrl!)
       : undefined;
-    const projectsRoot = resolve(
-      this.config.get<string>('SANDBOX_PROJECTS_ROOT', '.data/projects'),
-    );
+    const name = dto.name?.trim() || (repositoryUrl ? repositoryName(repositoryUrl) : '');
+    if (!name || name.length > 64) throw new BadRequestException({ code: 'PROJECT_NAME_INVALID', message: '请填写 1–64 个字符的项目名称' });
     const ready = await this.prisma.$transaction(async (tx) => {
       const project = await tx.project.create({
         data: {
           userId,
-          name: dto.name,
+          name,
           language,
           status: source === 'git' ? 'import_queued' : 'active',
           teamId: dto.teamId,
-          // 先写占位值，取得 id 后再生成最终卷路径。
+          // 旧字段保持空值；实际位置由 storageKey/storagePath 和节点挂载根目录解析。
           volumePath: '',
+          storagePath: '',
           ...(dto.teamId
             ? { members: { create: { userId } } }
             : {}),
@@ -92,7 +89,7 @@ export class ProjectService {
       });
       const result = await tx.project.update({
         where: { id: project.id },
-        data: { volumePath: join(projectsRoot, project.id) },
+        data: { storagePath: project.id },
       });
       if (source === 'git') {
         await tx.session.create({ data: { projectId: project.id, userId } });
@@ -144,11 +141,8 @@ export class ProjectService {
       ]);
     } catch (error) {
       const message = diagnosticMessage(error).slice(0, 10_000);
-      await this.workspaces.removeProjectFiles(projectId, project.volumePath).catch(() => undefined);
-      await this.prisma.$transaction([
-        this.prisma.session.updateMany({ where: { projectId }, data: { workspacePath: null, workspaceBranch: null } }),
-        this.prisma.project.updateMany({ where: { id: projectId, status: 'importing' }, data: { status: 'import_failed', importError: message, importFinishedAt: new Date(), importLeaseUntil: null } }),
-      ]);
+      // 导入失败不能清理工作区：其中可能已有用户代码或 Git 元数据。
+      await this.prisma.project.updateMany({ where: { id: projectId, status: 'importing' }, data: { status: 'import_failed', importError: message, importFinishedAt: new Date(), importLeaseUntil: null } });
     }
   }
 
@@ -160,6 +154,20 @@ export class ProjectService {
     });
     if (!updated.count) throw new ConflictException({ code: 'PROJECT_IMPORT_RETRY_NOT_ALLOWED', message: '只有导入失败的 Git 项目可以重试' });
     return { id: projectId, status: 'import_queued' };
+  }
+
+  /** 导入失败但已有本地代码时，明确选择保留工作区，后续可在 Git 页面手动同步。 */
+  async keepLocalAfterImportFailure(userId: string, projectId: string) {
+    const project = await this.ensureOwner(userId, projectId);
+    if (project.status !== 'import_failed') throw new ConflictException({ code: 'PROJECT_IMPORT_RECOVERY_NOT_ALLOWED', message: '只有导入失败的项目可以保留本地工作区' });
+    const workspace = await this.workspaces.existingProjectPath(project);
+    if (!await this.git.hasWorkspaceCode(workspace)) throw new ConflictException({ code: 'PROJECT_LOCAL_CODE_NOT_FOUND', message: '未发现可保留的本地代码，请修复远程仓库后重试导入' });
+    const updated = await this.prisma.project.updateMany({
+      where: { id: projectId, status: 'import_failed' },
+      data: { status: 'active', importError: null, importLeaseUntil: null },
+    });
+    if (!updated.count) throw new ConflictException('项目状态已变化，请刷新后重试');
+    return { id: projectId, status: 'active' };
   }
 
   private async failImport(projectId: string, message: string) {
@@ -176,8 +184,9 @@ export class ProjectService {
 
   async findAll(userId: string, query: PageQueryDto) {
     // 用户可见的项目：自己创建的 OR 被授权的（通过 ProjectMember）
+    const isAdmin = await this.access.isPlatformAdmin(userId);
     const where = {
-      ...this.access.visibleWhere(userId),
+      ...this.access.visibleWhere(userId, isAdmin),
       status: { notIn: ['deleting', 'deleting_cleanup', 'deletion_failed'] },
     };
     const [projects, total] = await this.prisma.$transaction([
@@ -199,19 +208,17 @@ export class ProjectService {
     return pageResult(projects.map((project) => ({
       ...project,
       accessRole:
-        project.userId === userId ? 'owner' : project.members[0]?.role || 'viewer',
+        isAdmin || project.userId === userId ? 'owner' : project.members[0]?.role || 'viewer',
     })), total, query);
   }
 
   async findOne(userId: string, id: string) {
+    const isAdmin = await this.access.isPlatformAdmin(userId);
     const project = await this.prisma.project.findFirst({
       where: {
         id,
         status: { notIn: ['deleting', 'deleting_cleanup', 'deletion_failed'] },
-        OR: [
-          { userId }, // 创建人
-          { members: { some: { userId } } }, // 被授权的成员
-        ],
+        ...this.access.visibleWhere(userId, isAdmin),
       },
       include: {
         sessions: { orderBy: { createdAt: 'desc' } },
@@ -240,7 +247,7 @@ export class ProjectService {
     return {
       ...project,
       accessRole:
-        project.userId === userId ? 'owner' : ownMembership?.role || 'viewer',
+        isAdmin || project.userId === userId ? 'owner' : ownMembership?.role || 'viewer',
     };
   }
 
@@ -252,6 +259,7 @@ export class ProjectService {
 
   async remove(userId: string, id: string, cleanupDeployment = false) {
     const project = await this.ensureOwner(userId, id);
+    if (project.status === 'migrating') throw new ConflictException({ code: 'PROJECT_MIGRATING', message: '项目迁移中，不能删除项目' });
     if (project.status === 'deleting_cleanup') {
       return { ok: true, status: 'deleting' };
     }
@@ -398,9 +406,10 @@ export class ProjectService {
   }
 
   private async ensureOwner(userId: string, id: string) {
+    const isAdmin = await this.access.isPlatformAdmin(userId);
     const project = await this.prisma.project.findFirst({
-      where: { id, userId },
-      select: { id: true, volumePath: true, status: true },
+      where: { id, ...(isAdmin ? {} : { userId }) },
+      select: { id: true, userId: true, storageKey: true, storagePath: true, volumePath: true, status: true },
     });
     if (!project) {
       throw new NotFoundException('项目不存在');

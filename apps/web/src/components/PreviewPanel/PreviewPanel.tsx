@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   ExternalLink,
@@ -52,26 +52,15 @@ const STATUS_COLOR: Record<PreviewStatus["status"], string> = {
 
 export function PreviewPanel({
   sessionId,
-  generationSeq = 0,
+  readOnly = false,
 }: {
   sessionId: string;
-  generationSeq?: number;
+  readOnly?: boolean;
 }) {
   const qc = useQueryClient();
   const { toast } = useFeedback();
   const [iframeKey, setIframeKey] = useState(0);
   const [requirementId,setRequirementId]=useState("");
-  // 生成后进入「等待预览」窗口：即便当前是 none/stopped 也持续轮询，
-  // 直到 PreviewInstance 出现并 ready/failed，或超时（避免空闲时无意义轮询）
-  const [awaitUntil, setAwaitUntil] = useState(0);
-  const lastSeq = useRef(generationSeq);
-  useEffect(() => {
-    if (generationSeq !== lastSeq.current) {
-      lastSeq.current = generationSeq;
-      setAwaitUntil(Date.now() + 90_000);
-    }
-  }, [generationSeq]);
-
   const statusQuery = useQuery<PreviewStatus>({
     queryKey: ["preview", sessionId],
     queryFn: async () =>
@@ -80,8 +69,7 @@ export function PreviewPanel({
       const s = q.state.data?.status;
       if (s === "starting") return 2000;
       if (s === "ready" || s === "failed") return false;
-      // none/stopped：仅在生成后的等待窗口内轮询
-      return Date.now() < awaitUntil ? 2000 : false;
+      return false;
     },
   });
 
@@ -112,9 +100,6 @@ export function PreviewPanel({
   const isEmulator = data?.kind === "emulator";
   const running = status === "starting" || status === "ready";
   const busy = start.isPending || stop.isPending;
-  // 生成后、预览实例尚未出现的等待窗口
-  const awaiting =
-    (status === "none" || status === "stopped") && Date.now() < awaitUntil;
 
   return (
     <div className="flex h-full flex-col bg-white dark:bg-slate-900">
@@ -152,7 +137,7 @@ export function PreviewPanel({
           {!running && (
             <button
               onClick={() => start.mutate()}
-              disabled={busy}
+              disabled={busy || readOnly}
               className="btn btn-primary btn-sm"
             >
               <Play size={12} /> 部署预览
@@ -162,14 +147,14 @@ export function PreviewPanel({
             <>
               <button
                 onClick={() => start.mutate()}
-                disabled={busy}
+                disabled={busy || readOnly}
                 className="btn btn-ghost btn-sm"
               >
                 <RotateCw size={12} /> 重新部署
               </button>
               <button
                 onClick={() => stop.mutate()}
-                disabled={busy}
+                disabled={busy || readOnly}
                 className="btn btn-ghost btn-sm"
               >
                 <Square size={11} /> 停止
@@ -222,14 +207,14 @@ export function PreviewPanel({
           <div className="relative flex h-full flex-col items-center justify-center gap-4 overflow-hidden bg-slate-50/70 p-6 text-center dark:bg-slate-950/35">
             <div className="pointer-events-none absolute h-72 w-72 rounded-full bg-indigo-400/5 blur-3xl" />
             <span className="relative grid h-16 w-16 place-items-center rounded-2xl border border-slate-200 bg-white text-indigo-500 shadow-[0_12px_30px_-18px_rgba(79,70,229,0.5)] dark:border-slate-700 dark:bg-slate-900">
-              {status === "starting" || awaiting ? (
+              {status === "starting" ? (
                 <RefreshCw size={25} className="animate-spin" />
               ) : (
                 <MonitorUp size={26} />
               )}
             </span>
             <p className="relative max-w-md text-sm font-medium text-slate-600 dark:text-slate-300">
-              {status === "starting" || awaiting
+              {status === "starting"
                 ? isEmulator
                   ? "正在启动云手机、构建并安装 Android 应用，请稍候…"
                   : "正在安装依赖并启动 dev server，请稍候…"

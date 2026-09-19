@@ -7,6 +7,8 @@ import { PrismaService } from '../prisma/prisma.service';
 import { CryptoService } from '../crypto/crypto.service';
 import { CreateModelConfigDto } from './dto/create-model-config.dto';
 import { UpdateModelConfigDto } from './dto/update-model-config.dto';
+import { AgentRuntimeStateService } from '../agent/agent-runtime-state.service';
+import { listCodexCliModels } from './codex-cli-models';
 
 // 对外安全视图：绝不含明文/密文 key，只给个尾码用于识别
 export interface ModelConfigView {
@@ -36,6 +38,7 @@ const AGENT_API_PRESETS = {
   'deepseek-agent': { provider: 'deepseek', baseUrl: 'https://api.deepseek.com/anthropic', model: '' },
   'glm-agent': { provider: 'glm', baseUrl: 'https://open.bigmodel.cn/api/anthropic', model: '' },
 } as const;
+const CODEX_CLI_ENGINE = 'codex-cli';
 
 function agentApiPreset(engine: string) {
   return AGENT_API_PRESETS[engine as keyof typeof AGENT_API_PRESETS];
@@ -46,15 +49,19 @@ export class ModelConfigService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly crypto: CryptoService,
+    private readonly state: AgentRuntimeStateService,
   ) {}
 
   async create(userId: string, dto: CreateModelConfigDto): Promise<ModelConfigView> {
     const engine = dto.engine ?? 'simple';
     const agentApi = agentApiPreset(engine);
+    if (engine === CODEX_CLI_ENGINE && dto.apiKey?.trim()) {
+      throw new BadRequestException('Codex CLI 使用个人登录，不接受 API Key；请改选 Codex API Key');
+    }
     if (agentApi && !dto.apiKey?.trim()) {
       throw new BadRequestException('此编码智能体需要用户自己的 API 凭证');
     }
-    if (!agentApi && (!dto.baseUrl?.trim() || !dto.model?.trim() || !dto.apiKey?.trim())) {
+    if (!agentApi && engine !== CODEX_CLI_ENGINE && (!dto.baseUrl?.trim() || !dto.model?.trim() || !dto.apiKey?.trim())) {
       throw new BadRequestException('API 模型需要 Base URL、模型名称和 API Key');
     }
     const count = await this.prisma.modelConfig.count({ where: { userId } });
@@ -72,11 +79,11 @@ export class ModelConfigService {
         data: {
           userId,
           label: dto.label,
-          provider: agentApi?.provider ?? (dto.provider ?? 'openai-compatible'),
+          provider: engine === CODEX_CLI_ENGINE ? 'openai' : agentApi?.provider ?? (dto.provider ?? 'openai-compatible'),
           engine,
-          baseUrl: agentApi?.baseUrl ?? dto.baseUrl!.replace(/\/$/, ''),
-          model: agentApi ? '' : dto.model!.trim(),
-          encryptedKey: this.crypto.encrypt(dto.apiKey!),
+          baseUrl: engine === CODEX_CLI_ENGINE ? '' : agentApi?.baseUrl ?? dto.baseUrl!.replace(/\/$/, ''),
+          model: agentApi || engine === CODEX_CLI_ENGINE ? '' : dto.model!.trim(),
+          encryptedKey: this.crypto.encrypt(engine === CODEX_CLI_ENGINE ? '' : dto.apiKey!),
           isDefault: makeDefault,
         },
       });
@@ -104,11 +111,14 @@ export class ModelConfigService {
       throw new BadRequestException('不能修改配置的执行引擎；请新建配置');
     }
     if (dto.baseUrl !== undefined) {
-      if (agentApiPreset(existing.engine)) throw new BadRequestException('编码智能体的官方服务地址不可修改');
+      if (agentApiPreset(existing.engine) || existing.engine === CODEX_CLI_ENGINE) throw new BadRequestException('编码智能体的官方服务地址不可修改');
       data.baseUrl = dto.baseUrl.replace(/\/$/, '');
     }
-    if (dto.model !== undefined && !agentApiPreset(existing.engine)) data.model = dto.model;
-    if (dto.apiKey !== undefined) data.encryptedKey = this.crypto.encrypt(dto.apiKey);
+    if (dto.model !== undefined && !agentApiPreset(existing.engine) && existing.engine !== CODEX_CLI_ENGINE) data.model = dto.model;
+    if (dto.apiKey !== undefined) {
+      if (existing.engine === CODEX_CLI_ENGINE) throw new BadRequestException('Codex CLI 不使用 API Key');
+      data.encryptedKey = this.crypto.encrypt(dto.apiKey);
+    }
 
     const updated = await this.prisma.$transaction(async (tx) => {
       if (dto.isDefault === true) {
@@ -168,6 +178,10 @@ export class ModelConfigService {
       );
     }
     const agentApi = agentApiPreset(cfg.engine);
+    if (cfg.engine === CODEX_CLI_ENGINE) {
+      if (modelName) await this.assertModelAvailable(userId, cfg.id, modelName);
+      return { provider: 'openai', engine: cfg.engine, baseUrl: '', model: modelName || '', apiKey: '' };
+    }
     if (agentApi) {
       const apiKey = this.crypto.decrypt(cfg.encryptedKey);
       if (!apiKey) throw new BadRequestException('编码智能体尚未配置个人 API 凭证');
@@ -205,6 +219,11 @@ export class ModelConfigService {
   }): ModelConfigView {
     let last4 = '';
     try {
+      if (row.engine === CODEX_CLI_ENGINE) return {
+        id: row.id, label: row.label, provider: row.provider, engine: row.engine,
+        baseUrl: row.baseUrl, model: row.model, keyMasked: '个人账号登录',
+        isDefault: row.isDefault, createdAt: row.createdAt,
+      };
       const plain = this.crypto.decrypt(row.encryptedKey);
       last4 = plain.slice(-4);
     } catch {
@@ -225,12 +244,16 @@ export class ModelConfigService {
 
   async assertModelAvailable(userId: string, configId: string, modelName: string): Promise<void> {
     const cfg = await this.ensureOwner(userId, configId);
-    if (!agentApiPreset(cfg.engine)) throw new BadRequestException('此配置不支持对话时切换模型');
+    if (!agentApiPreset(cfg.engine) && cfg.engine !== CODEX_CLI_ENGINE) throw new BadRequestException('此配置不支持对话时切换模型');
     if (!/^[a-zA-Z0-9][a-zA-Z0-9._:/-]{0,127}$/.test(modelName)) throw new BadRequestException('模型名称格式无效');
   }
 
   async availableModels(userId: string, configId: string) {
     const cfg = await this.ensureOwner(userId, configId);
+    if (cfg.engine === CODEX_CLI_ENGINE) {
+      const catalog = await listCodexCliModels(await this.state.home(userId, 'codex'));
+      return { ...catalog, source: 'codex-cli' };
+    }
     const endpoint: Record<string, string> = {
       codex: 'https://api.openai.com/v1/models',
       'claude-code': 'https://api.anthropic.com/v1/models?limit=100',

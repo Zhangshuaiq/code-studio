@@ -76,6 +76,14 @@ export class GenerationExecutorService {
     if (this.mode === 'local') {
       return { volumePath: workspace.path, runtime, verificationAvailable: false };
     }
+    // 本机路径无法作为共享 PVC 的 subPath，无须先等待集群探测超时。
+    try {
+      this.workspaceSubPath(workspace.path);
+    } catch (error) {
+      if (this.config.get<string>('NODE_ENV') === 'production') throw error;
+      this.logger.warn('本机工作区未挂载到 Kubernetes 共享卷：继续本机编码，跳过集群构建验证');
+      return { volumePath: workspace.path, runtime, verificationAvailable: false };
+    }
     const cluster = await this.health();
     if (!cluster.available) {
       if (this.config.get<string>('NODE_ENV') === 'production') {
@@ -84,7 +92,6 @@ export class GenerationExecutorService {
       this.logger.warn('Kubernetes 集群不可用：降级为本机工作区编码，跳过容器构建和预览');
       return { volumePath: workspace.path, runtime, verificationAvailable: false };
     }
-    this.workspaceSubPath(workspace.path);
     return { volumePath: workspace.path, runtime, verificationAvailable: true };
   }
 

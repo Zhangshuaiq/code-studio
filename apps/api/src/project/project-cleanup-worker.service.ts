@@ -49,7 +49,7 @@ export class ProjectCleanupWorkerService implements OnModuleInit, OnModuleDestro
           OR: [{ deletionNextAttemptAt: null }, { deletionNextAttemptAt: { lte: new Date() } }],
         },
         orderBy: { deletionNextAttemptAt: 'asc' },
-        select: { id: true, volumePath: true, deletionAttempts: true },
+        select: { id: true, userId: true, storageKey: true, storagePath: true, volumePath: true, deletionAttempts: true },
       });
       if (!candidate) return;
       const claimed = await this.prisma.project.updateMany({
@@ -63,7 +63,7 @@ export class ProjectCleanupWorkerService implements OnModuleInit, OnModuleDestro
       });
       if (!claimed.count) return;
       try {
-        await this.workspaces.removeProjectFiles(candidate.id, candidate.volumePath);
+        await this.workspaces.removeProjectFiles(candidate);
         await this.prisma.project.delete({ where: { id: candidate.id } });
         this.logger.log(`项目资源回收完成 project=${candidate.id}`);
       } catch (error) {

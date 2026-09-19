@@ -31,7 +31,6 @@ const IGNORE_DIRS = new Set([
   'venv',
   '.mvn',
 ]);
-const MAX_FILES = 500;
 const MAX_READ_BYTES = 512 * 1024; // 单文件读取上限 512KB
 const INDEX_FILE_BYTES = 256 * 1024;
 const INDEX_TOTAL_BYTES = 4 * 1024 * 1024;
@@ -75,7 +74,6 @@ export class FilesService {
     const root = await this.volumeRoot(userId, sessionId);
     const out: string[] = [];
     const walk = async (dir: string) => {
-      if (out.length >= MAX_FILES) return;
       let entries;
       try {
         entries = await readdir(dir, { withFileTypes: true });
@@ -83,7 +81,6 @@ export class FilesService {
         return; // 卷目录还不存在
       }
       for (const e of entries) {
-        if (out.length >= MAX_FILES) return;
         if (e.isDirectory()) {
           if (IGNORE_DIRS.has(e.name) || e.name.startsWith('.')) continue;
           await walk(join(dir, e.name));
@@ -177,7 +174,7 @@ export class FilesService {
         if (column >= 0) items.push({ path, line: index + 1, column: column + 1, preview: lines[index].trim().slice(0, 500), kind: 'content' });
       }
     }
-    return { items, scannedFiles, scannedBytes, truncated: items.length >= 200 || scannedBytes >= SEARCH_TOTAL_BYTES || paths.length >= MAX_FILES };
+    return { items, scannedFiles, scannedBytes, truncated: items.length >= 200 || scannedBytes >= SEARCH_TOTAL_BYTES };
   }
 
   /** 写回文件内容（保存编辑）——bind mount 的卷会触发 Vite HMR */

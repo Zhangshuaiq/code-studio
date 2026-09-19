@@ -99,6 +99,7 @@ const NAV: NavItem[] = [
     children: [
       { to: "/settings/models", icon: Cpu, label: "模型", anyOf: [ACCESS.models] },
       { to: "/settings/monitoring", icon: Gauge, label: "监控与日志", anyOf: [ACCESS.systemSettings] },
+      { to: "/settings/workspace-storage", icon: FolderKanban, label: "项目存储路径", anyOf: [ACCESS.systemSettings] },
       { to: "/settings/account", icon: User, label: "账户" },
     ],
   },

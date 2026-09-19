@@ -168,7 +168,7 @@ export class DeployService {
       datasourceId?: string;
     },
   ) {
-    const project = await this.project(userId, sessionId, "read");
+    const project = await this.project(userId, sessionId, "edit");
     const runtime = getRuntime(project.language);
     const tpl = deployTemplate(runtime.id);
     if (!tpl)
@@ -441,6 +441,16 @@ export class DeployService {
   async stopProject(userId: string, projectId: string) {
     await this.access.requireProject(userId, projectId, 'manage');
     return this.stopDeployment(userId, projectId);
+  }
+
+  /** 仅供管理员清理失败项目：按部署目标所有者身份停止真实运行资源。 */
+  async stopProjectForCleanup(projectId: string) {
+    const deployment = await this.prisma.deployment.findUnique({ where: { projectId }, select: { targetId: true, deployedById: true } });
+    if (!deployment) return { status: 'stopped' };
+    const target = deployment.targetId
+      ? await this.prisma.deployTarget.findUnique({ where: { id: deployment.targetId }, select: { userId: true } })
+      : null;
+    return this.stopDeployment(target?.userId ?? deployment.deployedById ?? '', projectId);
   }
 
   private async stopDeployment(userId: string, projectId: string) {

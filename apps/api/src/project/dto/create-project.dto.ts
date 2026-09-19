@@ -6,6 +6,7 @@ import {
   MaxLength,
   IsUUID,
   Matches,
+  ValidateIf,
 } from 'class-validator';
 
 export class CreateProjectDto {
@@ -13,10 +14,11 @@ export class CreateProjectDto {
   @IsIn(['blank', 'git'])
   source?: 'blank' | 'git';
 
+  @ValidateIf((dto: CreateProjectDto) => dto.source !== 'git' || (dto.name !== undefined && dto.name !== null && (typeof dto.name !== 'string' || !!dto.name.trim())))
   @IsString()
   @MinLength(1)
   @MaxLength(64)
-  name!: string;
+  name?: string;
 
   // 项目运行时 id（对应 ProjectRuntime）。默认 react-vite（前端优先）。
   @IsOptional()

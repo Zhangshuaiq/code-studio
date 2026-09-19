@@ -9,7 +9,9 @@ import { context, SpanKind, SpanStatusCode, trace } from '@opentelemetry/api';
 import { extractTraceContext } from '../observability/trace-context';
 import { diagnosticMessage } from '../common/redact-diagnostic';
 import { DistributedWorkspaceLockService } from '../workspace/distributed-workspace-lock.service';
-import { WorkspaceService } from '../workspace/workspace.service';
+import { WorkspaceStorageService } from '../workspace/workspace-storage.service';
+import { scanWorkspaceUsage } from '../common/workspace-quota';
+import { statfs } from 'node:fs/promises';
 
 @Injectable()
 export class AgentWorkerService implements OnModuleInit, OnModuleDestroy {
@@ -20,7 +22,7 @@ export class AgentWorkerService implements OnModuleInit, OnModuleDestroy {
   private delegated = false;
   private readonly closeConnections: Array<() => Promise<void>> = [];
 
-  constructor(private readonly config: ConfigService, private readonly prisma: PrismaService, private readonly agent: AgentService, private readonly scheduler: GenerationSchedulerService, private readonly workspaceLock: DistributedWorkspaceLockService, private readonly workspaces: WorkspaceService) {}
+  constructor(private readonly config: ConfigService, private readonly prisma: PrismaService, private readonly agent: AgentService, private readonly scheduler: GenerationSchedulerService, private readonly workspaceLock: DistributedWorkspaceLockService, private readonly storage: WorkspaceStorageService) {}
 
   async onModuleInit() {
     if (this.config.get<string>('AGENT_WORKER_DEDICATED') === 'true' &&
@@ -44,19 +46,51 @@ export class AgentWorkerService implements OnModuleInit, OnModuleDestroy {
         throw new DelayedError();
       }
       const controller = new AbortController();
+      let eventSequence = 0;
       const timeout = setTimeout(() => controller.abort(namedError('TaskTimeoutError', '超过最大执行时间')), Number(this.config.get('AGENT_EXECUTION_TIMEOUT_MS', 30 * 60_000)));
       const cancellationPoll = setInterval(async () => {
         const task = await this.prisma.task.findUnique({ where: { id: job.data.taskId }, select: { status: true } }).catch(() => null);
         if (task?.status === 'cancelling') controller.abort(namedError('TaskCancelledError', '用户取消任务'));
       }, 1_000);
       cancellationPoll.unref();
+      let resourcePoll: NodeJS.Timeout | undefined;
       try {
         const session = await this.prisma.session.findUnique({ where: { id: job.data.sessionId }, select: { projectId: true } });
         if (!session) throw new UnrecoverableError('生成任务关联的会话不存在');
-        await this.workspaces.ensureForSession(job.data.userId, job.data.sessionId);
+        const project = await this.prisma.project.findUnique({ where: { id: session.projectId } });
+        if (!project) throw new UnrecoverableError('生成任务关联的项目不存在');
+        const workspacePath = this.storage.userPath(project, job.data.userId);
+        const baseline = await scanWorkspaceUsage(workspacePath);
+        const maxGrowthFiles = Number(this.config.get('AGENT_MAX_WORKSPACE_GROWTH_FILES', 20_000));
+        const maxGrowthBytes = Number(this.config.get('AGENT_MAX_WORKSPACE_GROWTH_BYTES', 2 * 1024 * 1024 * 1024));
+        const minFreeBytes = Number(this.config.get('AGENT_MIN_FREE_DISK_BYTES', 1024 * 1024 * 1024));
+        let checking = false;
+        const checkResources = async () => {
+          if (checking || controller.signal.aborted) return;
+          checking = true;
+          try {
+            const disk = await statfs(workspacePath);
+            if (disk.bavail * disk.bsize < minFreeBytes) {
+              controller.abort(namedError('WorkspaceResourceLimitError', '工作区磁盘剩余空间不足，已停止本次任务以保护共享存储'));
+              return;
+            }
+            const usage = await scanWorkspaceUsage(workspacePath);
+            if (usage.files - baseline.files > maxGrowthFiles || usage.bytes - baseline.bytes > maxGrowthBytes) {
+              controller.abort(namedError('WorkspaceResourceLimitError', '本次任务写入量异常增长，已停止任务；已有文件不会被删除'));
+            }
+          } catch (error) {
+            this.logger.warn(`工作区资源检测失败 job=${job.id}: ${diagnosticMessage(error)}`);
+          } finally {
+            checking = false;
+          }
+        };
+        await checkResources();
+        controller.signal.throwIfAborted();
+        resourcePoll = setInterval(() => void checkResources(), 10_000);
+        resourcePoll.unref();
         const result = await this.workspaceLock.runExclusive(
           `workspace:${session.projectId}:${job.data.userId}`,
-          () => this.agent.runTask(job.data.userId, job.data.sessionId, job.data.prompt, (event) => void job.updateProgress(event), job.data.taskId, controller.signal),
+          () => this.agent.runTask(job.data.userId, job.data.sessionId, job.data.prompt, (event) => void job.updateProgress({ ...event, sequence: job.attemptsMade * 1_000_000 + ++eventSequence }), job.data.taskId, controller.signal),
         );
         span.setStatus({ code: SpanStatusCode.OK });
         return result;
@@ -64,13 +98,14 @@ export class AgentWorkerService implements OnModuleInit, OnModuleDestroy {
         span.recordException(error as Error); span.setStatus({ code: SpanStatusCode.ERROR, message: (error as Error).message });
         if (controller.signal.aborted) {
           throw new UnrecoverableError(
-            error instanceof Error ? error.message : String(error),
+            controller.signal.reason instanceof Error ? controller.signal.reason.message : error instanceof Error ? error.message : String(error),
           );
         }
         throw error;
       } finally {
         clearTimeout(timeout);
         clearInterval(cancellationPoll);
+        if (resourcePoll) clearInterval(resourcePoll);
         span.end();
       }
     })), {
@@ -79,11 +114,16 @@ export class AgentWorkerService implements OnModuleInit, OnModuleDestroy {
         lockDuration: Number(this.config.get('AGENT_JOB_LOCK_MS', 600_000)),
       });
     this.worker.on('completed', (job) => this.logger.log(`生成任务完成 job=${job.id}`));
-    this.worker.on('failed', (job, error) => {
+    this.worker.on('failed', async (job, error) => {
       const message = diagnosticMessage(error);
       this.logger.error(`生成队列任务失败 job=${job?.id}: ${message}`);
-      if (!job || job.attemptsMade < (job.opts.attempts ?? 1)) return;
-      void this.prisma.task.updateMany({ where: { id: job.data.taskId, status: { in: ['queued', 'running'] } }, data: { status: 'failed', resultLog: `任务在 ${job.attemptsMade} 次尝试后失败: ${message}`, finishedAt: new Date() } });
+      if (!job) return;
+      try {
+        if ((await job.getState()) !== 'failed') return;
+        await this.prisma.task.updateMany({ where: { id: job.data.taskId, status: { in: ['queued', 'running'] } }, data: { status: 'failed', resultLog: `任务在 ${job.attemptsMade} 次尝试后失败: ${message}`, finishedAt: new Date() } });
+      } catch (syncError) {
+        this.logger.error(`同步失败任务状态异常 job=${job.id}: ${diagnosticMessage(syncError)}`);
+      }
     });
     this.logger.log(`独立生成 Worker 已就绪，并发数=${this.worker.opts.concurrency}`);
   }

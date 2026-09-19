@@ -56,7 +56,10 @@ export function useCreateDatasource() {
       type: 'mysql' | 'postgresql' | 'redis' | 'mongodb';
       config: Datasource['config'];
     }) => (await api.post('/admin/datasources', data)).data,
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['datasources'] }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['datasources'] });
+      qc.invalidateQueries({ queryKey: ['teams'] });
+    },
   });
 }
 
@@ -82,7 +85,10 @@ export function useDeleteDatasource() {
   return useMutation({
     mutationFn: async (id: string) =>
       (await api.delete(`/admin/datasources/${id}`)).data,
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['datasources'] }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['datasources'] });
+      qc.invalidateQueries({ queryKey: ['teams'] });
+    },
   });
 }
 

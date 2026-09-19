@@ -42,3 +42,19 @@ export function normalizeGitHost(value: string): string {
 export function repositoryHost(remoteUrl: string): string {
   return new URL(assertRepositoryUrl(remoteUrl)).host.toLowerCase();
 }
+
+/** 从 HTTPS 仓库 URL 的最后一段提取项目名称，去掉可选的 .git 后缀。 */
+export function repositoryName(remoteUrl: string): string {
+  const path = new URL(assertRepositoryUrl(remoteUrl)).pathname;
+  const finalPart = path.split('/').filter(Boolean).at(-1) || '';
+  let name: string;
+  try {
+    name = decodeURIComponent(finalPart).replace(/\.git$/i, '').trim();
+  } catch {
+    name = '';
+  }
+  if (!name || name.length > 64) {
+    throw new BadRequestException({ code: 'GIT_REPOSITORY_NAME_INVALID', message: '无法从仓库地址提取有效的项目名称，请手动填写项目名称（最多 64 个字符）' });
+  }
+  return name;
+}

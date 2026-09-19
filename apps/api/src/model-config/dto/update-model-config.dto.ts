@@ -15,7 +15,7 @@ export class UpdateModelConfigDto {
   label?: string;
 
   @IsOptional()
-  @IsIn(['simple', 'aider', 'codex', 'claude-code', 'deepseek-agent', 'glm-agent'])
+  @IsIn(['simple', 'aider', 'codex', 'codex-cli', 'claude-code', 'deepseek-agent', 'glm-agent'])
   engine?: string;
 
   @IsOptional()

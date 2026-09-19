@@ -15,6 +15,8 @@ import { PermissionsGuard } from '../auth/permissions.guard';
 import { PERMISSIONS } from '../auth/permissions';
 import { Audit } from '../audit/audit.decorator';
 import { TeamService } from './team.service';
+import { CurrentUser } from '../auth/current-user.decorator';
+import type { AuthUser } from '../auth/jwt.strategy';
 import { AddMembersDto, CreateTeamDto, UpdateTeamDto } from './dto/team.dto';
 import { PageQueryDto } from '../common/dto/page-query.dto';
 
@@ -38,8 +40,8 @@ export class TeamController {
   @Post()
   @RequirePermissions(PERMISSIONS.TEAM_MANAGE)
   @Audit('team.create', 'team')
-  createTeam(@Body() body: CreateTeamDto) {
-    return this.team.createTeam(body);
+  createTeam(@CurrentUser() user: AuthUser, @Body() body: CreateTeamDto) {
+    return this.team.createTeam(body, user.id);
   }
 
   @Patch(':id')

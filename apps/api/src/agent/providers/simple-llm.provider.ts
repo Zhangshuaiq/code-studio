@@ -105,8 +105,8 @@ export class SimpleLlmProvider implements GenerationProvider {
         ? `Output ONLY the files you add or modify (full content each). Do NOT include unchanged files. Never delete or blank out unrelated files. Keep the app runnable.`
         : `Include every file needed so that running "${runtime.installCommand ?? 'npm install'} && ${runtime.preview.startCommand ?? 'npm run dev'}" serves the app.`,
       `Use stable mainstream dependency versions.`,
-      // runtime 自带的硬性脚手架约束，保证产物可被该 runtime 直接跑起来
-      ...(runtime.scaffoldRules?.length
+      // 仅空项目首次生成需要模板约束；已有仓库的真实目录结构优先。
+      ...(!iterating && runtime.scaffoldRules?.length
         ? ['', 'STRICT PROJECT RULES (must all be satisfied):', ...runtime.scaffoldRules.map((r) => `- ${r}`)]
         : []),
     ].join('\n');

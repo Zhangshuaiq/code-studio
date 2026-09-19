@@ -110,28 +110,17 @@ export async function scanWorkspaceUsage(root: string): Promise<WorkspaceUsage> 
 
 export async function assertWorkspaceWithinLimits(
   root: string,
-  limits: WorkspaceLimits,
+  _limits: WorkspaceLimits,
 ): Promise<WorkspaceUsage> {
-  const usage = await scanWorkspaceUsage(root);
-  if (usage.files > limits.maxFiles) {
-    throw new WorkspaceQuotaError('too_many_files', `项目源码文件数超过 ${limits.maxFiles} 个限制`);
-  }
-  if (usage.bytes > limits.maxSourceBytes) {
-    throw new WorkspaceQuotaError('workspace_too_large', '项目源码总容量超过平台限制');
-  }
-  for (const [path, bytes] of usage.sizes) {
-    if (bytes > limits.maxFileBytes) {
-      throw new WorkspaceQuotaError('file_too_large', `文件 ${path} 超过单文件大小限制`);
-    }
-  }
-  return usage;
+  // 兼容旧调用点：已有仓库的静态体量不应成为保存、编码或预览的准入门槛。
+  return scanWorkspaceUsage(root);
 }
 
-/** 在真正写盘前按最终状态计算配额，避免批量生成写到一半才失败。 */
+/** 写入前只检查路径边界和符号链接；资源失控由任务级保护处理。 */
 export async function assertWorkspaceChanges(
   root: string,
   changes: Array<{ path: string; bytes: number }>,
-  limits: WorkspaceLimits,
+  _limits: WorkspaceLimits,
 ): Promise<Array<{ path: string; bytes: number }>> {
   const normalized = new Map<string, number>();
   for (const change of changes) {
@@ -140,24 +129,7 @@ export async function assertWorkspaceChanges(
     if (!Number.isSafeInteger(change.bytes) || change.bytes < 0) {
       throw new WorkspaceQuotaError('file_too_large', `文件 ${path} 大小无效`);
     }
-    if (change.bytes > limits.maxFileBytes) {
-      throw new WorkspaceQuotaError('file_too_large', `文件 ${path} 超过单文件大小限制`);
-    }
     normalized.set(path, change.bytes);
-  }
-  const usage = await scanWorkspaceUsage(root);
-  let files = usage.files;
-  let bytes = usage.bytes;
-  for (const [path, size] of normalized) {
-    const previous = usage.sizes.get(path);
-    if (previous == null) files += 1;
-    bytes += size - (previous ?? 0);
-  }
-  if (files > limits.maxFiles) {
-    throw new WorkspaceQuotaError('too_many_files', `项目源码文件数超过 ${limits.maxFiles} 个限制`);
-  }
-  if (bytes > limits.maxSourceBytes) {
-    throw new WorkspaceQuotaError('workspace_too_large', '项目源码总容量超过平台限制');
   }
   return [...normalized].map(([path, size]) => ({ path, bytes: size }));
 }

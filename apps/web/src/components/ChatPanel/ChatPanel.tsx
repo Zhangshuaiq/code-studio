@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect, FormEvent } from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import { AgentEvent, streamAgentRun } from "../../lib/agentStream";
+import { AgentEvent, streamAgentRun, watchAgentTask } from "../../lib/agentStream";
 import { SessionTask, useSessionTasks } from "../../hooks/useSessionTasks";
 import {
   Bot,
@@ -31,9 +31,14 @@ const WELCOME: ChatMessage = {
     "描述你希望完成的开发任务。我会先查看当前项目，再按需修改文件。你可以在下方选择平台和模型。",
 };
 
+function cleanLegacyClusterNotice(log: string) {
+  return log.replace(/\n*⚠ 当前未连接集群：已保存代码，未执行自动构建验证或预览。/g, "").trim();
+}
+
 // 历史任务 → 对话消息
 function tasksToMessages(tasks: SessionTask[]): ChatMessage[] {
   return tasks.flatMap((t) => {
+    const active = ['queued', 'running', 'cancelling'].includes(t.status);
     const head =
       t.status === "succeeded" ? "✅ " : ["failed", "cancelled", "timed_out"].includes(t.status) ? "❌ " : "";
     return [
@@ -41,7 +46,8 @@ function tasksToMessages(tasks: SessionTask[]): ChatMessage[] {
       {
         id: `${t.id}-a`,
         role: "assistant" as const,
-        content: head + (t.resultLog || "(无输出)"),
+        content: active ? '' : head + (cleanLegacyClusterNotice(t.resultLog || "") || "(无输出)"),
+        pending: active,
         taskId: t.id,
         taskStatus: ["cancelled", "timed_out"].includes(t.status) ? "failed" : t.status,
         retryPrompt: t.prompt,
@@ -66,6 +72,8 @@ export function ChatPanel({
   const [messages, setMessages] = useState<ChatMessage[]>([WELCOME]);
   const [input, setInput] = useState("");
   const [running, setRunning] = useState(false);
+  const [startedAt, setStartedAt] = useState<number>();
+  const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const [modelReady, setModelReady] = useState(false);
   const [activeTaskId, setActiveTaskId] = useState<string>();
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -79,8 +87,25 @@ export function ChatPanel({
     if (seededFor.current === sessionId) return;
     const msgs = tasksToMessages(history.data ?? []);
     setMessages(msgs.length ? msgs : [WELCOME]);
+    setRunning(false);
+    setActiveTaskId(undefined);
+    setStartedAt(undefined);
     seededFor.current = sessionId;
   }, [sessionId, history.isLoading, history.data]);
+
+  useEffect(() => {
+    if (!sessionId || !history.data || seededFor.current !== sessionId) return;
+    const active = [...(history.data ?? [])].reverse().find((task) => ['queued', 'running', 'cancelling'].includes(task.status));
+    if (!active) return;
+    const controller = new AbortController();
+    setActiveTaskId(active.id);
+    setStartedAt(new Date(active.startedAt || active.createdAt).getTime());
+    setRunning(true);
+    void watchAgentTask(active.id, taskHandlers(`${active.id}-a`, active.prompt), controller.signal).finally(() => {
+      if (!controller.signal.aborted) setRunning(false);
+    });
+    return () => controller.abort();
+  }, [sessionId, history.data]);
 
   useEffect(() => {
     scrollRef.current?.scrollTo({
@@ -89,10 +114,62 @@ export function ChatPanel({
     });
   }, [messages]);
 
+  useEffect(() => {
+    if (!running || !startedAt) return;
+    const update = () => setElapsedSeconds(Math.floor((Date.now() - startedAt) / 1_000));
+    update();
+    const timer = window.setInterval(update, 1_000);
+    return () => window.clearInterval(timer);
+  }, [running, startedAt]);
+
   function replaceMessage(id: string, patch: Partial<ChatMessage>) {
     setMessages((prev) =>
       prev.map((m) => (m.id === id ? { ...m, ...patch } : m)),
     );
+  }
+
+  function taskHandlers(pendingId: string, text: string) {
+    let acc = "";
+    let reasoningActive = false;
+    const render = (extra: string) => {
+      acc += extra;
+      replaceMessage(pendingId, { content: acc });
+    };
+    return {
+      onQueued: (taskId: string) => setActiveTaskId(taskId),
+      onEvent: (ev: AgentEvent) => {
+        if (ev.kind === 'system' && ev.text === '任务已开始，正在准备工作区…') return;
+        if (ev.kind === 'reasoning' && ev.text) {
+          render(`${reasoningActive ? '' : `${acc ? '\n\n' : ''}思考摘要：`}${ev.text}`);
+          reasoningActive = true;
+        } else if (ev.kind === 'text' && ev.text) {
+          reasoningActive = false;
+          render(ev.text);
+        } else if (ev.kind === 'tool_use') {
+          reasoningActive = false;
+          render(`\n· ${describeTool(ev.toolName, ev.toolInput)}`);
+        } else if (ev.kind === 'result' && ev.text) render(`\n\n${ev.text}`);
+        else if (ev.kind === 'system' && ev.text) render(`${acc ? '\n' : ''}${ev.text}`);
+      },
+      onDone: (r: { taskId: string; status: 'succeeded' | 'failed'; log: string }) => {
+        setActiveTaskId(undefined);
+        setRunning(false);
+        replaceMessage(pendingId, {
+          content: `${r.status === 'succeeded' ? '✅ 完成\n\n' : '❌ 生成失败\n\n'}${cleanLegacyClusterNotice(r.log || '') || acc || ''}`,
+          pending: false,
+          taskId: r.taskId,
+          taskStatus: r.status,
+          retryPrompt: text,
+        });
+        qc.invalidateQueries({ queryKey: ['history', sessionId] });
+        if (r.status === 'succeeded') onGenerated?.();
+      },
+      onError: (msg: string) => {
+        setActiveTaskId(undefined);
+        setRunning(false);
+        replaceMessage(pendingId, { content: `❌ ${msg}`, pending: false, taskStatus: 'failed', retryPrompt: text });
+      },
+    };
   }
 
   async function handleSubmit(e: FormEvent) {
@@ -115,52 +192,13 @@ export function ChatPanel({
     setMessages((prev) => [
       ...prev,
       userMsg,
-      { id: pendingId, role: "assistant", content: "正在生成…", pending: true },
+      { id: pendingId, role: "assistant", content: "", pending: true },
     ]);
+    setStartedAt(Date.now());
+    setElapsedSeconds(0);
     setRunning(true);
 
-    let acc = "";
-    const render = (extra: string) => {
-      acc += extra;
-      replaceMessage(pendingId, { content: acc });
-    };
-
-    await streamAgentRun(sessionId, text, {
-      onQueued: (taskId) => {
-        setActiveTaskId(taskId);
-        replaceMessage(pendingId, { content: "任务已进入队列，正在等待执行…" });
-      },
-      onEvent: (ev: AgentEvent) => {
-        // text 为流式增量，原样拼接（自身带换行）；结构化事件各占一行
-        if (ev.kind === "text" && ev.text) render(ev.text);
-        else if (ev.kind === "tool_use")
-          render(`\n· ${describeTool(ev.toolName, ev.toolInput)}`);
-        else if (ev.kind === "result" && ev.text) render(`\n\n${ev.text}`);
-        else if (ev.kind === "system" && ev.text) render(`\n${ev.text}`);
-      },
-      onDone: (r) => {
-        setActiveTaskId(undefined);
-        const head =
-          r.status === "succeeded"
-            ? "✅ 完成，正在启动预览…\n\n"
-            : "❌ 生成失败\n\n";
-        replaceMessage(pendingId, {
-          // 断线恢复后中间增量可能不完整，最终持久化日志才是权威结果。
-          content: head + (r.log || acc || ""),
-          pending: false,
-          taskId: r.taskId,
-          taskStatus: r.status,
-          retryPrompt: text,
-        });
-        // 让历史缓存刷新（含刚落库的这条 Task），下次进入该会话可恢复
-        qc.invalidateQueries({ queryKey: ["history", sessionId] });
-        if (r.status === "succeeded") onGenerated?.();
-      },
-      onError: (msg) => {
-        setActiveTaskId(undefined);
-        replaceMessage(pendingId, { content: `❌ ${msg}`, pending: false, taskStatus: "failed", retryPrompt: text });
-      },
-    });
+    await streamAgentRun(sessionId, text, taskHandlers(pendingId, text));
     setRunning(false);
   }
 
@@ -204,7 +242,7 @@ export function ChatPanel({
         className="flex-1 space-y-5 overflow-y-auto px-4 py-5"
       >
         {messages.map((msg) => (
-          <MessageBubble key={msg.id} message={msg} onRetry={(prompt) => void executePrompt(prompt)} retryDisabled={running || readOnly} />
+          <MessageBubble key={msg.id} message={msg} elapsed={elapsedSeconds} onRetry={(prompt) => void executePrompt(prompt)} retryDisabled={running || readOnly} />
         ))}
       </div>
 
@@ -251,7 +289,7 @@ export function ChatPanel({
   );
 }
 
-function MessageBubble({ message, onRetry, retryDisabled }: { message: ChatMessage; onRetry: (prompt: string) => void; retryDisabled: boolean }) {
+function MessageBubble({ message, elapsed, onRetry, retryDisabled }: { message: ChatMessage; elapsed: number; onRetry: (prompt: string) => void; retryDisabled: boolean }) {
   const isUser = message.role === "user";
   return (
     <div
@@ -271,9 +309,14 @@ function MessageBubble({ message, onRetry, retryDisabled }: { message: ChatMessa
           isUser
             ? "rounded-2xl rounded-tr-md bg-slate-100 text-slate-900 dark:bg-slate-800 dark:text-slate-100"
             : "rounded-2xl rounded-tl-md text-slate-700 dark:text-slate-100"
-        } ${message.pending ? "animate-pulse" : "animate-fade-in"}`}
+        } ${message.pending ? "" : "animate-fade-in"}`}
       >
-        <div>{message.content}</div>
+        {message.pending && (
+          <div className="mb-1 flex items-center gap-1.5 text-[11px] font-medium text-indigo-600 dark:text-indigo-300">
+            <LoaderCircle size={12} className="animate-spin" /> Working ({formatElapsed(elapsed)})
+          </div>
+        )}
+        {!!message.content && <div>{message.content}</div>}
         {!isUser && message.taskStatus === "failed" && message.retryPrompt && (
           <button type="button" disabled={retryDisabled} onClick={() => onRetry(message.retryPrompt!)} className="mt-3 inline-flex items-center gap-1.5 rounded-lg border border-red-200 bg-red-50 px-2.5 py-1.5 text-[11px] font-semibold text-red-600 hover:bg-red-100 disabled:opacity-50 dark:border-red-900/60 dark:bg-red-950/30">
             <RotateCcw size={12} />重新执行
@@ -282,6 +325,12 @@ function MessageBubble({ message, onRetry, retryDisabled }: { message: ChatMessa
       </div>
     </div>
   );
+}
+
+function formatElapsed(seconds: number) {
+  const minutes = Math.floor(seconds / 60);
+  const remaining = seconds % 60;
+  return minutes ? `${minutes}m ${remaining}s` : `${remaining}s`;
 }
 
 // 从工具入参里挑一个可读字段（路径 / 命令 / 关键词）
