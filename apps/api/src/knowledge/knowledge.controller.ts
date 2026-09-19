@@ -20,12 +20,20 @@ import {
   SaveDocumentDto,
   UpdateDocumentDto,
   UpdateFolderDto,
+  BaseAclDto,
+  DocumentAclDto,
+  DocumentAccessRequestDto,
 } from "./dto/knowledge.dto";
 import { KnowledgeService } from "./knowledge.service";
+import { KnowledgeAccessService } from './knowledge-access.service';
 @Controller("knowledge")
 @UseGuards(JwtAuthGuard)
 export class KnowledgeController {
-  constructor(private readonly knowledge: KnowledgeService) {}
+  constructor(private readonly knowledge: KnowledgeService, private readonly access: KnowledgeAccessService) {}
+  @Get('grant-options') grantOptions(@CurrentUser() user: AuthUser) { return this.access.grantOptions(user.id); }
+  @Get('access-requests/inbox') accessRequests(@CurrentUser() user: AuthUser) { return this.access.requestInbox(user.id); }
+  @Post('access-requests/:id/approve') @Audit('knowledge.access-request.approve', 'knowledge-document') approveRequest(@CurrentUser() user: AuthUser, @Param('id') id: string) { return this.access.reviewRequest(user.id, id, true); }
+  @Post('access-requests/:id/reject') @Audit('knowledge.access-request.reject', 'knowledge-document') rejectRequest(@CurrentUser() user: AuthUser, @Param('id') id: string) { return this.access.reviewRequest(user.id, id, false); }
   @Get("teams") teams(@CurrentUser() user: AuthUser) {
     return this.knowledge.teams(user.id);
   }
@@ -35,6 +43,8 @@ export class KnowledgeController {
   ) {
     return this.knowledge.tree(user.id, teamId);
   }
+  @Get('teams/:teamId/access') baseAcl(@CurrentUser() user: AuthUser, @Param('teamId') teamId: string) { return this.access.baseAcl(user.id, teamId); }
+  @Put('teams/:teamId/access') @Audit('knowledge.base.access.update', 'knowledge-base') setBaseAcl(@CurrentUser() user: AuthUser, @Param('teamId') teamId: string, @Body() body: BaseAclDto) { return this.access.setBaseAcl(user.id, teamId, body.mode, body.grants); }
   @Get("search")
   search(@CurrentUser() user: AuthUser, @Query("q") query = "") {
     return this.knowledge.search(user.id, query);
@@ -78,6 +88,10 @@ export class KnowledgeController {
   ) {
     return this.knowledge.detail(user.id, id);
   }
+  @Get('documents/:id/access') documentAccess(@CurrentUser() user: AuthUser, @Param('id') id: string) { return this.access.documentAccess(user.id, id); }
+  @Get('documents/:id/acl') documentAcl(@CurrentUser() user: AuthUser, @Param('id') id: string) { return this.access.documentAcl(user.id, id); }
+  @Put('documents/:id/acl') @Audit('knowledge.document.access.update', 'knowledge-document') setDocumentAcl(@CurrentUser() user: AuthUser, @Param('id') id: string, @Body() body: DocumentAclDto) { return this.access.setDocumentAcl(user.id, id, body.mode, body.grants); }
+  @Post('documents/:id/access-requests') @Audit('knowledge.document.access.request', 'knowledge-document') requestDocumentAccess(@CurrentUser() user: AuthUser, @Param('id') id: string, @Body() body: DocumentAccessRequestDto) { return this.access.requestDocumentAccess(user.id, id, body.permission, body.message); }
   @Patch("documents/:id")
   @Audit("knowledge.document.update", "knowledge-document")
   update(

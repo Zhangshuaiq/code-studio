@@ -16,7 +16,6 @@ import { CurrentUser } from "../auth/current-user.decorator";
 import { AuthUser } from "../auth/jwt.strategy";
 import { GitService } from "./git.service";
 import { FilesService } from "../files/files.service";
-import { PreviewService } from "../preview/preview.service";
 import { PrismaService } from "../prisma/prisma.service";
 import { SetRemoteDto } from "./dto/set-remote.dto";
 import { GitSettingsService } from "./git-settings.service";
@@ -41,7 +40,6 @@ export class GitController {
   constructor(
     private readonly git: GitService,
     private readonly files: FilesService,
-    private readonly preview: PreviewService,
     private readonly prisma: PrismaService,
     private readonly settings: GitSettingsService,
     private readonly access: ProjectAccessService,
@@ -75,7 +73,6 @@ export class GitController {
     const { root } = await this.files.projectVolume(user.id, sessionId);
     const identity = await this.settings.resolveIdentity(user.id);
     await this.git.createBranch(root, (body.name || "").trim(), identity);
-    await this.restartPreviewIfRunning(user.id, sessionId);
     return { ok: true };
   }
 
@@ -95,7 +92,6 @@ export class GitController {
     } catch {
       throw new BadRequestException({ code: 'GIT_BRANCH_CHECKOUT_FAILED', message: '无法切换分支，请确认工作区没有未提交冲突且分支仍然存在' });
     }
-    await this.restartPreviewIfRunning(user.id, sessionId);
     return { ok: true };
   }
 
@@ -135,7 +131,7 @@ export class GitController {
     return this.git.commitDiff(root, hash);
   }
 
-  /** 回滚到某次提交（作为一次新提交），并在预览运行时自动重启 */
+  /** 回滚到某次提交；预览需由用户手动重新部署。 */
   @Post("rollback/:hash")
   @RequirePermissions(PERMISSIONS.PROJECT_WRITE)
   async rollback(
@@ -147,10 +143,6 @@ export class GitController {
     const { root } = await this.files.projectVolume(user.id, sessionId);
     const identity = await this.settings.resolveIdentity(user.id);
     await this.git.rollback(root, hash, identity);
-    const st = await this.preview.status(user.id, sessionId).catch(() => null);
-    if (st && (st.status === "ready" || st.status === "starting")) {
-      this.preview.start(user.id, sessionId).catch(() => undefined);
-    }
     return { ok: true };
   }
 
@@ -385,14 +377,6 @@ export class GitController {
       branch: context.remote.branch,
       ...context.credential,
     });
-  }
-
-  // 切分支/回滚后代码变了，预览在跑就重启使其生效
-  private async restartPreviewIfRunning(userId: string, sessionId: string) {
-    const st = await this.preview.status(userId, sessionId).catch(() => null);
-    if (st && (st.status === "ready" || st.status === "starting")) {
-      this.preview.start(userId, sessionId).catch(() => undefined);
-    }
   }
 
   private async projectId(

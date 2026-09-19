@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ConflictException,
   Injectable,
   NotFoundException,
 } from "@nestjs/common";
@@ -7,11 +8,12 @@ import { ConfigService } from "@nestjs/config";
 import { execFile } from "child_process";
 import { existsSync } from "fs";
 import { mkdir, rm, writeFile } from "fs/promises";
-import { dirname, isAbsolute, join, relative, resolve } from "path";
+import { dirname, join, resolve } from "path";
 import { promisify } from "util";
 import { PrismaService } from "../prisma/prisma.service";
 import { ProjectAccessService } from "../project-access/project-access.service";
 import { DistributedWorkspaceLockService } from "./distributed-workspace-lock.service";
+import { WorkspaceStorageService, type StoredProjectLocation } from './workspace-storage.service';
 
 const exec = promisify(execFile);
 const WORKSPACE_GITIGNORE = [
@@ -44,6 +46,7 @@ export class WorkspaceService {
     private readonly config: ConfigService,
     private readonly access: ProjectAccessService,
     private readonly workspaceLock: DistributedWorkspaceLockService,
+    private readonly storage: WorkspaceStorageService,
   ) {
     this.workspacesRoot = resolve(
       this.config.get<string>("SANDBOX_WORKSPACES_ROOT", ".data/workspaces"),
@@ -54,24 +57,38 @@ export class WorkspaceService {
   }
 
   /** 为当前用户创建/恢复独立 Git worktree；项目创建者沿用项目主工作区。 */
+  async existingProjectPath(project: StoredProjectLocation): Promise<string> {
+    const path = this.storage.assertAvailable(project);
+    if (!existsSync(path) || !await this.gitOk(path, ['rev-parse', '--is-inside-work-tree'])) {
+      throw new ConflictException('项目工作区不存在或不是 Git 仓库');
+    }
+    return path;
+  }
+
   async ensureForSession(
     userId: string,
     sessionId: string,
     allowProjectImport = false,
   ): Promise<UserWorkspace> {
     let session = await this.access.requireSession(userId, sessionId, "read", { allowProjectImport });
-    if (session.workspacePath && existsSync(session.workspacePath)) {
-      const current = await this.currentBranch(session.workspacePath);
+    const logicalPath = this.storage.userPath(session.project, userId);
+    if (session.project.status === 'migrating') {
+      if (!existsSync(logicalPath) || !await this.gitOk(logicalPath, ['rev-parse', '--is-inside-work-tree'])) throw new ConflictException({ code: 'PROJECT_MIGRATING', message: '项目迁移中，当前工作区暂不可读取' });
+      return { path: logicalPath, branch: session.workspaceBranch || 'main', isolated: session.project.userId !== userId };
+    }
+    if (session.project.userId !== userId) this.storage.assertUserWorkspaceAvailable(logicalPath, session.workspacePath);
+    if (existsSync(logicalPath) && await this.gitOk(logicalPath, ['rev-parse', '--is-inside-work-tree'])) {
+      const current = await this.currentBranch(logicalPath);
       const branch =
         current ||
         session.workspaceBranch ||
         session.project.remote?.branch ||
         "main";
       if (branch !== session.workspaceBranch) {
-        await this.saveWorkspace(sessionId, session.workspacePath, branch);
+        await this.saveWorkspace(sessionId, branch);
       }
       return {
-        path: resolve(session.workspacePath),
+        path: logicalPath,
         branch,
         isolated: session.project.userId !== userId,
       };
@@ -80,13 +97,15 @@ export class WorkspaceService {
     return this.workspaceLock.runExclusive(`repository:${session.projectId}`, async () => {
     // 获取仓库锁后重新检查，另一个 Pod 可能已经创建好该 worktree。
     session = await this.access.requireSession(userId, sessionId, "read", { allowProjectImport });
-    if (session.workspacePath && existsSync(session.workspacePath)) {
-      const current = await this.currentBranch(session.workspacePath);
+    const currentPath = this.storage.userPath(session.project, userId);
+    if (session.project.userId !== userId) this.storage.assertUserWorkspaceAvailable(currentPath, session.workspacePath);
+    if (existsSync(currentPath) && await this.gitOk(currentPath, ['rev-parse', '--is-inside-work-tree'])) {
+      const current = await this.currentBranch(currentPath);
       const branch = current || session.workspaceBranch || session.project.remote?.branch || "main";
-      return { path: resolve(session.workspacePath), branch, isolated: session.project.userId !== userId };
+      return { path: currentPath, branch, isolated: session.project.userId !== userId };
     }
     const identity = await this.resolveIdentity(userId);
-    const canonical = resolve(session.project.volumePath);
+    const canonical = this.storage.assertAvailable(session.project);
     const defaultBranch = session.project.remote?.branch || "main";
     const canonicalReady =
       existsSync(canonical) &&
@@ -100,11 +119,11 @@ export class WorkspaceService {
 
     if (session.project.userId === userId) {
       const branch = (await this.currentBranch(canonical)) || defaultBranch;
-      await this.saveWorkspace(sessionId, canonical, branch);
+      await this.saveWorkspace(sessionId, branch);
       return { path: canonical, branch, isolated: false };
     }
 
-    const desired = join(this.workspacesRoot, session.projectId, userId);
+    const desired = this.storage.userPath(session.project, userId);
     const branch = userBranch(session.user.username, userId);
     if (!existsSync(join(desired, ".git"))) {
       if (existsSync(desired)) {
@@ -133,7 +152,7 @@ export class WorkspaceService {
         ]);
       }
     }
-    await this.saveWorkspace(sessionId, desired, branch);
+    await this.saveWorkspace(sessionId, branch);
       return { path: desired, branch, isolated: true };
     });
   }
@@ -153,7 +172,7 @@ export class WorkspaceService {
     });
     if (!project) throw new NotFoundException("项目不存在");
     return this.workspaceLock.runExclusive(`repository:${projectId}`, async () => {
-    const canonical = resolve(project.volumePath);
+    const canonical = this.storage.assertAvailable(project);
     const identity = await this.resolveIdentity(project.userId);
     await this.ensureCanonicalRepo(
       canonical,
@@ -186,12 +205,13 @@ export class WorkspaceService {
   }
 
   /** 删除项目元数据前清理其全部 worktree 和源码目录。调用方必须先确认无运行资源。 */
-  async removeProjectFiles(projectId: string, canonicalPath: string) {
+  async removeProjectFiles(project: StoredProjectLocation) {
+    const projectId = project.id;
     return this.workspaceLock.runExclusive(`repository:${projectId}`, async () => {
     const users = await this.prisma.session.findMany({ where: { projectId }, select: { userId: true } });
     const userIds = [...new Set(users.map((item) => item.userId))].sort();
     return this.withWorkspaceLocks(projectId, userIds, 0, () =>
-      this.removeProjectFilesLocked(projectId, canonicalPath),
+      this.removeProjectFilesLocked(project),
     );
     });
   }
@@ -203,35 +223,28 @@ export class WorkspaceService {
     );
   }
 
-  private async removeProjectFilesLocked(projectId: string, canonicalPath: string) {
-    const canonical = resolve(canonicalPath);
+  private async removeProjectFilesLocked(project: StoredProjectLocation) {
+    const projectId = project.id;
+    const canonical = this.storage.assertAvailable(project);
     const sessions = await this.prisma.session.findMany({
       where: { projectId },
-      select: { workspacePath: true },
+      select: { userId: true },
     });
     const isolated = [...new Set(sessions
-      .map((item) => item.workspacePath && resolve(item.workspacePath))
+      .map((item) => item.userId !== project.userId ? this.storage.userPath(project, item.userId) : null)
       .filter((item): item is string => !!item && item !== canonical))];
     for (const path of isolated) {
-      this.assertInside(this.workspacesRoot, path);
+      this.storage.assertInside(this.workspacesRoot, path);
       if (existsSync(canonical)) {
         await this.git(canonical, ["worktree", "remove", "--force", path]).catch(() => undefined);
       }
       await rm(path, { recursive: true, force: true });
     }
     const deployRoot = resolve(this.deploymentsRoot, projectId);
-    this.assertInside(this.deploymentsRoot, deployRoot);
+    this.storage.assertInside(this.deploymentsRoot, deployRoot);
     await rm(deployRoot, { recursive: true, force: true });
-    const projectsRoot = resolve(this.config.get<string>("SANDBOX_PROJECTS_ROOT", ".data/projects"));
-    this.assertInside(projectsRoot, canonical);
+    this.storage.assertInside(this.storage.projectsRoot, canonical);
     await rm(canonical, { recursive: true, force: true });
-  }
-
-  private assertInside(root: string, target: string) {
-    const relativePath = relative(resolve(root), resolve(target));
-    if (!relativePath || relativePath.startsWith("..") || isAbsolute(relativePath)) {
-      throw new BadRequestException("拒绝清理工作区根目录或范围外路径");
-    }
   }
 
   private async ensureCanonicalRepo(
@@ -298,10 +311,10 @@ export class WorkspaceService {
     }
   }
 
-  private async saveWorkspace(sessionId: string, path: string, branch: string) {
+  private async saveWorkspace(sessionId: string, branch: string) {
     await this.prisma.session.update({
       where: { id: sessionId },
-      data: { workspacePath: path, workspaceBranch: branch },
+      data: { workspacePath: null, workspaceBranch: branch },
     });
   }
 

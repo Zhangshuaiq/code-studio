@@ -188,7 +188,7 @@ docker build -t sandbox-python:1.0 sandbox-images/python
 - `aider`：通过本机 Aider 子进程做仓库感知的增量编辑。可通过 `AIDER_BIN` 指定可执行文件路径。
 - `claude-agent`：provider 代码仍保留，供后续平台凭证模式扩展；当前 UI/API 的模型配置只接受 OpenAI 兼容配置，正常生成流程要求先配置 BYOK 模型。
 
-成功生成后，系统会补齐必要脚手架、创建 Git 提交，并在 `AUTO_PREVIEW=true` 时异步启动预览。
+成功生成后，系统会补齐必要脚手架并创建 Git 提交。预览不会自动启动，用户可在工作区点击「部署预览」。
 
 ## Git 仓库与用户身份
 

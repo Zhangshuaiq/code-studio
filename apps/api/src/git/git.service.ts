@@ -585,15 +585,8 @@ export class GitService {
       branch: string;
     },
   ) {
-    const tracked = (await this.git(cwd, ["ls-files"])).stdout
-      .split("\n")
-      .map((item) => item.trim())
-      .filter((item) => item && item !== ".gitignore");
-    const untracked = (await this.git(cwd, ["status", "--porcelain"])).stdout
-      .split("\n")
-      .filter((line) => line.trim() && !line.endsWith(" .gitignore"));
-    if (tracked.length || untracked.length) {
-      throw new BadRequestException({ code: 'GIT_IMPORT_WORKSPACE_NOT_EMPTY', message: '当前工作区已经包含代码，不能执行远程仓库导入；请改用同步功能' });
+    if (await this.hasWorkspaceCode(cwd)) {
+      throw new BadRequestException({ code: 'GIT_IMPORT_WORKSPACE_NOT_EMPTY', message: '当前工作区已经包含代码，不能执行远程仓库导入；请保留现有代码并在工作区使用同步功能' });
     }
     await this.fetchRemote(cwd, opts);
     await this.git(cwd, [
@@ -603,6 +596,17 @@ export class GitService {
       remoteTrackingRef(opts.branch),
     ]);
     return this.remoteStatus(cwd, opts.branch, true);
+  }
+
+  async hasWorkspaceCode(cwd: string): Promise<boolean> {
+    const tracked = (await this.git(cwd, ["ls-files"])).stdout
+      .split("\n")
+      .map((item) => item.trim())
+      .filter((item) => item && item !== ".gitignore");
+    const untracked = (await this.git(cwd, ["status", "--porcelain"])).stdout
+      .split("\n")
+      .filter((line) => line.trim() && !line.endsWith(" .gitignore"));
+    return tracked.length > 0 || untracked.length > 0;
   }
 
   async conflicts(cwd: string): Promise<string[]> {

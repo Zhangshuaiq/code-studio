@@ -6,6 +6,7 @@ export interface Team {
   name: string;
   description?: string;
   createdAt: string;
+  projectCounts?: { visible: number; cleanup: number };
   _count?: {
     members: number;
     projects: number;

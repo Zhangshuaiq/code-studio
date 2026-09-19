@@ -7,6 +7,8 @@ import { SimpleLlmProvider } from './providers/simple-llm.provider';
 import { AiderProvider } from './providers/aider.provider';
 import { CodexProvider } from './providers/codex.provider';
 import { AgentRuntimeStateService } from './agent-runtime-state.service';
+import { CodexAccountService } from './codex-account.service';
+import { CodexAccountController } from './codex-account.controller';
 import { SandboxModule } from '../sandbox/sandbox.module';
 import { PreviewModule } from '../preview/preview.module';
 import { ModelConfigModule } from '../model-config/model-config.module';
@@ -16,7 +18,7 @@ import { GenerationSchedulerService } from './generation-scheduler.service';
 
 @Module({
   imports: [SandboxModule, PreviewModule, ModelConfigModule],
-  controllers: [AgentController],
+  controllers: [AgentController, CodexAccountController],
   providers: [
     AgentService,
     AgentQueueService,
@@ -28,6 +30,7 @@ import { GenerationSchedulerService } from './generation-scheduler.service';
     AiderProvider,
     CodexProvider,
     AgentRuntimeStateService,
+    CodexAccountService,
   ],
   exports: [
     AgentService,

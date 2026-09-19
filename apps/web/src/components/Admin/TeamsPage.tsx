@@ -81,6 +81,14 @@ function TeamCard({
 }) {
   const deleteMut = useDeleteTeam();
   const { confirm: askConfirm } = useFeedback();
+  const [deleteBlockers, setDeleteBlockers] = useState<{
+    projects?: Array<{ name: string; status: string; deletionError?: string | null }>;
+    datasources?: Array<{ name: string }>;
+    deployTargets?: Array<{ name: string }>;
+    requirements?: Array<{ title: string }>;
+    knowledgeFolders?: Array<{ name: string }>;
+    knowledgeDocuments?: Array<{ title: string }>;
+  } | null>(null);
 
   return (
     <div className="panel rounded-lg border p-4 transition hover:border-indigo-200 dark:hover:border-indigo-900">
@@ -104,12 +112,18 @@ function TeamCard({
             if (
               await askConfirm({
                 title: "删除项目组",
-                message: `确认删除空项目组「${team.name}」？\n仍关联项目、数据源或部署目标时，平台会拒绝删除。`,
+                message: `确认删除项目组「${team.name}」？\n正常项目和知识文档等内容会阻止删除；待清理项目将脱离项目组并继续后台回收，空知识文件夹随项目组删除。`,
                 confirmText: "删除项目组",
                 tone: "danger",
               })
             ) {
-              deleteMut.mutate(team.id);
+              setDeleteBlockers(null);
+              try {
+                await deleteMut.mutateAsync(team.id);
+              } catch (error: any) {
+                const details = error?.response?.data?.blockerDetails;
+                if (details) setDeleteBlockers(details);
+              }
             }
           }}
           className="btn btn-ghost btn-sm text-red-600 hover:bg-red-50 dark:hover:bg-red-500/10"
@@ -121,7 +135,7 @@ function TeamCard({
       <div className="mt-3 flex items-center justify-between">
         <div className="flex gap-4 text-xs text-muted">
           <span>成员: {team._count?.members ?? 0}</span>
-          <span>项目: {team._count?.projects ?? 0}</span>
+          <span>项目: {team.projectCounts?.visible ?? team._count?.projects ?? 0}{team.projectCounts?.cleanup ? `（待清理 ${team.projectCounts.cleanup}）` : ""}</span>
           <span>数据源: {team._count?.datasources ?? 0}</span>
           <span>部署目标: {team._count?.deployTargets ?? 0}</span>
         </div>
@@ -133,6 +147,18 @@ function TeamCard({
           <UserPlus size={14} />
         </button>
       </div>
+      {deleteBlockers && (
+        <div className="mt-3 rounded-md border border-amber-300 bg-amber-50 p-3 text-xs text-amber-900 dark:border-amber-800 dark:bg-amber-950 dark:text-amber-200">
+          <p className="font-medium">不能删除，仍关联以下资源：</p>
+          {deleteBlockers.projects?.map((item, index) => <p key={`project-${index}`}>项目：{item.name}（{item.status === 'deletion_failed' ? '删除失败' : item.status.startsWith('deleting') ? '清理中' : item.status}）{item.deletionError ? `：${item.deletionError}` : ''}</p>)}
+          {deleteBlockers.datasources?.map((item, index) => <p key={`datasource-${index}`}>数据源：{item.name}</p>)}
+          {deleteBlockers.deployTargets?.map((item, index) => <p key={`target-${index}`}>部署目标：{item.name}</p>)}
+          {deleteBlockers.requirements?.map((item, index) => <p key={`requirement-${index}`}>需求：{item.title}</p>)}
+          {deleteBlockers.knowledgeFolders?.map((item, index) => <p key={`folder-${index}`}>知识文件夹：{item.name}</p>)}
+          {deleteBlockers.knowledgeDocuments?.map((item, index) => <p key={`document-${index}`}>知识文档：{item.title}</p>)}
+          <p className="mt-2"><a className="underline" href="/admin/project-cleanups">查看项目清理任务</a> · <a className="underline" href="/knowledge">管理知识文件夹</a></p>
+        </div>
+      )}
     </div>
   );
 }

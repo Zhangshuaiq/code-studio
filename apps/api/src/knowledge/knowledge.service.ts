@@ -7,6 +7,7 @@ import {
 } from "@nestjs/common";
 import { PrismaService } from "../prisma/prisma.service";
 import { Prisma } from "@prisma/client";
+import { KnowledgeAccessService, KnowledgePermission } from './knowledge-access.service';
 import {
   CreateDocumentDto,
   CreateFolderDto,
@@ -18,23 +19,12 @@ import {
 const userSelect = { id: true, username: true, displayName: true } as const;
 @Injectable()
 export class KnowledgeService {
-  constructor(private readonly prisma: PrismaService) {}
-  private async member(userId: string, teamId: string) {
-    const team = await this.prisma.team.findFirst({
-      where: {
-        id: teamId,
-        members: { some: { id: userId, status: "active" } },
-      },
-      select: { id: true, name: true },
-    });
-    if (!team)
-      throw new ForbiddenException({
-        code: "KNOWLEDGE_TEAM_ACCESS_DENIED",
-        message: "无权访问该团队知识库",
-      });
-    return team;
+  constructor(private readonly prisma: PrismaService, private readonly access: KnowledgeAccessService) {}
+  private async member(userId: string, teamId: string, permission: KnowledgePermission = 'view') {
+    return this.access.requireBase(userId, teamId, permission);
   }
-  private async document(userId: string, id: string) {
+  private async document(userId: string, id: string, permission: KnowledgePermission = 'view') {
+    const { rights } = await this.access.requireDocument(userId, id, permission);
     const doc = await this.prisma.knowledgeDocument.findUnique({
       where: { id },
       include: {
@@ -50,24 +40,29 @@ export class KnowledgeService {
         code: "KNOWLEDGE_DOCUMENT_NOT_FOUND",
         message: "知识文档不存在",
       });
-    await this.member(userId, doc.teamId);
-    return doc;
+    return { ...doc, permissions: rights };
   }
   async teams(userId: string) {
-    return this.prisma.team.findMany({
-      where: { members: { some: { id: userId, status: "active" } } },
+    const context = await this.access.context(userId);
+    const rows = await this.prisma.team.findMany({
       select: {
         id: true,
         name: true,
+        createdById: true,
+        createdBy: { select: userSelect },
+        knowledgeAccessMode: true,
+        knowledgeBaseGrants: true,
         _count: {
           select: { knowledgeFolders: true, knowledgeDocuments: true },
         },
       },
       orderBy: { name: "asc" },
     });
+    return rows.map(({ knowledgeBaseGrants, ...team }) => ({ ...team, permissions: this.access.baseRights(team, knowledgeBaseGrants, userId, context) })).filter((team) => team.permissions.view);
   }
   async tree(userId: string, teamId: string) {
-    const team = await this.member(userId, teamId);
+    const { base, rights } = await this.member(userId, teamId);
+    const context = await this.access.context(userId);
     const [folders, documents] = await Promise.all([
       this.prisma.knowledgeFolder.findMany({
         where: { teamId },
@@ -80,6 +75,10 @@ export class KnowledgeService {
           folderId: true,
           requirementId: true,
           title: true,
+          createdById: true,
+          createdBy: { select: userSelect },
+          accessMode: true,
+          accessGrants: true,
           version: true,
           updatedAt: true,
           updatedBy: { select: userSelect },
@@ -87,14 +86,17 @@ export class KnowledgeService {
         orderBy: { updatedAt: "desc" },
       }),
     ]);
-    return { team, folders, documents };
+    return {
+      team: { id: base.id, name: base.name, createdBy: base.createdBy, permissions: rights },
+      folders,
+      documents: documents.map(({ accessGrants, ...doc }) => ({ ...doc, permissions: this.access.documentRights(doc, accessGrants, rights, userId, context) })),
+    };
   }
   async search(userId: string, query: string) {
     const term = query.trim().slice(0, 100);
     if (term.length < 2) return [];
-    return this.prisma.knowledgeDocument.findMany({
+    const rows = await this.prisma.knowledgeDocument.findMany({
       where: {
-        team: { members: { some: { id: userId, status: "active" } } },
         OR: [
           { title: { contains: term, mode: "insensitive" } },
           { contentMarkdown: { contains: term, mode: "insensitive" } },
@@ -102,6 +104,10 @@ export class KnowledgeService {
       },
       select: {
         id: true,
+        teamId: true,
+        createdById: true,
+        accessMode: true,
+        accessGrants: true,
         title: true,
         updatedAt: true,
         requirementId: true,
@@ -110,11 +116,13 @@ export class KnowledgeService {
         updatedBy: { select: userSelect },
       },
       orderBy: { updatedAt: "desc" },
-      take: 50,
+      take: 100,
     });
+    const visible = await Promise.all(rows.map(async ({ accessGrants, ...doc }) => ({ doc, rights: await this.access.rightsForDocument(userId, { ...doc, accessGrants }) })));
+    return visible.filter((item) => item.rights.view).slice(0, 50).map((item) => item.doc);
   }
   async createFolder(userId: string, input: CreateFolderDto) {
-    await this.member(userId, input.teamId);
+    await this.member(userId, input.teamId, 'edit');
     const name = input.name.trim();
     if (!name)
       throw new BadRequestException({
@@ -149,7 +157,7 @@ export class KnowledgeService {
         code: "KNOWLEDGE_FOLDER_NOT_FOUND",
         message: "文件夹不存在",
       });
-    await this.member(userId, folder.teamId);
+    await this.member(userId, folder.teamId, 'edit');
     if (input.parentId === id)
       throw new BadRequestException({
         code: "KNOWLEDGE_FOLDER_CYCLE",
@@ -185,7 +193,7 @@ export class KnowledgeService {
         code: "KNOWLEDGE_FOLDER_NOT_FOUND",
         message: "文件夹不存在",
       });
-    await this.member(userId, folder.teamId);
+    await this.member(userId, folder.teamId, 'delete');
     if (folder._count.children || folder._count.documents)
       throw new ConflictException({
         code: "KNOWLEDGE_FOLDER_NOT_EMPTY",
@@ -195,7 +203,7 @@ export class KnowledgeService {
     return { deleted: true };
   }
   async createDocument(userId: string, input: CreateDocumentDto) {
-    await this.member(userId, input.teamId);
+    await this.member(userId, input.teamId, 'edit');
     if (
       input.folderId &&
       !(await this.prisma.knowledgeFolder.findFirst({
@@ -245,7 +253,7 @@ export class KnowledgeService {
       where: { requirementId },
     });
     if (existing) {
-      await this.member(userId, existing.teamId);
+      await this.access.requireDocument(userId, existing.id, 'view');
       return existing;
     }
     const requirement = await this.prisma.requirement.findUnique({
@@ -257,7 +265,7 @@ export class KnowledgeService {
         code: "REQUIREMENT_NOT_FOUND",
         message: "需求不存在",
       });
-    await this.member(userId, requirement.teamId);
+    await this.member(userId, requirement.teamId, 'edit');
     try {
       return await this.prisma.$transaction(async (tx) => {
         const doc = await tx.knowledgeDocument.create({
@@ -313,7 +321,7 @@ export class KnowledgeService {
     return this.document(userId, id);
   }
   async update(userId: string, id: string, input: UpdateDocumentDto) {
-    const doc = await this.document(userId, id);
+    const doc = await this.document(userId, id, 'edit');
     if (
       input.folderId &&
       !(await this.prisma.knowledgeFolder.findFirst({
@@ -336,7 +344,7 @@ export class KnowledgeService {
     });
   }
   async deleteDocument(userId: string, id: string) {
-    const doc = await this.document(userId, id);
+    const doc = await this.document(userId, id, 'delete');
     if (doc.requirementId)
       throw new ConflictException({
         code: "KNOWLEDGE_REQUIREMENT_DOCUMENT_DELETE_DENIED",
@@ -346,7 +354,7 @@ export class KnowledgeService {
     return { deleted: true };
   }
   async save(userId: string, id: string, input: SaveDocumentDto) {
-    await this.document(userId, id);
+    await this.document(userId, id, 'edit');
     const layoutJson = input.layoutJson as Prisma.InputJsonValue | undefined;
     return this.prisma.$transaction(async (tx) => {
       const result = await tx.knowledgeDocument.updateMany({

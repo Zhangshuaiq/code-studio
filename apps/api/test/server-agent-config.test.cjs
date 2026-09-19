@@ -14,7 +14,7 @@ function setup() {
     $transaction: async (operation) => operation(prisma),
   };
   const crypto = { encrypt: (text) => `encrypted:${text}`, decrypt: (text) => text.slice(10) };
-  return { service: new ModelConfigService(prisma, crypto), getSaved: () => saved };
+  return { service: new ModelConfigService(prisma, crypto, { home: async () => '/tmp/codegen-test-codex-home' }), getSaved: () => saved };
 }
 
 test('Codex agent requires a personal API key and selects model per session', async () => {
@@ -28,6 +28,21 @@ test('Codex agent requires a personal API key and selects model per session', as
   assert.equal(resolved.engine, 'codex');
   assert.equal(resolved.apiKey, 'my-key');
   assert.equal(resolved.model, 'gpt-5.5');
+});
+
+test('Codex CLI uses the owning user login without an API key', async () => {
+  const { service, getSaved } = setup();
+  await assert.rejects(service.create('user-1', { label: 'CLI', engine: 'codex-cli', apiKey: 'wrong-mode' }), /不接受 API Key/);
+  const created = await service.create('user-1', { label: 'CLI', engine: 'codex-cli' });
+  assert.equal(getSaved().provider, 'openai');
+  assert.equal(getSaved().encryptedKey, 'encrypted:');
+  assert.equal(created.keyMasked, '个人账号登录');
+  assert.equal((await service.resolveForGeneration('user-1', created.id)).model, '');
+  const selected = await service.resolveForGeneration('user-1', created.id, 'gpt-5.5');
+  assert.equal(selected.engine, 'codex-cli');
+  assert.equal(selected.apiKey, '');
+  assert.equal(selected.model, 'gpt-5.5');
+  await assert.rejects(service.update('user-1', created.id, { apiKey: 'wrong-mode' }), /不使用 API Key/);
 });
 
 test('API model still requires all API connection fields', async () => {

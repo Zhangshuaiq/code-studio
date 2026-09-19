@@ -180,7 +180,6 @@ function WorkspacePage() {
   const qc = useQueryClient();
   const { toast } = useFeedback();
   const [tab, setTab] = useState<RightTab>("preview");
-  const [genSeq, setGenSeq] = useState(0);
   const [logOpen, setLogOpen] = useState(false);
 
   // 使用多标签页状态
@@ -188,6 +187,8 @@ function WorkspacePage() {
 
   const sessionId = session.data?.sessionId;
   const projectName = project.data?.name ?? "项目";
+  const migrating = project.data?.status === "migrating";
+  const workspaceReadOnly = migrating || project.data?.accessRole === "viewer";
 
   const changes = useSessionChanges(sessionId);
   const currentChange = (changes.data ?? []).find((c) => c.path === activeFile);
@@ -200,8 +201,7 @@ function WorkspacePage() {
   }, [closeAllFiles]);
 
   function handleGenerated() {
-    setTab("preview");
-    setGenSeq((n) => n + 1);
+    setTab("code");
     setLogOpen(true); // 运行后自动弹出日志
     if (sessionId) {
       qc.invalidateQueries({ queryKey: ["preview", sessionId] });
@@ -226,7 +226,7 @@ function WorkspacePage() {
             initialModelConfigId={session.data?.modelConfigId}
             initialModelName={session.data?.modelName}
             onGenerated={handleGenerated}
-            readOnly={project.data?.accessRole === "viewer"}
+            readOnly={workspaceReadOnly}
           />
         </div>
       </Panel>
@@ -247,7 +247,7 @@ function WorkspacePage() {
                 </button>
                 <div className="mr-2 min-w-0">
                   <div className="flex items-center gap-1.5">
-                    <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-emerald-500 shadow-[0_0_0_3px_rgba(16,185,129,0.12)]" />
+                    <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${migrating ? "bg-amber-500" : "bg-emerald-500 shadow-[0_0_0_3px_rgba(16,185,129,0.12)]"}`} />
                     <span className="max-w-[150px] truncate text-xs font-bold text-slate-800 dark:text-slate-100">
                       {projectName}
                     </span>
@@ -308,11 +308,19 @@ function WorkspacePage() {
                 </div>
               </div>
 
+              {migrating && <div role="status" className="border-b border-amber-200 bg-amber-50 px-4 py-2 text-xs text-amber-800 dark:border-amber-900 dark:bg-amber-950/50 dark:text-amber-200">项目迁移中，工作区暂时只读，不可保存代码或提交任务。迁移完成后会自动恢复。</div>}
+
               <div className="min-h-0 flex-1">
                 {session.isLoading ? (
                   <Centered>正在准备工作区…</Centered>
                 ) : session.isError ? (
-                  <Centered>工作区加载失败</Centered>
+                  <Centered>
+                    <div className="max-w-md px-4 text-center">
+                      <p className="font-medium text-slate-700 dark:text-slate-200">工作区加载失败</p>
+                      <p className="mt-2 break-words text-xs">{workspaceErrorText(session.error)}</p>
+                      <button className="btn btn-secondary btn-sm mt-4" onClick={() => void session.refetch()}>重试</button>
+                    </div>
+                  </Centered>
                 ) : tab === "code" ? (
                   <PanelGroup
                     direction="horizontal"
@@ -335,7 +343,7 @@ function WorkspacePage() {
                         </div>
                         <BranchControl
                           sessionId={sessionId}
-                          readOnly={project.data?.accessRole === "viewer"}
+                          readOnly={workspaceReadOnly}
                         />
                       </div>
                     </Panel>
@@ -349,7 +357,7 @@ function WorkspacePage() {
                             sessionId={sessionId}
                             path={activeFile}
                             change={currentChange}
-                            readOnly={project.data?.accessRole === "viewer"}
+                            readOnly={workspaceReadOnly}
                           />
                         </div>
                       </div>
@@ -358,7 +366,7 @@ function WorkspacePage() {
                 ) : tab === "history" ? (
                   <HistoryPanel sessionId={sessionId} />
                 ) : (
-                  <PreviewPanel sessionId={sessionId!} generationSeq={genSeq} />
+                  <PreviewPanel sessionId={sessionId!} readOnly={workspaceReadOnly} />
                 )}
               </div>
             </section>
@@ -410,4 +418,12 @@ function Centered({ children }: { children: React.ReactNode }) {
       {children}
     </div>
   );
+}
+
+function workspaceErrorText(error: unknown): string {
+  const response = error as { response?: { data?: { message?: unknown } }; message?: string };
+  const message = response?.response?.data?.message;
+  if (typeof message === "string") return message;
+  if (Array.isArray(message)) return message.filter((item): item is string => typeof item === "string").join("；");
+  return response?.message || "请检查 API 服务与项目工作区存储后重试";
 }

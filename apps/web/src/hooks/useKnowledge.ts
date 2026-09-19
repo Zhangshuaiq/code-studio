@@ -65,6 +65,14 @@ export function useKnowledgeMutations(teamId?: string) {
   const refresh = () =>
     qc.invalidateQueries({ queryKey: ["knowledge-tree", teamId] });
   return {
+    deleteFolder: useMutation({
+      mutationFn: (id: string) => api.delete(`/knowledge/folders/${id}`),
+      onSuccess: () => {
+        void refresh();
+        void qc.invalidateQueries({ queryKey: ["knowledge-teams"] });
+        void qc.invalidateQueries({ queryKey: ["teams"] });
+      },
+    }),
     createFolder: useMutation({
       mutationFn: (body: { teamId: string; parentId?: string; name: string }) =>
         api.post("/knowledge/folders", body),

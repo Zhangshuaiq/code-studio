@@ -1,4 +1,4 @@
-import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { CreateSessionDto } from './dto/create-session.dto';
 import { UpdateSessionDto } from './dto/update-session.dto';
@@ -16,10 +16,14 @@ export class SessionService {
   ) {}
 
   async create(userId: string, dto: CreateSessionDto) {
-    await this.access.requireProject(userId, dto.projectId, 'read');
+    const project = await this.access.requireProject(userId, dto.projectId, 'read');
     const existing = await this.prisma.session.findUnique({
       where: { projectId_userId: { projectId: dto.projectId, userId } },
     });
+    if (project.status === 'migrating') {
+      if (!existing) throw new ConflictException({ code: 'PROJECT_MIGRATING', message: '项目迁移中，不能新建工作区' });
+      return this.publicSession(existing, userId);
+    }
     const session =
       existing ??
       (await this.prisma.session.create({

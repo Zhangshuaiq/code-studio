@@ -32,8 +32,9 @@ export class DeploymentCenterService {
   ) {}
 
   async projects(userId: string) {
+    const isAdmin = await this.access.isPlatformAdmin(userId);
     const rows = await this.prisma.project.findMany({
-      where: this.access.visibleWhere(userId),
+      where: this.access.visibleWhere(userId, isAdmin),
       include: {
         team: { select: { id: true, name: true } },
         remote: { select: { branch: true, remoteUrl: true } },
@@ -59,7 +60,7 @@ export class DeploymentCenterService {
       team: project.team,
       remote: project.remote,
       accessRole:
-        project.userId === userId
+        isAdmin || project.userId === userId
           ? "owner"
           : project.members[0]?.role || "viewer",
       environments: project.runtimeBindings,
@@ -269,9 +270,10 @@ export class DeploymentCenterService {
 
   async records(userId: string, query: DeploymentRecordQueryDto) {
     if (query.projectId) await this.access.requireProject(userId, query.projectId, "read");
+    const isAdmin = await this.access.isPlatformAdmin(userId);
     const visible = await this.prisma.project.findMany({
       where: {
-        ...this.access.visibleWhere(userId),
+        ...this.access.visibleWhere(userId, isAdmin),
         ...(query.projectId ? { id: query.projectId } : {}),
       },
       select: { id: true },

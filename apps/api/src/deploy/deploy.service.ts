@@ -168,7 +168,7 @@ export class DeployService {
       datasourceId?: string;
     },
   ) {
-    const project = await this.project(userId, sessionId, "read");
+    const project = await this.project(userId, sessionId, "edit");
     const runtime = getRuntime(project.language);
     const tpl = deployTemplate(runtime.id);
     if (!tpl)

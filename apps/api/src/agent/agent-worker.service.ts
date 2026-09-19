@@ -9,7 +9,6 @@ import { context, SpanKind, SpanStatusCode, trace } from '@opentelemetry/api';
 import { extractTraceContext } from '../observability/trace-context';
 import { diagnosticMessage } from '../common/redact-diagnostic';
 import { DistributedWorkspaceLockService } from '../workspace/distributed-workspace-lock.service';
-import { WorkspaceService } from '../workspace/workspace.service';
 
 @Injectable()
 export class AgentWorkerService implements OnModuleInit, OnModuleDestroy {
@@ -20,7 +19,7 @@ export class AgentWorkerService implements OnModuleInit, OnModuleDestroy {
   private delegated = false;
   private readonly closeConnections: Array<() => Promise<void>> = [];
 
-  constructor(private readonly config: ConfigService, private readonly prisma: PrismaService, private readonly agent: AgentService, private readonly scheduler: GenerationSchedulerService, private readonly workspaceLock: DistributedWorkspaceLockService, private readonly workspaces: WorkspaceService) {}
+  constructor(private readonly config: ConfigService, private readonly prisma: PrismaService, private readonly agent: AgentService, private readonly scheduler: GenerationSchedulerService, private readonly workspaceLock: DistributedWorkspaceLockService) {}
 
   async onModuleInit() {
     if (this.config.get<string>('AGENT_WORKER_DEDICATED') === 'true' &&
@@ -53,7 +52,7 @@ export class AgentWorkerService implements OnModuleInit, OnModuleDestroy {
       try {
         const session = await this.prisma.session.findUnique({ where: { id: job.data.sessionId }, select: { projectId: true } });
         if (!session) throw new UnrecoverableError('生成任务关联的会话不存在');
-        await this.workspaces.ensureForSession(job.data.userId, job.data.sessionId);
+        await job.updateProgress({ kind: 'system', text: '任务已开始，正在准备工作区…' });
         const result = await this.workspaceLock.runExclusive(
           `workspace:${session.projectId}:${job.data.userId}`,
           () => this.agent.runTask(job.data.userId, job.data.sessionId, job.data.prompt, (event) => void job.updateProgress(event), job.data.taskId, controller.signal),
@@ -79,11 +78,16 @@ export class AgentWorkerService implements OnModuleInit, OnModuleDestroy {
         lockDuration: Number(this.config.get('AGENT_JOB_LOCK_MS', 600_000)),
       });
     this.worker.on('completed', (job) => this.logger.log(`生成任务完成 job=${job.id}`));
-    this.worker.on('failed', (job, error) => {
+    this.worker.on('failed', async (job, error) => {
       const message = diagnosticMessage(error);
       this.logger.error(`生成队列任务失败 job=${job?.id}: ${message}`);
-      if (!job || job.attemptsMade < (job.opts.attempts ?? 1)) return;
-      void this.prisma.task.updateMany({ where: { id: job.data.taskId, status: { in: ['queued', 'running'] } }, data: { status: 'failed', resultLog: `任务在 ${job.attemptsMade} 次尝试后失败: ${message}`, finishedAt: new Date() } });
+      if (!job) return;
+      try {
+        if ((await job.getState()) !== 'failed') return;
+        await this.prisma.task.updateMany({ where: { id: job.data.taskId, status: { in: ['queued', 'running'] } }, data: { status: 'failed', resultLog: `任务在 ${job.attemptsMade} 次尝试后失败: ${message}`, finishedAt: new Date() } });
+      } catch (syncError) {
+        this.logger.error(`同步失败任务状态异常 job=${job.id}: ${diagnosticMessage(syncError)}`);
+      }
     });
     this.logger.log(`独立生成 Worker 已就绪，并发数=${this.worker.opts.concurrency}`);
   }

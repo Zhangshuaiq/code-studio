@@ -31,6 +31,10 @@ const WELCOME: ChatMessage = {
     "描述你希望完成的开发任务。我会先查看当前项目，再按需修改文件。你可以在下方选择平台和模型。",
 };
 
+function cleanLegacyClusterNotice(log: string) {
+  return log.replace(/\n*⚠ 当前未连接集群：已保存代码，未执行自动构建验证或预览。/g, "").trim();
+}
+
 // 历史任务 → 对话消息
 function tasksToMessages(tasks: SessionTask[]): ChatMessage[] {
   return tasks.flatMap((t) => {
@@ -41,7 +45,7 @@ function tasksToMessages(tasks: SessionTask[]): ChatMessage[] {
       {
         id: `${t.id}-a`,
         role: "assistant" as const,
-        content: head + (t.resultLog || "(无输出)"),
+        content: head + (cleanLegacyClusterNotice(t.resultLog || "") || "(无输出)"),
         taskId: t.id,
         taskStatus: ["cancelled", "timed_out"].includes(t.status) ? "failed" : t.status,
         retryPrompt: t.prompt,
@@ -136,17 +140,17 @@ export function ChatPanel({
         else if (ev.kind === "tool_use")
           render(`\n· ${describeTool(ev.toolName, ev.toolInput)}`);
         else if (ev.kind === "result" && ev.text) render(`\n\n${ev.text}`);
-        else if (ev.kind === "system" && ev.text) render(`\n${ev.text}`);
+        else if (ev.kind === "system" && ev.text) render(`${acc ? "\n" : ""}${ev.text}`);
       },
       onDone: (r) => {
         setActiveTaskId(undefined);
         const head =
           r.status === "succeeded"
-            ? "✅ 完成，正在启动预览…\n\n"
+            ? "✅ 完成\n\n"
             : "❌ 生成失败\n\n";
         replaceMessage(pendingId, {
           // 断线恢复后中间增量可能不完整，最终持久化日志才是权威结果。
-          content: head + (r.log || acc || ""),
+          content: head + (cleanLegacyClusterNotice(r.log || "") || acc || ""),
           pending: false,
           taskId: r.taskId,
           taskStatus: r.status,

@@ -8,7 +8,6 @@ import { ConfigService } from '@nestjs/config';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { GenerationExecutorService } from './generation-executor.service';
-import { PreviewService } from '../preview/preview.service';
 import { ModelConfigService } from '../model-config/model-config.service';
 import { GitService, FileChange } from '../git/git.service';
 import { GitSettingsService } from '../git/git-settings.service';
@@ -50,7 +49,6 @@ export class AgentService {
     private readonly prisma: PrismaService,
     private readonly config: ConfigService,
     private readonly executor: GenerationExecutorService,
-    private readonly preview: PreviewService,
     private readonly modelConfigs: ModelConfigService,
     private readonly git: GitService,
     private readonly gitSettings: GitSettingsService,
@@ -69,7 +67,7 @@ export class AgentService {
    * 无 BYOK 配置时（credential 为空）回退 .env 的 AGENT_PROVIDER，便于本地调试。
    */
   private provider(cred?: ModelCredential): GenerationProvider {
-    if (cred?.engine === 'codex') return this.codex;
+    if (cred?.engine === 'codex' || cred?.engine === 'codex-cli') return this.codex;
     if (cred?.engine === 'claude-code' || cred?.engine === 'deepseek-agent' || cred?.engine === 'glm-agent') return this.claudeAgent;
     if (cred?.engine === 'aider') return this.aider;
     if (!cred && this.config.get<string>('AGENT_PROVIDER') === 'claude-agent')
@@ -104,9 +102,6 @@ export class AgentService {
     signal?.throwIfAborted();
 
     const handle = await this.executor.prepare(sessionId);
-    if (!handle.verificationAvailable) {
-      onEvent?.({ kind: 'system', text: '当前未连接集群：可继续编码，自动构建验证和预览暂不可用' });
-    }
     const task = queuedTaskId
       ? await this.prisma.task.update({
           where: { id: queuedTaskId },
@@ -126,7 +121,7 @@ export class AgentService {
       session.project.remote?.branch || 'main',
     );
 
-    const agentEngine = ['codex', 'claude-code', 'deepseek-agent', 'glm-agent'].includes(credentials.engine);
+    const agentEngine = ['codex', 'codex-cli', 'claude-code', 'deepseek-agent', 'glm-agent'].includes(credentials.engine);
     const contextPrefix = `${credentials.engine}:${credentials.model}:`;
     const resumeId = agentEngine && session.agentContextId?.startsWith(contextPrefix)
       ? session.agentContextId.slice(contextPrefix.length)
@@ -153,9 +148,6 @@ export class AgentService {
       else if (e.kind === 'system') log += `\n${e.text ?? ''}`;
     }
     log = log.trim();
-    if (!handle.verificationAvailable) {
-      log += '\n\n⚠ 当前未连接集群：已保存代码，未执行自动构建验证或预览。';
-    }
 
     let status: RunResult['status'] = result.isError ? 'failed' : 'succeeded';
 
@@ -245,18 +237,6 @@ export class AgentService {
         data: { agentContextId: agentEngine && result.contextId ? `${contextPrefix}${result.contextId}` : session.agentContextId },
       }),
     ]);
-
-    // 「实时预览」精髓：生成成功后自动拉起（前端 dev server / 后端 HTTP 服务）
-    const autoPreview =
-      this.config.get<string>('AUTO_PREVIEW', 'true') !== 'false';
-    const previewable =
-      handle.runtime.preview.kind === 'web-dev-server' ||
-      handle.runtime.preview.kind === 'http-service';
-    if (status === 'succeeded' && autoPreview && previewable && handle.verificationAvailable) {
-      this.preview.start(userId, sessionId).catch((err) => {
-        this.logger.warn(`自动预览启动失败 session=${sessionId}: ${err}`);
-      });
-    }
 
       return { taskId: task.id, status, log, events: result.events };
     } catch (error) {
