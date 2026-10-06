@@ -1,0 +1,64 @@
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+const { LocalLspManager } = require('../src/local-lsp-manager.cjs');
+const { LocalJavaRuntime } = require('../src/local-java-runtime.cjs');
+
+test('Lombok-generated methods resolve; Java run and breakpoint/variables/step/stop work', { timeout: 150_000 }, async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'code-studio-java-debug-'));
+  const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'code-studio-debug-data-'));
+  const lsp = new LocalLspManager({ dataRoot, idleMs: 120_000 }); const runtime = new LocalJavaRuntime(lsp);
+  t.after(async () => { await runtime.shutdown(); await lsp.shutdown(); fs.rmSync(root, { recursive: true, force: true }); fs.rmSync(dataRoot, { recursive: true, force: true }); });
+  const sourceRoot = path.join(root, 'src/main/java/sample'); fs.mkdirSync(sourceRoot, { recursive: true });
+  const lombokJar = path.resolve(__dirname, '../.cache/java-tools/lombok.jar');
+  fs.writeFileSync(path.join(root, 'pom.xml'), `<project xmlns="http://maven.apache.org/POM/4.0.0"><modelVersion>4.0.0</modelVersion><groupId>sample</groupId><artifactId>debug-sample</artifactId><version>1.0</version><properties><maven.compiler.release>17</maven.compiler.release></properties><dependencies><dependency><groupId>org.projectlombok</groupId><artifactId>lombok</artifactId><version>1.18.38</version><scope>system</scope><systemPath>${lombokJar}</systemPath></dependency></dependencies></project>`);
+  fs.writeFileSync(path.join(sourceRoot, 'Person.java'), 'package sample;\n@lombok.Data\npublic class Person { private String name; }\n');
+  const hiddenBrokenPath = 'src/main/java/sample/Broken.java';
+  fs.writeFileSync(path.join(root, hiddenBrokenPath), 'package sample; class Broken { int value = missing(); }\n');
+  const source = 'package sample;\npublic class Main {\n  public static void main(String[] args) throws Exception {\n    Person person = new Person();\n    person.setName("Lombok works");\n    int answer = 42;\n    System.out.println(person.getName() + answer);\n    Thread.sleep(30000);\n  }\n}\n';
+  const sourcePath = 'src/main/java/sample/Main.java'; fs.writeFileSync(path.join(root, sourcePath), source);
+  const project = { id: 'debug-project', path: root };
+  const prepared = await lsp.prepareProject(project); assert.equal(prepared.providers[0].ready, true, JSON.stringify(prepared));
+  const targets = await runtime.targets(project); assert.ok(targets.some((item) => item.mainClass === 'sample.Main'), JSON.stringify(targets));
+  // Wait for actual diagnostics publication; do not pass simply because the initial cache is empty.
+  await lsp.request(project, 'documentSymbols', { path: sourcePath });
+  await new Promise((resolve) => setTimeout(resolve, 2500));
+  const diagnostics = await lsp.diagnostics(project, { path: sourcePath });
+  assert.deepEqual(diagnostics.filter((item) => item.severity === 1), [], JSON.stringify(diagnostics));
+  const broken = await lsp.diagnostics(project, { path: sourcePath, content: source.replace('getName()', 'notGenerated()') });
+  assert.ok(broken.some((item) => item.severity === 1 && /notGenerated/.test(item.message)), JSON.stringify(broken));
+  await lsp.saved(project, sourcePath);
+  const target = targets.find((item) => item.mainClass === 'sample.Main');
+  // A real compile error must prevent launch and expose a clickable file/line.
+  fs.writeFileSync(path.join(root, sourcePath), source.replace('getName()', 'notGenerated()'));
+  await lsp.saved(project, sourcePath);
+  await assert.rejects(runtime.start(project, { ...target, mode: 'run' }), (error) => error.code === 'LOCAL_JAVA_BUILD_FAILED' && error.issues.some((issue) => issue.path === sourcePath && /notGenerated/.test(issue.message)) && error.issues.some((issue) => issue.path === hiddenBrokenPath && /missing/.test(issue.message)));
+  assert.equal(runtime.inspect(project).status, 'failed');
+  fs.writeFileSync(path.join(root, sourcePath), source); await lsp.saved(project, sourcePath);
+  fs.writeFileSync(path.join(root, hiddenBrokenPath), 'package sample; class Broken { int value = 1; }\n'); await lsp.saved(project, hiddenBrokenPath);
+  await assert.rejects(runtime.start(project, { mode: 'debug', mainClass: 'evil.Main' }), /入口/);
+  await runtime.start(project, { ...target, mode: 'debug', breakpoints: { [sourcePath]: [7] } });
+  async function until(predicate) { for (let index = 0; index < 100; index++) { const state = runtime.inspect(project); if (predicate(state)) return state; await new Promise((resolve) => setTimeout(resolve, 100)); } throw new Error(JSON.stringify(runtime.inspect(project))); }
+  const paused = await until((state) => state.status === 'paused' && state.frames.length);
+  assert.equal(paused.frames[0].path, sourcePath); assert.equal(paused.frames[0].line, 7); assert.equal(paused.breakpoints[0].verified, true);
+  await assert.rejects(runtime.action(project, 'breakpoints', { breakpoints: { '../outside.java': [1] } }));
+  const scopes = await runtime.action(project, 'scopes', { frameId: paused.frames[0].id });
+  const variables = (await Promise.all(scopes.scopes.map((scope) => runtime.action(project, 'variables', { variablesReference: scope.variablesReference })))).flatMap((body) => body.variables);
+  assert.ok(variables.some((item) => item.name === 'answer' && item.value === '42'), JSON.stringify(variables));
+  const person = variables.find((item) => item.name === 'person'); assert.ok(person?.variablesReference > 0, JSON.stringify(variables));
+  const fields = await runtime.action(project, 'variables', { variablesReference: person.variablesReference, sessionId: paused.sessionId, stopVersion: paused.stopVersion });
+  assert.ok(fields.variables.some((item) => item.name === 'name' && item.value.includes('Lombok works')), JSON.stringify(fields));
+  await runtime.action(project, 'next');
+  const stepped = await until((state) => state.status === 'paused' && state.frames[0]?.line === 8);
+  assert.ok(stepped.stopVersion > paused.stopVersion);
+  await assert.rejects(runtime.action(project, 'variables', { variablesReference: person.variablesReference, sessionId: paused.sessionId, stopVersion: paused.stopVersion }), /暂停位置已变化/);
+  await runtime.action(project, 'continue'); await until((state) => state.logs.join('').includes('Lombok works42'));
+  await runtime.action(project, 'stop'); assert.equal(runtime.inspect(project).status, 'stopped');
+  fs.writeFileSync(path.join(root, sourcePath), source.replace('answer = 42', 'answer = 43'));
+  await lsp.saved(project, sourcePath);
+  await runtime.start(project, { ...target, mode: 'run', args: '--test=true', vmArgs: '-Xmx128m' });
+  await until((state) => state.logs.join('').includes('Lombok works43'));
+  await runtime.action(project, 'stop');
+});

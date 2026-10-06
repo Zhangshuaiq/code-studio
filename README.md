@@ -1,5 +1,7 @@
 # AI 代码生成平台
 
+桌面端本地优先、个人/团队/企业版本、许可证以及本地搜索/LSP 的实施计划见 [《Code Studio 本地优先桌面版 Roadmap》](./docs/desktop-local-first-roadmap.md)。
+
 统一可观测与分布式链路的架构、传播规范和实施进度见 [docs/observability-plan.md](docs/observability-plan.md)。
 
 一个面向多用户的 AI 代码生成与交付平台：通过对话生成或修改项目，在浏览器中编辑、预览和调试代码，并用 Git 记录每次变更，生产环境通过 Kubernetes 完成预览、构建与部署。
@@ -69,6 +71,40 @@ Topic 配置区展示 Broker 返回的当前有效值、默认/覆盖来源、�
 ```
 
 ## 快速开始
+
+### 桌面客户端（Windows / macOS）
+
+桌面客户端位于 `apps/desktop`，默认以本地优先模式运行。Electron 会在每次启动时创建仅监听 `127.0.0.1` 随机端口的 Local API，并直接使用本机目录、Git、终端、预览、语言服务、数据库/Kafka/Kubernetes 连接以及本机 Agent Runtime。个人用户无需登录，也不需要预先部署 PostgreSQL、Redis、Worker 或远程 API。
+
+模型页可发现本机 Codex、Claude Code、Aider 与 Ollama，并可保存 Ollama、LM Studio 或其他 OpenAI-compatible 服务。保存后使用“测试”验证 CLI 登录状态，或检查模型端点、认证、响应时间及配置的模型是否真实存在。API Key 通过系统凭据能力加密保存且不会回显。
+
+团队/企业用户可以在客户端中选配 Control API，用于账号、同步、远程执行和企业策略；Control API 不影响 Community 本地核心能力，也不是客户端启动前置条件。
+
+企业控制台提供员工邮箱邀请和域名验证。管理员在“企业组织”生成邀请代码，交给员工从网页或桌面账户页接受；代码仅在生成时展示，默认 7 天有效，接受时重新校验邮箱、席位和单次使用状态。域名验证使用 `_code-studio-verification.<域名>` 的 DNS TXT 记录，按界面给出的值设置后点击“检查 DNS”；验证域名不会自动让同域名账号成为成员。相关邀请与域名迁移需要随 Control API 部署。
+
+企业邀请和域名的 PostgreSQL 集成测试可运行 `RUN_ENTERPRISE_DB_TESTS=1 node --test apps/api/test/enterprise-control-integration.test.cjs`（先构建 API）。测试使用 `ENTERPRISE_TEST_DATABASE_URL` 或 API 开发环境中的 `DATABASE_URL` 创建随机隔离 schema，测试结束仅清理该 schema；不修改已有业务表。DNS 记录在测试中受控提供，公网 DNS 仍需部署后验收。
+
+Control API 的个人许可证签发使用 Ed25519。部署签发服务时通过 `LICENSE_ED25519_PRIVATE_KEY` 配置 PKCS#8 PEM（可将换行写成 `\\n`）或其 DER base64，并用 `LICENSE_KEY_ID` 标识轮换中的活动密钥；桌面正式构建只注入对应公钥，绝不能包含私钥。
+
+Enterprise 客户端策略使用独立的 Ed25519 密钥。Control API 配置 `POLICY_ED25519_PRIVATE_KEY` / `POLICY_KEY_ID`，桌面构建配置对应的 `CODE_STUDIO_POLICY_PUBLIC_KEY`；策略密钥不要与许可证密钥复用。数据库部署还需执行 `20260925210000_enterprise_policy_control` 迁移。
+
+本地联调直接运行：
+
+```bash
+npm run desktop:dev
+```
+
+生成安装包：
+
+```bash
+# macOS：分别生成 Intel/Apple Silicon 的 DMG 与 ZIP
+npm run desktop:dist:mac
+
+# Windows x64：生成 NSIS 安装包与便携版（建议在 Windows CI/主机执行）
+npm run desktop:dist:win
+```
+
+产物写入 `apps/desktop/release/`。未配置 Apple Developer ID 或 Windows 代码签名证书时，生成的是未签名测试包，系统可能显示安全警告；对外发布前应在对应平台的 CI 中配置签名和 macOS notarization。`CODEGEN_SERVER_URL` 只用于预设可选的 Control API 地址。
 
 机器资源有限或只验证核心流程时，请优先使用[本地最小启动指南](./docs/minimal-local-startup.md)，仅启动 PostgreSQL、Redis、API、Worker 和 Web；无需启动可观测性、Kafka、MySQL 或 Kubernetes 组件。
 
@@ -153,6 +189,10 @@ npm run dev
 4. 创建项目，选择运行时，然后在工作区中开始对话生成。
 
 ## 项目运行时
+
+桌面本地 Java 工作区支持选择 main 入口后运行或 Debug：点击编辑器行号左侧设置断点，调试面板提供调用栈、变量展开、暂停/继续、单步和停止。运行参数可配置程序参数及 JVM 参数；运行前须保存修改。客户端自带 Lombok 语言服务支持，项目仍需在 Maven/Gradle 中声明 Lombok 依赖。当前调试入口为 Java main；JUnit、远程 Attach、条件断点及 Node/Python 调试尚未接入。
+
+代码跳转、JAR/JDK 源码打开、LSP 与 DAP 分工、暂停行定位、惰性对象变量及排障方法详见 [代码导航与桌面 Java Debug 技术说明](docs/editor-code-intelligence.md)。
 
 | 运行时 ID    | 技术                            | 沙箱镜像             | 预览               | 部署模板     | 状态                                         |
 | ------------ | ------------------------------- | -------------------- | ------------------ | ------------ | -------------------------------------------- |

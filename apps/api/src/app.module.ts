@@ -36,6 +36,8 @@ import { McpApprovalModule } from "./mcp-approval/mcp-approval.module";
 import { LspModule } from "./lsp/lsp.module";
 import { KnowledgeModule } from "./knowledge/knowledge.module";
 import { MonitoringConfigModule } from "./monitoring-config/monitoring-config.module";
+import { LicenseModule } from "./license/license.module";
+import { EnterprisePolicyModule } from "./enterprise-policy/enterprise-policy.module";
 
 @Module({
   imports: [
@@ -74,6 +76,8 @@ import { MonitoringConfigModule } from "./monitoring-config/monitoring-config.mo
     McpModule,
     LspModule,
     KnowledgeModule,
+    LicenseModule,
+    EnterprisePolicyModule,
   ],
 })
 export class AppModule implements NestModule {

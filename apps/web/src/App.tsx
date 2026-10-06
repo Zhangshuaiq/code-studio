@@ -38,6 +38,7 @@ import { downloadProjectZip } from "./lib/download";
 import { PermissionGate } from "./components/Auth/PermissionGate";
 import { ACCESS } from "./lib/access";
 import { useMe } from "./hooks/useMe";
+import { DesktopLocalHome } from "./components/Desktop/DesktopLocalHome";
 
 const CodeEditor = lazy(() => import("./components/CodeEditor/CodeEditor").then((m) => ({ default: m.CodeEditor })));
 const BusinessLogsPage = lazy(() => import("./components/BusinessLogs/BusinessLogsPage").then((m) => ({ default: m.BusinessLogsPage })));
@@ -52,6 +53,8 @@ const AccountPage = lazy(() => import("./components/Settings/AccountPage").then(
 const MonitoringConfigPage = lazy(() => import("./components/Settings/MonitoringConfigPage").then((m) => ({ default: m.MonitoringConfigPage })));
 const WorkspaceStoragePage = lazy(() => import("./components/Settings/WorkspaceStoragePage").then((m) => ({ default: m.WorkspaceStoragePage })));
 const UsersPage = lazy(() => import("./components/Admin/UsersPage").then((m) => ({ default: m.UsersPage })));
+const LicensesPage = lazy(() => import("./components/Admin/LicensesPage").then((m) => ({ default: m.LicensesPage })));
+const OrganizationsPage = lazy(() => import("./components/Admin/OrganizationsPage").then((m) => ({ default: m.OrganizationsPage })));
 const RolesPage = lazy(() => import("./components/Admin/RolesPage").then((m) => ({ default: m.RolesPage })));
 const AuditPage = lazy(() => import("./components/Admin/AuditPage").then((m) => ({ default: m.AuditPage })));
 const TeamsPage = lazy(() => import("./components/Admin/TeamsPage").then((m) => ({ default: m.TeamsPage })));
@@ -78,6 +81,9 @@ const McpApprovalsPage = lazy(() => import("./components/Approvals/McpApprovalsP
 type RightTab = "code" | "preview" | "history";
 
 export default function App() {
+  if (import.meta.env.VITE_RUNTIME_MODE === "desktop-local") {
+    return <DesktopLocalHome />;
+  }
   const token = useAuth((s) => s.token);
   const location = useLocation();
 
@@ -139,6 +145,8 @@ export default function App() {
             [ACCESS.deployTargets, 'namespaces'],
           ]} />} />
           <Route path="users" element={<PermissionGate anyOf={[ACCESS.adminUsers]}><UsersPage /></PermissionGate>} />
+          <Route path="licenses" element={<PermissionGate anyOf={[ACCESS.adminUsers]}><LicensesPage /></PermissionGate>} />
+          <Route path="organizations" element={<PermissionGate anyOf={[ACCESS.adminUsers]}><OrganizationsPage /></PermissionGate>} />
           <Route path="roles" element={<PermissionGate anyOf={[ACCESS.adminRoles]}><RolesPage /></PermissionGate>} />
           <Route path="audit" element={<PermissionGate anyOf={[ACCESS.audit]}><AuditPage /></PermissionGate>} />
           <Route path="task-dlq" element={<PermissionGate anyOf={[ACCESS.systemSettings]}><DeadLettersPage /></PermissionGate>} />
@@ -181,7 +189,7 @@ function WorkspacePage() {
   const session = useProjectSession(id);
   const qc = useQueryClient();
   const { toast } = useFeedback();
-  const [tab, setTab] = useState<RightTab>("preview");
+  const [tab, setTab] = useState<RightTab>("code");
   const [logOpen, setLogOpen] = useState(false);
 
   // 使用多标签页状态
@@ -322,12 +330,14 @@ function WorkspacePage() {
                       <button className="btn btn-secondary btn-sm mt-4" onClick={() => void session.refetch()}>重试</button>
                     </div>
                   </Centered>
-                ) : tab === "code" ? (
-                  <PanelGroup
-                    direction="horizontal"
-                    className="h-full"
-                    autoSaveId="ws-code"
-                  >
+                ) : (
+                  <div className="relative h-full overflow-hidden">
+                    <div className={tab === "code" ? "h-full" : "hidden h-full"}>
+                      <PanelGroup
+                        direction="horizontal"
+                        className="h-full"
+                        autoSaveId="ws-code"
+                      >
                     {/* 文件树（可拖拽宽度） */}
                     <Panel defaultSize={22} minSize={12} maxSize={40}>
                       <div className="flex h-full min-h-0 flex-col">
@@ -363,11 +373,15 @@ function WorkspacePage() {
                         </div>
                       </div>
                     </Panel>
-                  </PanelGroup>
-                ) : tab === "history" ? (
-                  <HistoryPanel sessionId={sessionId} />
-                ) : (
-                  <PreviewPanel sessionId={sessionId!} readOnly={workspaceReadOnly} />
+                      </PanelGroup>
+                    </div>
+                    <div className={tab === "history" ? "h-full" : "hidden h-full"}>
+                      <HistoryPanel sessionId={sessionId} />
+                    </div>
+                    <div className={tab === "preview" ? "h-full" : "hidden h-full"}>
+                      <PreviewPanel sessionId={sessionId!} readOnly={workspaceReadOnly} />
+                    </div>
+                  </div>
                 )}
               </div>
             </section>

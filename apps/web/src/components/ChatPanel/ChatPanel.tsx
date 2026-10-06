@@ -83,7 +83,9 @@ export function ChatPanel({
   const history = useSessionTasks(sessionId);
   const seededFor = useRef<string | undefined>(undefined);
   useEffect(() => {
-    if (!sessionId || history.isLoading) return;
+    // 挂载时 React Query 可能先返回旧缓存，再后台拉取最新任务状态。
+    // 等本轮刷新完成后再初始化，避免用旧的 running 记录锁死空响应。
+    if (!sessionId || history.isLoading || history.isFetching) return;
     if (seededFor.current === sessionId) return;
     const msgs = tasksToMessages(history.data ?? []);
     setMessages(msgs.length ? msgs : [WELCOME]);
@@ -91,7 +93,7 @@ export function ChatPanel({
     setActiveTaskId(undefined);
     setStartedAt(undefined);
     seededFor.current = sessionId;
-  }, [sessionId, history.isLoading, history.data]);
+  }, [sessionId, history.isLoading, history.isFetching, history.data]);
 
   useEffect(() => {
     if (!sessionId || !history.data || seededFor.current !== sessionId) return;

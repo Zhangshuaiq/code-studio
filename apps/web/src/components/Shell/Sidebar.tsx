@@ -31,6 +31,8 @@ import {
   RadioTower,
   ClipboardList,
   BookOpenText,
+  KeyRound,
+  Building2,
 } from "lucide-react";
 import { ThemeToggle } from "../ThemeToggle";
 import { useAuth } from "../../store/auth";
@@ -126,6 +128,8 @@ const NAV: NavItem[] = [
     anyOf: GOVERNANCE_ACCESS,
     children: [
       { to: "/admin/users", icon: Users, label: "用户", anyOf: [ACCESS.adminUsers] },
+      { to: "/admin/licenses", icon: KeyRound, label: "许可证", anyOf: [ACCESS.adminUsers] },
+      { to: "/admin/organizations", icon: Building2, label: "企业组织", anyOf: [ACCESS.adminUsers] },
       { to: "/admin/roles", icon: Shield, label: "角色", anyOf: [ACCESS.adminRoles] },
       { to: "/admin/audit", icon: ScrollText, label: "操作日志", anyOf: [ACCESS.audit] },
       { to: "/admin/task-dlq", icon: AlertTriangle, label: "任务死信", anyOf: [ACCESS.systemSettings] },

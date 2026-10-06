@@ -1,0 +1,14 @@
+Code Studio bundled Java tooling
+
+Project Lombok 1.18.38, unmodified, copyright The Project Lombok Authors.
+License: MIT (complete license and dependency notices in lombok.jar / LICENSE).
+Source: https://github.com/projectlombok/lombok/tree/v1.18.38
+
+Microsoft Java Debug Server 0.53.2, unmodified, copyright Microsoft Corporation.
+License: Eclipse Public License 1.0 (see java-debug-LICENSE.txt).
+Corresponding source: https://github.com/microsoft/java-debug/tree/0.53.2
+Source releases: https://github.com/microsoft/java-debug/releases
+
+These tools are provided AS IS without warranties. Any Code Studio-specific
+warranties or terms are offered by Code Studio alone, not by these contributors.
+Original copyright notices are preserved in the bundled artifacts.

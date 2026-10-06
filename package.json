@@ -3,14 +3,19 @@
   "version": "0.1.0",
   "private": true,
   "workspaces": [
-    "apps/*"
+    "apps/*",
+    "packages/*"
   ],
   "scripts": {
     "dev": "npm-run-all --parallel dev:api dev:worker dev:web",
     "dev:api": "npm run start:dev --workspace apps/api",
     "dev:web": "npm run dev --workspace apps/web",
     "dev:worker": "npm run start:worker:dev --workspace apps/api",
-    "build": "npm run build --workspace apps/api && npm run build --workspace apps/web",
+    "build": "npm run build --workspace packages/contracts && npm run build --workspace apps/api && npm run build --workspace apps/web",
+    "desktop:dev": "npm run dev --workspace apps/desktop",
+    "desktop:pack": "npm run pack --workspace apps/desktop",
+    "desktop:dist:mac": "npm run dist:mac --workspace apps/desktop",
+    "desktop:dist:win": "npm run dist:win --workspace apps/desktop",
     "infra:up": "docker compose up -d",
     "infra:down": "docker compose down",
     "backup:db": "./scripts/postgres-backup.sh",

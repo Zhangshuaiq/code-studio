@@ -1,5 +1,6 @@
 node_modules/
 dist/
+packages/*/dist/
 build/
 target/
 .env
@@ -8,6 +9,9 @@ target/
 .DS_Store
 apps/api/prisma/*.db
 apps/web/dist/
+apps/desktop/release/
+apps/desktop/renderer/
+apps/desktop/.cache/
 coverage/
 *.tsbuildinfo
 .data/

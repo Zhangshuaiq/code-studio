@@ -1,0 +1,103 @@
+{
+  "name": "@codegen/desktop",
+  "version": "0.1.0",
+  "private": true,
+  "author": "Code Studio Team",
+  "description": "Code Studio desktop client",
+  "main": "src/main.cjs",
+  "scripts": {
+    "prepare-native": "node scripts/ensure-node-pty.cjs",
+    "prepare-language-servers": "node scripts/install-jdtls.cjs && node scripts/install-java-tools.cjs",
+    "prepare-renderer": "npm run prepare-native && node scripts/prepare-renderer.cjs",
+    "dev": "npm run prepare-language-servers && npm run prepare-renderer && electron .",
+    "test": "npm run prepare-native && node --test test/*.test.cjs",
+    "pack": "npm run prepare-language-servers && npm run prepare-renderer && electron-builder --dir",
+    "dist:mac": "npm run prepare-language-servers && npm run prepare-renderer && electron-builder --mac dmg zip",
+    "dist:win": "npm run prepare-language-servers && npm run prepare-renderer && electron-builder --win nsis portable"
+  },
+  "dependencies": {
+    "@kubernetes/client-node": "^2.0.0",
+    "@vscode/ripgrep": "^1.15.14",
+    "@vue/language-server": "^2.2.12",
+    "exceljs": "^4.4.0",
+    "kafkajs": "^2.2.4",
+    "mysql2": "^3.24.4",
+    "node-pty": "^1.1.0",
+    "pg": "^8.23.0",
+    "pyright": "^1.1.414",
+    "tar": "^7.5.22",
+    "typescript": "^5.9.3",
+    "typescript-language-server": "^5.3.0",
+    "vscode-jsonrpc": "^8.2.1",
+    "yauzl": "^3.4.0"
+  },
+  "devDependencies": {
+    "electron": "37.10.3",
+    "electron-builder": "26.15.3"
+  },
+  "build": {
+    "appId": "com.codestudio.desktop",
+    "productName": "Code Studio",
+    "artifactName": "${productName}-${version}-${os}-${arch}.${ext}",
+    "asar": true,
+    "files": [
+      "src/**/*",
+      "renderer/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      { "from": "resources", "to": "java-tools", "filter": ["*.txt"] },
+      { "from": ".cache/java-tools", "to": "java-tools" },
+      {
+        "from": ".cache/jdtls/1.61.0",
+        "to": "jdtls"
+      }
+    ],
+    "directories": {
+      "output": "release"
+    },
+    "mac": {
+      "category": "public.app-category.developer-tools",
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        }
+      ],
+      "hardenedRuntime": true,
+      "gatekeeperAssess": false
+    },
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true
+    }
+  }
+}

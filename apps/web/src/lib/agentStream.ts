@@ -21,6 +21,25 @@ interface Handlers {
   onError?: (msg: string) => void;
 }
 
+// 页面内切换路由会卸载 ChatPanel。按任务保留已收到的事件，使重新挂载后
+// 能立即恢复正在生成的文本；最终结果仍以后端任务记录为准。
+const taskEventCache = new Map<string, AgentEvent[]>();
+const MAX_CACHED_TASKS = 50;
+const MAX_EVENTS_PER_TASK = 2_000;
+
+function cacheEvent(taskId: string, event: AgentEvent) {
+  const events = taskEventCache.get(taskId) ?? [];
+  events.push(event);
+  if (events.length > MAX_EVENTS_PER_TASK) events.splice(0, events.length - MAX_EVENTS_PER_TASK);
+  taskEventCache.delete(taskId);
+  taskEventCache.set(taskId, events);
+  while (taskEventCache.size > MAX_CACHED_TASKS) {
+    const oldest = taskEventCache.keys().next().value as string | undefined;
+    if (!oldest) break;
+    taskEventCache.delete(oldest);
+  }
+}
+
 // 先提交任务取得 ID，再订阅；刷新时可直接按 ID 恢复，不重复创建任务。
 export async function streamAgentRun(
   sessionId: string,
@@ -54,13 +73,18 @@ export async function streamAgentRun(
 export async function watchAgentTask(taskId: string, handlers: Handlers, signal?: AbortSignal): Promise<void> {
   const token = useAuth.getState().token;
   let terminal = false;
-  let lastSequence = 0;
+  const cachedEvents = taskEventCache.get(taskId) ?? [];
+  let lastSequence = cachedEvents.reduce((max, event) => Math.max(max, event.sequence ?? 0), 0);
   const seenUnsequenced = new Set<string>();
   let pollTimer: number | undefined;
   const streamController = new AbortController();
   const stop = () => streamController.abort();
   signal?.addEventListener('abort', stop, { once: true });
   if (signal?.aborted) stop();
+  cachedEvents.forEach((event) => {
+    if (!event.sequence) seenUnsequenced.add(JSON.stringify([event.kind, event.text, event.toolName, event.toolInput]));
+    handlers.onEvent?.(event);
+  });
   const finish = (result: DoneResult) => {
     if (terminal || streamController.signal.aborted) return;
     terminal = true;
@@ -78,6 +102,7 @@ export async function watchAgentTask(taskId: string, handlers: Handlers, signal?
       if (seenUnsequenced.has(fingerprint)) return;
       seenUnsequenced.add(fingerprint);
     }
+    cacheEvent(taskId, event);
     handlers.onEvent?.(event);
   };
   const poll = async () => {
