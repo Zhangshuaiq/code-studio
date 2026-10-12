@@ -1,14 +1,25 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import { useQueryClient } from '@tanstack/react-query';
+import { OrganizationMemberships } from '../Settings/OrganizationMemberships';
+import { createDesktopOrganizationApi, OrganizationControlProvider } from '../../lib/organization-control';
 import { OrganizationInvitation } from '../Settings/OrganizationInvitation';
 import { CheckCircle2, Download, FileKey2, KeyRound, Laptop, LoaderCircle, LogIn, LogOut, RefreshCw, Server, ShieldCheck, Trash2, Upload, UserRound } from "lucide-react";
 
-interface AccountState { serverUrl: string | null; signedIn: boolean; user: { id: string; username: string } | null; deviceId: string; license: { state: string; edition: string; expiresAt?: string | null; graceUntil?: string | null }; policy: { state: string; expiresAt?: string | null; offlineUntil?: string | null; organizationId?: string | null } }
+interface AccountState { serverUrl: string | null; signedIn: boolean; controlSessionId?: string; user: { id: string; username: string } | null; deviceId: string; license: { state: string; edition: string; expiresAt?: string | null; graceUntil?: string | null }; policy: { state: string; expiresAt?: string | null; offlineUntil?: string | null; organizationId?: string | null } }
 interface Device { id: string; deviceId: string; name?: string; platform?: string; appVersion?: string; lastSeenAt?: string; revokedAt?: string | null }
 
 export function DesktopAccount() {
+  const qc = useQueryClient();
   const [account, setAccount] = useState<AccountState>(); const [devices, setDevices] = useState<Device[]>([]);
   const [username, setUsername] = useState(""); const [password, setPassword] = useState(""); const [busy, setBusy] = useState(""); const [error, setError] = useState("");
   const [redeemCode, setRedeemCode] = useState("");
+  const organizationIdentity = account?.signedIn && account.user && account.controlSessionId ? `desktop-control:${JSON.stringify([account.serverUrl, account.user.id, account.controlSessionId])}` : '';
+  const organizationConnection = useMemo(() => ({ api: createDesktopOrganizationApi(account?.controlSessionId || '', () => { void load(); }), identity: organizationIdentity }), [organizationIdentity, account?.controlSessionId]);
+  useEffect(() => () => {
+    if (!organizationIdentity) return;
+    const matches = (query: { queryKey: readonly unknown[] }) => query.queryKey.includes(organizationIdentity);
+    void qc.cancelQueries({ predicate: matches }); qc.removeQueries({ predicate: matches });
+  }, [qc, organizationIdentity]);
   useEffect(() => { void load(); }, []);
   async function load() {
     setError(""); try { const response = await fetch("/api/local/account"); const body = await response.json(); if (!response.ok) throw new Error(body.message || `HTTP ${response.status}`); setAccount(body); if (body.signedIn) await loadDevices(); else setDevices([]); } catch (reason: any) { setError(String(reason?.message || reason)); }
@@ -34,6 +45,7 @@ export function DesktopAccount() {
     </>}
     <section className="card mt-4 p-5"><div className="flex items-start gap-4"><span className="grid h-11 w-11 shrink-0 place-items-center rounded-2xl bg-violet-50 text-violet-600 dark:bg-violet-500/10 dark:text-violet-300"><FileKey2 size={19} /></span><div className="min-w-0 flex-1"><h2 className="text-sm font-bold">离线许可证</h2><p className="mt-1 text-xs leading-5 text-muted">无法联网时，先导出设备申请文件，由许可证管理员签发后再导入。许可证与当前设备绑定。</p><div className="mt-3 flex flex-wrap gap-2"><button className="btn btn-ghost btn-sm" disabled={Boolean(busy)} onClick={() => void exportOffline()}>{busy === "offline-export" ? <LoaderCircle size={13} className="animate-spin" /> : <Download size={13} />}导出离线申请</button><button className="btn btn-primary btn-sm" disabled={Boolean(busy)} onClick={() => void importOffline()}>{busy === "offline-import" ? <LoaderCircle size={13} className="animate-spin" /> : <Upload size={13} />}导入许可证</button></div></div></div></section>
     {invitationSection}
+    {organizationIdentity && <div className="mt-4"><OrganizationControlProvider key={organizationIdentity} connection={organizationConnection}><OrganizationMemberships /></OrganizationControlProvider></div>}
     {error && <div className="mt-4 rounded-xl border border-red-200 bg-red-50 p-3 text-xs text-red-600 dark:border-red-900 dark:bg-red-950/30 dark:text-red-300">{error}</div>}
   </div></div>;
 }

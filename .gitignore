@@ -11,7 +11,9 @@ apps/api/prisma/*.db
 apps/web/dist/
 apps/desktop/release/
 apps/desktop/renderer/
+apps/web/public/pdfjs/
 apps/desktop/.cache/
+packages/code-intelligence/.cache/
 coverage/
 *.tsbuildinfo
 .data/

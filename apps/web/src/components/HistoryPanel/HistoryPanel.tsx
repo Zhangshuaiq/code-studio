@@ -1,12 +1,13 @@
 import { useEffect, useState } from "react";
 import { DiffEditor } from "@monaco-editor/react";
-import { History } from "lucide-react";
+import { History, RefreshCw } from "lucide-react";
 import { monacoLang } from "../../lib/monaco";
 import { useTheme } from "../../store/theme";
 import {
   useCommits,
   useCommitDiff,
   useRollback,
+  type GitHistoryTransport,
 } from "../../hooks/useGit";
 import { useFeedback } from "../common/FeedbackProvider";
 import { Select } from "../common/Select";
@@ -23,21 +24,22 @@ const KIND_LABEL: Record<string, string> = {
   added: "新增",
   modified: "修改",
   deleted: "删除",
+  renamed: "重命名",
 };
 
-export function HistoryPanel({ sessionId }: { sessionId?: string }) {
+export function HistoryPanel({ sessionId, transport }: { sessionId?: string; transport?: GitHistoryTransport }) {
   const theme = useTheme((s) => s.theme);
   const { confirm: askConfirm } = useFeedback();
-  const commits = useCommits(sessionId);
-  const rollback = useRollback(sessionId);
+  const commits = useCommits(sessionId, transport);
+  const rollback = useRollback(sessionId, transport);
   const [sel, setSel] = useState<string>();
   const [file, setFile] = useState<string>();
 
   useEffect(() => {
-    if (!sel && commits.data?.length) setSel(commits.data[0].hash);
+    if (commits.data?.length && (!sel || !commits.data.some(item => item.hash === sel))) setSel(commits.data[0].hash);
   }, [commits.data, sel]);
 
-  const diff = useCommitDiff(sessionId, sel);
+  const diff = useCommitDiff(sessionId, sel, transport);
   useEffect(() => {
     setFile(diff.data?.[0]?.path);
   }, [diff.data]);
@@ -51,6 +53,7 @@ export function HistoryPanel({ sessionId }: { sessionId?: string }) {
         <div className="border-b border-slate-200/80 px-4 py-3 dark:border-slate-800">
           <div className="flex items-center gap-2">
             <History size={15} className="text-indigo-500" />
+            <button className="icon-btn ml-auto" title="刷新提交历史" onClick={() => void commits.refetch()} disabled={commits.isFetching}><RefreshCw size={12} /></button>
             <div>
               <div className="text-[10px] font-bold uppercase tracking-[0.14em] text-muted">
                 提交历史
@@ -65,9 +68,9 @@ export function HistoryPanel({ sessionId }: { sessionId?: string }) {
 
         {commits.isLoading ? (
           <p className="px-4 py-3 text-xs text-muted">加载中…</p>
-        ) : !commits.data?.length ? (
+        ) : commits.error ? <p className="px-4 py-3 text-xs text-red-500">{commits.error.message}</p> : !commits.data?.length ? (
           <p className="px-4 py-3 text-xs text-muted">
-            还没有提交（先生成一次）
+            还没有提交
           </p>
         ) : (
           <ul className="py-1">
@@ -99,6 +102,7 @@ export function HistoryPanel({ sessionId }: { sessionId?: string }) {
             ))}
           </ul>
         )}
+        {commits.hasNextPage && <button className="btn btn-ghost btn-sm mx-3 mb-3" disabled={commits.isFetchingNextPage} onClick={() => void commits.fetchNextPage()}>{commits.isFetchingNextPage ? '加载中…' : '加载更多历史'}</button>}
       </aside>
 
       <div className="flex min-w-0 flex-1 flex-col">
@@ -109,6 +113,7 @@ export function HistoryPanel({ sessionId }: { sessionId?: string }) {
             </div>
             <div className="mt-0.5 text-[10px] text-muted">
               {diff.data ? `${diff.data.length} 个文件改动` : "查看提交差异"}
+              {rollback.error && <p className="text-red-500">{(rollback.error as Error).message}</p>}
             </div>
           </div>
           <div className="ml-auto flex items-center gap-2">
@@ -151,11 +156,11 @@ export function HistoryPanel({ sessionId }: { sessionId?: string }) {
         </div>
 
         <div className="min-h-0 flex-1">
-          {diff.isLoading ? (
+          {diff.error ? <Center>{diff.error.message}</Center> : diff.isLoading ? (
             <Center>加载改动…</Center>
           ) : !current ? (
             <Center>该提交无可显示的文本改动</Center>
-          ) : (
+          ) : current.fileType ? <Center>{current.fileType === 'binary' ? '二进制文件无法显示文本差异' : '文件超过文本差异预览上限'}</Center> : (
             <DiffEditor
               key={`${sel}-${current.path}`}
               language={monacoLang(current.path)}

@@ -2,7 +2,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { DatabaseSync } = require('node:sqlite');
 
-const CURRENT_SCHEMA_VERSION = 7;
+const CURRENT_SCHEMA_VERSION = 8;
 
 class LocalStore {
   constructor(databasePath) {
@@ -109,6 +109,15 @@ class LocalStore {
       PRAGMA user_version = 7;
       COMMIT;
     `);
+    if (version < 8) this.database.exec(`
+      BEGIN IMMEDIATE;
+      CREATE TABLE workspace_indexes (root TEXT PRIMARY KEY, version INTEGER NOT NULL, revision INTEGER NOT NULL, updated_at INTEGER NOT NULL, truncated INTEGER NOT NULL);
+      CREATE TABLE workspace_index_files (root TEXT NOT NULL, path TEXT NOT NULL, metadata_json TEXT NOT NULL, PRIMARY KEY(root, path), FOREIGN KEY(root) REFERENCES workspace_indexes(root) ON DELETE CASCADE);
+      CREATE TABLE workspace_navigation (root TEXT NOT NULL, cache_key TEXT NOT NULL, source_path TEXT NOT NULL, operation TEXT NOT NULL, input_json TEXT NOT NULL, result_json TEXT NOT NULL, revision INTEGER NOT NULL, updated_at INTEGER NOT NULL, PRIMARY KEY(root, cache_key), FOREIGN KEY(root) REFERENCES workspace_indexes(root) ON DELETE CASCADE);
+      CREATE INDEX workspace_navigation_revision ON workspace_navigation(root, revision);
+      PRAGMA user_version = 8;
+      COMMIT;
+    `);
     this.database.prepare(`UPDATE agent_tasks SET status = 'interrupted', error = ?, finished_at = ?
       WHERE status IN ('queued', 'running', 'cancelling')`).run('客户端重启，任务已中断', new Date().toISOString());
   }
@@ -123,6 +132,51 @@ class LocalStore {
       .all().map((row) => ({ id: row.id, name: row.name, path: row.path, openedAt: row.openedAt }));
   }
   removeProject(id) { this.database.prepare('DELETE FROM recent_projects WHERE id = ?').run(id); }
+  readWorkspaceIndex(root) {
+    const metadata = this.database.prepare('SELECT version, revision, updated_at AS updatedAt, truncated FROM workspace_indexes WHERE root = ?').get(root);
+    if (!metadata) return null;
+    const files = this.database.prepare('SELECT metadata_json FROM workspace_index_files WHERE root = ? ORDER BY path LIMIT 10001').all(root);
+    return { ...metadata, root, truncated: Boolean(metadata.truncated), items: files.map((row) => JSON.parse(row.metadata_json)) };
+  }
+  writeWorkspaceIndex(snapshot, previous) {
+    const old = new Map((previous?.items || []).map((item) => [item.path, JSON.stringify(item)]));
+    const updates = snapshot.items.filter((item) => old.get(item.path) !== JSON.stringify(item));
+    const nextPaths = new Set(snapshot.items.map((item) => item.path));
+    const removed = [...old.keys()].filter((item) => !nextPaths.has(item));
+    const changed = !previous || updates.length > 0 || removed.length > 0;
+    const existing = this.database.prepare('SELECT revision FROM workspace_indexes WHERE root=?').get(snapshot.root);
+    const revision = (previous?.revision || existing?.revision || 0) + Number(Boolean(changed));
+    this.database.exec('BEGIN IMMEDIATE');
+    try {
+      if (!previous) {
+        this.database.prepare('DELETE FROM workspace_index_files WHERE root=?').run(snapshot.root);
+        this.database.prepare('DELETE FROM workspace_navigation WHERE root=?').run(snapshot.root);
+      }
+      this.database.prepare(`INSERT INTO workspace_indexes(root, version, revision, updated_at, truncated) VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(root) DO UPDATE SET version=excluded.version, revision=excluded.revision, updated_at=excluded.updated_at, truncated=excluded.truncated`)
+        .run(snapshot.root, snapshot.version, revision, snapshot.updatedAt, Number(snapshot.truncated));
+      const upsert = this.database.prepare('INSERT INTO workspace_index_files(root,path,metadata_json) VALUES (?,?,?) ON CONFLICT(root,path) DO UPDATE SET metadata_json=excluded.metadata_json');
+      for (const item of updates) upsert.run(snapshot.root, item.path, JSON.stringify(item));
+      const remove = this.database.prepare('DELETE FROM workspace_index_files WHERE root=? AND path=?');
+      for (const item of removed) remove.run(snapshot.root, item);
+      this.database.exec('COMMIT');
+      return revision;
+    } catch (error) { this.database.exec('ROLLBACK'); throw error; }
+  }
+  readWorkspaceNavigation(root, revision) {
+    return this.database.prepare('SELECT cache_key AS cacheKey,input_json AS inputJson,result_json AS resultJson FROM workspace_navigation WHERE root=? AND revision=? ORDER BY updated_at DESC LIMIT 2000').all(root, revision)
+      .map((row) => ({ key: row.cacheKey, input: JSON.parse(row.inputJson), result: JSON.parse(row.resultJson) }));
+  }
+  readWorkspaceNavigationEntry(root, revision, key) {
+    const row = this.database.prepare('SELECT input_json AS inputJson,result_json AS resultJson FROM workspace_navigation WHERE root=? AND revision=? AND cache_key=?').get(root, revision, key);
+    return row ? { input: JSON.parse(row.inputJson), result: JSON.parse(row.resultJson) } : undefined;
+  }
+  writeWorkspaceNavigation(root, revision, key, operation, input, result) {
+    this.database.prepare(`INSERT INTO workspace_navigation(root,cache_key,source_path,operation,input_json,result_json,revision,updated_at) VALUES (?,?,?,?,?,?,?,?)
+      ON CONFLICT(root,cache_key) DO UPDATE SET input_json=excluded.input_json,result_json=excluded.result_json,revision=excluded.revision,updated_at=excluded.updated_at`)
+      .run(root, key, input.path, operation, JSON.stringify(input), JSON.stringify(result), revision, Date.now());
+    this.database.prepare('DELETE FROM workspace_navigation WHERE root=? AND cache_key NOT IN (SELECT cache_key FROM workspace_navigation WHERE root=? ORDER BY updated_at DESC LIMIT 2000)').run(root, root);
+  }
   setSetting(key, value) {
     this.database.prepare(`INSERT INTO settings (key, value_json, updated_at) VALUES (?, ?, ?)
       ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json, updated_at = excluded.updated_at`)

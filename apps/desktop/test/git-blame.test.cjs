@@ -1,0 +1,45 @@
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+const { execFileSync } = require('node:child_process');
+const { gitBlame } = require('@codegen/code-intelligence/git-blame.cjs');
+const { createLocalApi } = require('../src/local-api.cjs');
+
+test('shared blame follows renames, authors, literal paths and unsaved modifications without writes', async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'git-blame-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const git = (...args) => execFileSync('git', args, { cwd: root, encoding: 'utf8' }).trim();
+  git('init', '-q'); git('config', 'user.name', '作者甲'); git('config', 'user.email', 'first@example.test');
+  const first = 'class A {\n  int value = 1;\n}\n';
+  fs.writeFileSync(path.join(root, 'A.java'), first); git('add', '.'); git('-c', 'commit.gpgsign=false', 'commit', '-qm', 'initial'); const original = git('rev-parse', 'HEAD');
+  git('mv', 'A.java', '文件 [1].java'); git('-c', 'commit.gpgsign=false', 'commit', '-qm', 'rename'); git('config', 'user.name', '作者乙');
+  const second = first.replace('value = 1', 'value = 2'); fs.writeFileSync(path.join(root, '文件 [1].java'), second); git('add', '.'); git('-c', 'commit.gpgsign=false', 'commit', '-qm', 'change and rename'); const latest = git('rev-parse', 'HEAD');
+  const result = await gitBlame(root, '文件 [1].java');
+  assert.equal(result.lines.length, 3); assert.equal(result.lines[0].hash, original); assert.equal(result.lines[0].author, '作者甲'); assert.equal(result.lines[1].hash, latest); assert.equal(result.lines[1].summary, 'change and rename');
+  const draft = await gitBlame(root, '文件 [1].java', second.replace('value = 2', 'value = 3'));
+  assert.equal(draft.lines[1].uncommitted, true); assert.equal(draft.lines[0].uncommitted, false); assert.equal(fs.readFileSync(path.join(root, '文件 [1].java'), 'utf8'), second); assert.equal(git('status', '--porcelain'), '');
+  for (const file of ['../escape', '/etc/passwd', '.git/config', 'x\\y', 'a\0b']) await assert.rejects(gitBlame(root, file));
+  fs.symlinkSync(path.join(root, '文件 [1].java'), path.join(root, 'link.java')); await assert.rejects(gitBlame(root, 'link.java'));
+  await assert.rejects(gitBlame(root, '文件 [1].java', 'x'.repeat(1024 * 1024 + 1))); await assert.rejects(gitBlame(root, '文件 [1].java', 'a\0b'));
+  fs.writeFileSync(path.join(root, 'new.java'), 'class New {}'); await assert.rejects(gitBlame(root, 'new.java'));
+  const api = await createLocalApi(); t.after(() => api.close()); const project = api.registerWorkspace(root);
+  const url = `${api.origin}/api/local/projects/${project.id}/git/blame`;
+  assert.equal((await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })).status, 401);
+  const response = await fetch(url, { method: 'POST', headers: { Authorization: `Bearer ${api.token}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ path: '文件 [1].java', content: second }) });
+  assert.equal(response.status, 200); assert.equal((await response.json()).lines[1].hash, latest);
+});
+test('UTF-8 BOM attribution retains committed lines; unsupported UTF-16 does not invent blame', async t => {
+  const { encodeText } = require('@codegen/code-intelligence/file-text.cjs');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'git-blame-bom-')); t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const git = (...args) => execFileSync('git', args, { cwd: root, encoding: 'utf8' }).trim();
+  git('init', '-q'); git('config', 'user.name', 'Author'); git('config', 'user.email', 'author@example.test');
+  const source = 'SELECT 1;\nSELECT 2;\n';
+  fs.writeFileSync(path.join(root, 'bom.sql'), encodeText(source, { encoding: 'utf-8', bom: true }));
+  fs.writeFileSync(path.join(root, 'native.sql'), encodeText(source, { encoding: 'utf-16le', bom: true }));
+  git('add', '.'); git('-c', 'commit.gpgsign=false', 'commit', '-qm', 'encoded sources');
+  const result = await gitBlame(root, 'bom.sql', source); assert.ok(result.lines.every(line => !line.uncommitted));
+  await assert.rejects(gitBlame(root, 'native.sql', source), error => error.code === 'GIT_BLAME_INVALID' && error.message.includes('UTF-16'));
+  assert.equal(git('status', '--porcelain'), '');
+});

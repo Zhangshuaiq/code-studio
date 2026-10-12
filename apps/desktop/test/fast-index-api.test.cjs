@@ -1,0 +1,66 @@
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const os = require('node:os');
+const { createLocalApi } = require('../src/local-api.cjs');
+
+test('desktop API uses persistent Java index beyond 500 files, retains other languages and validates mutations', async t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'fast-index-api-'));
+  const root = path.join(directory, 'project'); fs.mkdirSync(root);
+  for (let i = 0; i < 505; i++) fs.writeFileSync(path.join(root, `A${i}.java`), `class IndexedService${i} { void work() {} }`);
+  fs.writeFileSync(path.join(root, 'extra.ts'), 'export class ExtraService {}');
+  const options = { token: 'fast-index-test', storePath: path.join(directory, 'local.sqlite3'), fastIndexIntervalMs: 100 };
+  let api = await createLocalApi(options);
+  t.after(async () => { await api.close(); fs.rmSync(directory, { recursive: true, force: true }); });
+  const project = api.registerWorkspace(root);
+  const headers = { Authorization: 'Bearer fast-index-test', 'Content-Type': 'application/json' };
+  const request = async (suffix, body, method = body ? 'POST' : 'GET') => {
+    const response = await fetch(`${api.origin}/api/local/projects/${project.id}/${suffix}`, { method, headers, ...(body ? { body: JSON.stringify(body) } : {}) });
+    return { status: response.status, body: response.status === 204 ? null : await response.json() };
+  };
+  const eventually = async action => {
+    const deadline = Date.now() + 10_000;
+    while (Date.now() < deadline) { const result = await action(); if (result) return result; await new Promise(resolve => setTimeout(resolve, 30)); }
+    assert.fail('Index did not converge');
+  };
+  await request('files');
+  await eventually(async () => (await request('language/index-status')).body.index?.complete);
+  const symbols = await request('symbols?query=IndexedService504');
+  assert.equal(symbols.status, 200); assert.equal(symbols.body.items[0].path, 'A504.java');
+  assert.equal(symbols.body.sourceFiles, 506); assert.equal(symbols.body.sourceTruncated, false);
+  assert.equal((await request('symbols?query=ExtraService')).body.items[0].path, 'extra.ts');
+  assert.equal((await request('language/fast-symbols', { query: '' })).status, 400);
+  assert.equal((await request('language/fast-document-symbols', { path: '../outside.java' })).status, 400);
+  assert.equal((await request('language/fast-document-symbols', { path: 'A504.java' })).body.items.length, 2);
+  assert.equal((await request('language/index-refresh', {})).status, 200);
+  assert.equal((await request('language/index-refresh')).status, 405);
+  const documents = [{ path: 'A504.java', content: '\nclass UnsavedService { void draftMethod() {} }' }];
+  const overlay = await request('symbols', { query: 'UnsavedService', documents });
+  assert.equal(overlay.status, 200); assert.equal(overlay.body.overlayApplied, true); assert.equal(overlay.body.items[0].line, 2);
+  assert.equal((await request('symbols', { query: 'IndexedService504', documents })).body.items.length, 0);
+  assert.equal((await request('symbols?query=IndexedService504')).body.items.length, 1);
+  assert.equal((await request('language/fast-document-symbols', { path: 'A504.java', documents })).body.items[1].name, 'draftMethod');
+  assert.equal((await request('symbols', { query: 'Service', documents: [{ path: '../Escape.java', content: 'class Escape {}' }] })).status, 400);
+  assert.equal(fs.readFileSync(path.join(root, 'A504.java'), 'utf8'), 'class IndexedService504 { void work() {} }');
+  const opened = (await request('content?path=A504.java')).body;
+  assert.equal((await request('content', { path: 'A504.java', content: 'class UpdatedService {}', expectedVersion: opened.version }, 'PUT')).status, 200);
+  await eventually(async () => (await request('symbols?query=UpdatedService')).body.items?.length === 1);
+  assert.equal((await request('files?path=A504.java', null, 'DELETE')).status, 204);
+  await eventually(async () => (await request('symbols?query=UpdatedService')).body.items?.length === 0);
+  await api.close(); api = await createLocalApi(options);
+  assert.equal((await request('symbols?query=IndexedService503')).body.items[0].path, 'A503.java');
+  await api.close();
+  const indexDirectory = path.join(directory, 'fast-index');
+  const databases = fs.readdirSync(indexDirectory).filter(name => name.endsWith('.sqlite3'));
+  assert.equal(databases.length, 1);
+  fs.writeFileSync(path.join(indexDirectory, databases[0]), 'damaged derived cache');
+  api = await createLocalApi(options);
+  const recovering = await request('language/index-status');
+  assert.equal(recovering.status, 200);
+  assert.equal(recovering.body.index.cacheRecovery.reason, 'sqlite-corruption');
+  await eventually(async () => (await request('language/index-status')).body.index?.complete);
+  assert.equal((await request('symbols?query=IndexedService503')).body.items[0].path, 'A503.java');
+  assert.equal(fs.readFileSync(path.join(root, 'A503.java'), 'utf8'), 'class IndexedService503 { void work() {} }');
+  assert.equal(fs.readdirSync(indexDirectory).filter(name => name.includes('.corrupt-')).length, 1);
+});

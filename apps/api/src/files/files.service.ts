@@ -1,13 +1,17 @@
 import {
   BadRequestException,
+  ConflictException,
   Injectable,
   NotFoundException,
+  Optional,
 } from '@nestjs/common';
-import { readdir, readFile, writeFile, mkdir, stat } from 'fs/promises';
+import { createHash } from 'crypto';
+import { readdir, readFile, writeFile, mkdir, stat, open } from 'fs/promises';
 import { dirname, join, relative, resolve, sep } from 'path';
 import { ProjectAccessService } from '../project-access/project-access.service';
 import { WorkspaceService } from '../workspace/workspace.service';
 import { ConfigService } from '@nestjs/config';
+import { WorkspaceLanguageService } from '../lsp/workspace-language.service';
 import {
   assertWorkspaceChanges,
   assertNoSymlinkPath,
@@ -17,21 +21,11 @@ import {
 } from '../common/workspace-quota';
 
 // 不进树的目录（体积大/无编辑意义）
-const IGNORE_DIRS = new Set([
-  'node_modules',
-  '.git',
-  'dist',
-  '.vite',
-  '.cache',
-  '.next',
-  'build',
-  'target', // Maven/Java 编译产物
-  '__pycache__', // Python 编译缓存
-  '.venv',
-  'venv',
-  '.mvn',
-]);
+const IGNORE_DIRS = new Set(require('@codegen/code-intelligence/file-types.json').ignoredDirectories);
 const MAX_READ_BYTES = 512 * 1024; // 单文件读取上限 512KB
+const { describeFile, readSpreadsheet } = require('@codegen/code-intelligence/file-preview.cjs');
+const { decodeText, encodeText, textEncoding } = require('@codegen/code-intelligence/file-text.cjs');
+const ExcelJS = require('exceljs');
 const INDEX_FILE_BYTES = 256 * 1024;
 const INDEX_TOTAL_BYTES = 4 * 1024 * 1024;
 const SEARCH_TOTAL_BYTES = 10 * 1024 * 1024;
@@ -43,6 +37,7 @@ export class FilesService {
     private readonly access: ProjectAccessService,
     private readonly workspaces: WorkspaceService,
     private readonly config: ConfigService,
+    @Optional() private readonly language?: WorkspaceLanguageService,
   ) {}
 
   /** 校验会话归属并返回其项目卷的绝对根路径 */
@@ -81,11 +76,11 @@ export class FilesService {
         return; // 卷目录还不存在
       }
       for (const e of entries) {
+        if (e.name.startsWith('.aider')) continue;
         if (e.isDirectory()) {
-          if (IGNORE_DIRS.has(e.name) || e.name.startsWith('.')) continue;
+          if (IGNORE_DIRS.has(e.name)) continue;
           await walk(join(dir, e.name));
         } else if (e.isFile()) {
-          if (e.name.startsWith('.')) continue; // 隐藏 .aider*、.env 等点文件
           out.push(relative(root, join(dir, e.name)));
         }
       }
@@ -99,7 +94,22 @@ export class FilesService {
     userId: string,
     sessionId: string,
     path: string,
-  ): Promise<{ path: string; content: string }> {
+  ) {
+    const { normalizedPath, target, info } = await this.previewFile(userId, sessionId, path);
+    const descriptor = describeFile(target);
+    if (descriptor.kind !== 'text') {
+      return { path: normalizedPath, content: '', ...descriptor, size: info.size, readOnly: true };
+    }
+    if (info.size > MAX_READ_BYTES) {
+      throw new BadRequestException({ code: 'FILE_VIEW_TOO_LARGE', message: '文件过大，暂不支持在线查看' });
+    }
+    const bytes = await readFile(target);
+    let decoded;
+    try { decoded = decodeText(bytes); } catch (error) { throw new BadRequestException({ code: 'FILE_TEXT_ENCODING_INVALID', message: (error as Error).message }); }
+    return { path: normalizedPath, ...descriptor, ...decoded, version: contentVersion(bytes), size: info.size };
+  }
+
+  private async previewFile(userId: string, sessionId: string, path: string) {
     const root = await this.volumeRoot(userId, sessionId);
     let normalizedPath: string;
     try {
@@ -119,11 +129,29 @@ export class FilesService {
       throw new NotFoundException({ code: 'FILE_NOT_FOUND', message: '文件不存在' });
     }
     if (!info.isFile()) throw new BadRequestException({ code: 'FILE_NOT_REGULAR', message: '不是文件' });
-    if (info.size > MAX_READ_BYTES) {
-      throw new BadRequestException({ code: 'FILE_VIEW_TOO_LARGE', message: '文件过大，暂不支持在线查看' });
-    }
-    const content = await readFile(target, 'utf8');
-    return { path: normalizedPath, content };
+    return { normalizedPath, target, info };
+  }
+
+  async preview(userId: string, sessionId: string, path: string) {
+    const { normalizedPath, target, info } = await this.previewFile(userId, sessionId, path);
+    const descriptor = describeFile(target);
+    if (!['image', 'pdf'].includes(descriptor.kind)) throw new BadRequestException({ code: 'FILE_PREVIEW_UNSUPPORTED', message: '该文件不支持原始预览' });
+    if (info.size > 100 * 1024 * 1024) throw new BadRequestException({ code: 'FILE_VIEW_TOO_LARGE', message: '暂不支持预览超过 100 MiB 的文件' });
+    const content = await readFile(target);
+    if (content.length > 100 * 1024 * 1024) throw new BadRequestException({ code: 'FILE_VIEW_TOO_LARGE', message: '文件已超过预览大小上限' });
+    await this.access.requireSession(userId, sessionId, 'read');
+    return { path: normalizedPath, mime: descriptor.mime, content };
+  }
+
+  async spreadsheet(userId: string, sessionId: string, path: string) {
+    const { target, info } = await this.previewFile(userId, sessionId, path);
+    if (describeFile(target).kind !== 'spreadsheet') throw new BadRequestException({ code: 'FILE_PREVIEW_UNSUPPORTED', message: '当前仅支持 .xlsx 和 .csv 表格' });
+    if (info.size > 20 * 1024 * 1024) throw new BadRequestException({ code: 'FILE_VIEW_TOO_LARGE', message: '暂不支持解析超过 20 MiB 的表格' });
+    let result;
+    try { result = await readSpreadsheet(target, new ExcelJS.Workbook()); }
+    catch { throw new BadRequestException({ code: 'FILE_SPREADSHEET_INVALID', message: '无法解析此表格，请检查文件格式及内容' }); }
+    await this.access.requireSession(userId, sessionId, 'read');
+    return result;
   }
 
   async sourceIndex(userId: string, sessionId: string) {
@@ -137,8 +165,9 @@ export class FilesService {
       await assertNoSymlinkPath(root, path);
       const info = await stat(target).catch(() => null);
       if (!info?.isFile() || info.size > INDEX_FILE_BYTES || bytes + info.size > INDEX_TOTAL_BYTES) continue;
-      const content = await readFile(target, 'utf8').catch(() => null);
+      const content = await readFile(target).then(buffer => decodeText(buffer).content).catch(() => null);
       if (content === null || content.includes('\0')) continue;
+      if (bytes + Buffer.byteLength(content, 'utf8') > INDEX_TOTAL_BYTES) continue;
       files.push({ path, content });
       bytes += Buffer.byteLength(content, 'utf8');
     }
@@ -163,8 +192,9 @@ export class FilesService {
       await assertNoSymlinkPath(root, path);
       const info = await stat(target).catch(() => null);
       if (!info?.isFile() || info.size > INDEX_FILE_BYTES || scannedBytes + info.size > SEARCH_TOTAL_BYTES) continue;
-      const content = await readFile(target, 'utf8').catch(() => null);
+      const content = await readFile(target).then(buffer => decodeText(buffer).content).catch(() => null);
       if (content === null || content.includes('\0')) continue;
+      if (scannedBytes + Buffer.byteLength(content, 'utf8') > SEARCH_TOTAL_BYTES) continue;
       scannedFiles += 1;
       scannedBytes += Buffer.byteLength(content, 'utf8');
       const lines = content.split(/\r?\n/);
@@ -183,16 +213,20 @@ export class FilesService {
     sessionId: string,
     path: string,
     content: string,
+    expectedVersion?: string,
   ): Promise<{ path: string; bytes: number }> {
     await this.access.requireSession(userId, sessionId, 'edit');
     const root = await this.volumeRoot(userId, sessionId);
-    return this.writeUnlocked(root, path, content);
+    const result = await this.writeUnlocked(root, path, content, expectedVersion);
+    this.language?.workspaceChanged(root);
+    return result;
   }
 
   private async writeUnlocked(
     root: string,
     path: string,
     content: string,
+    expectedVersion?: string,
   ): Promise<{ path: string; bytes: number }> {
     const bytes = Buffer.byteLength(content ?? '', 'utf8');
     let change: { path: string; bytes: number };
@@ -209,10 +243,25 @@ export class FilesService {
       throw error;
     }
     const target = this.safeJoin(root, editableRelativePath(root, change.path));
+    const existing = await stat(target).catch(() => null);
+    if (existing?.isFile() && describeFile(target).kind !== 'text') throw new BadRequestException({ code: 'FILE_READ_ONLY', message: '此文件仅支持预览，不能作为文本保存' });
+    if (expectedVersion !== undefined) {
+      const previous = await readFile(target).catch(() => null);
+      if (previous === null || contentVersion(previous) !== expectedVersion) throw new ConflictException({ code: 'FILE_VERSION_CONFLICT', message: '文件已被其他操作修改，草稿已保留，请重新加载后重试' });
+    }
+    let format = { encoding: 'utf-8', bom: false };
+    if (existing?.isFile()) {
+      const handle = await open(target, 'r');
+      try { const prefix = Buffer.alloc(4); const { bytesRead } = await handle.read(prefix, 0, 4, 0); format = textEncoding(prefix.subarray(0, bytesRead)); }
+      finally { await handle.close(); }
+    }
+    let encoded: Buffer;
+    try { encoded = encodeText(content ?? '', format); } catch (error) { throw new BadRequestException({ code: 'FILE_TEXT_ENCODING_INVALID', message: (error as Error).message }); }
     await mkdir(dirname(target), { recursive: true });
-    await writeFile(target, content ?? '', 'utf8');
-    return { path: change.path, bytes };
+    await writeFile(target, encoded);
+    return { path: change.path, bytes: encoded.length };
   }
 }
 
 function isSourcePath(path: string) { const extension = path.split('.').pop()?.toLowerCase(); return Boolean(extension && SOURCE_EXTENSIONS.has(extension)); }
+function contentVersion(content: string | Buffer) { return createHash('sha256').update(content).digest('hex'); }

@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import { useParams, useNavigate } from "react-router-dom";
-import { Database, Play, Table, ArrowLeft, Loader2, ChevronDown, Archive, ArrowRightLeft, X, Upload, Download } from "lucide-react";
+import { Database, Play, Table, ArrowLeft, Loader2, ChevronDown, Archive, ArrowRightLeft, X, Upload, Download, Pencil } from "lucide-react";
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api } from '../../lib/api';
 import { useDatasources } from '../../hooks/useDatasources';
@@ -9,15 +9,19 @@ import {
   useListDatabases,
   useListTables,
   useDescribeTable,
+  type DbQueryTransport,
 } from "../../hooks/useDbQuery";
-import { useDatasource } from "../../hooks/useDatasources";
+import { useDatasource, type Datasource } from "../../hooks/useDatasources";
 import { SqlEditor } from "./SqlEditor";
 import { RedisEditor } from "./RedisEditor";
 
-export function DbQueryPage() {
-  const { datasourceId } = useParams<{ datasourceId: string }>();
+export function DbQueryPage({ local }: { local?: { datasource: Datasource; transport: DbQueryTransport; onBack: () => void; onEdit: () => void; notice?: string } } = {}) {
+  const { datasourceId: routeId } = useParams<{ datasourceId: string }>();
+  const datasourceId = local?.datasource.id || routeId;
   const navigate = useNavigate();
-  const { data: datasource } = useDatasource(datasourceId!);
+  const { data: remoteDatasource } = useDatasource(local ? undefined : datasourceId);
+  const datasource = local?.datasource || remoteDatasource;
+  const transport = local?.transport;
   const [selectedDatabase, setSelectedDatabase] = useState<string>();
   const [selectedTable, setSelectedTable] = useState<string>();
   const [query, setQuery] = useState("");
@@ -35,24 +39,33 @@ export function DbQueryPage() {
   const isMongo = datasource?.type === "mongodb";
   const hasSchemaBrowser = isRelational || isMongo;
 
-  const { data: databases = [] } = useListDatabases(
+  const databasesQuery = useListDatabases(
     datasourceId,
     !!datasource && hasSchemaBrowser,
+    transport,
   );
-  const { data: tables = [] } = useListTables(
+  const databases = databasesQuery.data || [];
+  const tablesQuery = useListTables(
     datasourceId,
     selectedDatabase,
     !!selectedDatabase && hasSchemaBrowser,
+    transport,
   );
-  const { data: tableStructure } = useDescribeTable(
+  const tables = tablesQuery.data || [];
+  const structureQuery = useDescribeTable(
     datasourceId,
     selectedTable,
     selectedDatabase,
     !!selectedTable && isRelational && structureOpen,
+    transport,
   );
-  const executeMut = useExecuteQuery();
+  const tableStructure = structureQuery.data;
+  const executeMut = useExecuteQuery(transport);
+  useEffect(() => {
+    if (local?.datasource.config?.database && databases.includes(local.datasource.config.database) && !selectedDatabase) setSelectedDatabase(local.datasource.config.database);
+  }, [local?.datasource.config?.database, databases, selectedDatabase]);
   const queryClient = useQueryClient();
-  const transfers = useQuery<any[]>({ queryKey: ['database-transfers'], queryFn: async () => (await api.get('/db-query/transfers/mine', { params: { pageSize: 200 } })).data.items, refetchInterval: 3000 });
+  const transfers = useQuery<any[]>({ queryKey: ['database-transfers', local ? 'disabled-local' : 'remote'], enabled: !local, queryFn: async () => (await api.get('/db-query/transfers/mine', { params: { pageSize: 200 } })).data.items, refetchInterval: local ? false : 3000 });
   const transferAction = useMutation({ mutationFn: ({ id, action, conflictStrategy }: { id: string; action: 'cancel' | 'retry'; conflictStrategy?: string }) => api.post(`/db-query/transfers/${id}/${action}`, { conflictStrategy }), onSuccess: () => queryClient.invalidateQueries({ queryKey: ['database-transfers'] }) });
   const downloadBackup = async (id: string) => { const response = await api.get(`/db-query/transfers/${id}/download`, { responseType: 'blob' }); const disposition = response.headers['content-disposition'] || ''; const filename = disposition.match(/filename="?([^";]+)"?/i)?.[1] || 'database-backup'; const url = URL.createObjectURL(response.data); const anchor = document.createElement('a'); anchor.href = url; anchor.download = filename; anchor.click(); URL.revokeObjectURL(url); };
 
@@ -111,7 +124,7 @@ export function DbQueryPage() {
     if (isRelational) {
       // MySQL 使用反引号，PostgreSQL 使用双引号
       const quote = datasource?.type === "mysql" ? "`" : '"';
-      setQuery(`SELECT * FROM ${quote}${tableName}${quote} LIMIT 10;`);
+      setQuery(transport?.selectSql ? transport.selectSql(tableName) : `SELECT * FROM ${quote}${tableName.split(quote).join(quote + quote)}${quote} LIMIT 10;`);
     }
   };
 
@@ -121,7 +134,7 @@ export function DbQueryPage() {
         <header className="panel flex items-center justify-between border-b px-4 py-3 dark:border-slate-800 sm:px-5">
           <div className="flex min-w-0 items-center gap-3">
             <button
-              onClick={() =>
+              onClick={() => local ? local.onBack() :
                 navigate(
                   isRelational
                     ? "/admin/datasources/relational"
@@ -157,8 +170,17 @@ export function DbQueryPage() {
               </p>
             </div>
           </div>
-          {isRelational && <div className="flex flex-wrap items-center justify-end gap-2"><button className="btn btn-secondary btn-sm" disabled={!selectedDatabase || !selectedTable} onClick={() => setDataDialog('import')}><Upload size={14} />导入</button><button className="btn btn-secondary btn-sm" disabled={!selectedDatabase || (!selectedTable && !result)} onClick={() => setDataDialog('export')}><Download size={14} />导出</button><button className="btn btn-secondary btn-sm" disabled={!selectedDatabase || !tables.length} onClick={() => setTransferKind('backup')}><Archive size={14} />备份</button><button className="btn btn-primary btn-sm" disabled={!selectedDatabase || !tables.length} onClick={() => setTransferKind('migration')}><ArrowRightLeft size={14} />迁移</button></div>}
+          {isRelational && <div className="flex flex-wrap items-center justify-end gap-2" title={local ? '桌面端导入、导出、备份和迁移暂未接入' : undefined}>
+            {local && <button className="btn btn-secondary btn-sm" onClick={local.onEdit}><Pencil size={14} />编辑连接</button>}
+            <button className="btn btn-secondary btn-sm" disabled={!!local || !selectedDatabase || !selectedTable} onClick={() => setDataDialog('import')}><Upload size={14} />导入</button>
+            <button className="btn btn-secondary btn-sm" disabled={!!local || !selectedDatabase || (!selectedTable && !result)} onClick={() => setDataDialog('export')}><Download size={14} />导出</button>
+            <button className="btn btn-secondary btn-sm" disabled={!!local || !selectedDatabase || !tables.length} onClick={() => setTransferKind('backup')}><Archive size={14} />备份</button>
+            <button className="btn btn-primary btn-sm" disabled={!!local || !selectedDatabase || !tables.length} onClick={() => setTransferKind('migration')}><ArrowRightLeft size={14} />迁移</button>
+          </div>}
         </header>
+
+        {(databasesQuery.error || tablesQuery.error || structureQuery.error) && <div className="flex items-center gap-2 border-b px-4 py-2 text-xs text-red-500" role="alert">{((databasesQuery.error || tablesQuery.error || structureQuery.error) as Error).message}<button className="ml-auto shrink-0 text-indigo-500" onClick={() => { void databasesQuery.refetch(); if (selectedDatabase) void tablesQuery.refetch(); if (selectedTable && structureOpen) void structureQuery.refetch(); }}>重试</button></div>}
+        {local?.notice && <p className="border-b px-4 py-2 text-xs text-amber-600">{local.notice}</p>}
 
         <div className="flex min-h-0 flex-1 overflow-hidden">
           {hasSchemaBrowser && (
@@ -188,7 +210,8 @@ export function DbQueryPage() {
                       <span className="truncate">{db}</span>
                     </button>
                   ))}
-                  {databases.length === 0 && (
+                  {databasesQuery.isLoading && <p className="px-2 py-4 text-xs text-muted">正在读取数据库…</p>}
+                  {!databasesQuery.isLoading && !databasesQuery.error && databases.length === 0 && (
                     <p className="px-2 py-4 text-center text-xs text-muted">
                       暂无数据库
                     </p>
@@ -205,6 +228,7 @@ export function DbQueryPage() {
                     </span>
                   </div>
                   <div className="space-y-1">
+                    {tablesQuery.isLoading && <p className="px-2 py-4 text-xs text-muted">正在读取数据表…</p>}
                     {tables.map((table) => (
                       <button
                         key={table}
@@ -465,6 +489,7 @@ function TransferDialog({ kind, sourceDatasourceId, sourceDatabase, availableTab
 function transferStatus(status: string) { return ({ pending_approval: '待审批', queued: '排队中', running: '执行中', succeeded: '已完成', failed: '失败', rejected: '已拒绝', cancelled: '已取消' } as Record<string, string>)[status] || status; }
 
 function RelationalResultTable({ result }: { result: unknown }) {
+  if (result && typeof result === 'object' && (result as any).kind === 'command') return <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-800 dark:border-emerald-500/20 dark:bg-emerald-500/10 dark:text-emerald-200">{(result as any).command || 'SQL'} 执行成功 · 影响 {(result as any).affectedRows ?? 0} 行</div>;
   const rows = normalizeRelationalRows(result);
   const columns = Array.from(new Set(rows.flatMap((row) => Object.keys(row))));
 

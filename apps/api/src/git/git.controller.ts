@@ -31,6 +31,8 @@ import { PERMISSIONS } from "../auth/permissions";
 import { ResolveConflictDto } from "./dto/resolve-conflict.dto";
 import { BranchNameDto, PushDto } from "./dto/git-operation.dto";
 import { WorkspaceLockInterceptor } from "../workspace/workspace-lock.interceptor";
+const { gitBlame } = require('@codegen/code-intelligence/git-blame.cjs');
+import { GitBlameDto } from './dto/git-blame.dto';
 
 @UseGuards(JwtAuthGuard, PermissionsGuard)
 @RequirePermissions(PERMISSIONS.PROJECT_READ)
@@ -44,6 +46,14 @@ export class GitController {
     private readonly settings: GitSettingsService,
     private readonly access: ProjectAccessService,
   ) {}
+
+  @Post('blame')
+  async blame(@CurrentUser() user: AuthUser, @Param('id') sessionId: string, @Body() body: GitBlameDto) {
+    const { root } = await this.files.projectVolume(user.id, sessionId);
+    await this.git.assertRepositoryRoot(root);
+    try { return await gitBlame(root, body?.path, body?.content); }
+    catch (error) { throw new BadRequestException({ code: 'GIT_BLAME_UNAVAILABLE', message: error.message }); }
+  }
 
   /** 当前分支 */
   @Get("branch")

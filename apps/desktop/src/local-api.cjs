@@ -9,11 +9,20 @@ const { LocalStore } = require('./local-store.cjs');
 const { LocalAgentRuntime } = require('./local-agent-runtime.cjs');
 const { LocalPreviewRuntime } = require('./local-preview-runtime.cjs');
 const { LocalJavaRuntime } = require('./local-java-runtime.cjs');
+const { JavaRunConfigurationStore } = require('./java-run-configuration.cjs');
+const { decodeText, encodeText, textEncoding } = require('@codegen/code-intelligence/file-text.cjs');
+const { JavaBreakpointConfigurationStore, relocateBreakpointPaths } = require('./java-breakpoint-configuration.cjs');
 const { LocalTerminalRuntime } = require('./local-terminal-runtime.cjs');
 const { LocalConnectorRuntime, validateConnector } = require('./local-connector-runtime.cjs');
+const { LocalGitHistory } = require('./local-git-history.cjs');
+const { resolveGitRemote, checkGitRemotePolicy } = require('./local-git-policy.cjs');
+const { gitBlame } = require('@codegen/code-intelligence/git-blame.cjs');
 const { LocalLspManager } = require('./local-lsp-manager.cjs');
+const { WorkspaceIndex } = require('./workspace-index.cjs');
+const { FastIndexManager } = require('@codegen/code-intelligence/fast-index-manager.cjs');
 const { evaluateLicense } = require('./license-verifier.cjs');
 const { evaluatePolicy } = require('./policy-verifier.cjs');
+const { organizationRequest } = require('./organization-control-proxy.cjs');
 
 const LOCAL_API_PREFIX = '/api/local';
 const COMMUNITY_CAPABILITIES = Object.freeze({
@@ -25,11 +34,13 @@ const DEVICE_SETTING = 'device.id';
 const POLICY_SETTING = 'enterprise.policyToken';
 const CONTROL_TOKEN_SETTING = 'control.accessTokenCiphertext';
 const CONTROL_USER_SETTING = 'control.user';
+const CONTROL_ORIGIN_SETTING = 'control.serverOrigin';
 const OFFLINE_CHALLENGE_SETTING = 'license.offlineChallenge';
 const SOURCE_INDEX_LIMITS = Object.freeze({ files: 500, totalBytes: 8 * 1024 * 1024, fileBytes: 256 * 1024 });
 const MIME_TYPES = {
   '.css': 'text/css; charset=utf-8', '.html': 'text/html; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8', '.json': 'application/json; charset=utf-8',
+  '.mjs': 'text/javascript; charset=utf-8', '.wasm': 'application/wasm',
   '.svg': 'image/svg+xml', '.png': 'image/png', '.ico': 'image/x-icon',
   '.woff': 'font/woff', '.woff2': 'font/woff2',
 };
@@ -49,6 +60,7 @@ function hasSessionToken(request, token) {
 }
 
 function createLocalApi(options = {}) {
+  let controlSessionId = crypto.randomUUID();
   const token = options.token || crypto.randomBytes(32).toString('base64url');
   const staticDir = options.staticDir ? path.resolve(options.staticDir) : undefined;
   const store = options.storePath ? new LocalStore(options.storePath) : null;
@@ -61,18 +73,38 @@ function createLocalApi(options = {}) {
   });
   const policyStatus = () => evaluatePolicy(store?.getSetting(POLICY_SETTING), { publicKey: options.policyPublicKey, now: typeof options.policyNow === 'function' ? options.policyNow() : options.policyNow, appVersion: options.appVersion });
   const credentialCodec = options.credentialCodec;
-  const lspManager = new LocalLspManager({ idleMs: options.lspIdleMs, dataRoot: options.lspDataRoot });
+  const lspManager = new LocalLspManager({ idleMs: options.lspIdleMs, dataRoot: options.lspDataRoot, onLifecycle: options.onLifecycle });
+  const fastIndexRoot = options.fastIndexRoot || (options.storePath && path.join(path.dirname(options.storePath), 'fast-index'));
+  const fastIndex = fastIndexRoot ? new FastIndexManager({ directory: fastIndexRoot, maxWorkers: options.fastIndexMaxWorkers ?? 2, intervalMs: options.fastIndexIntervalMs ?? 120_000 }) : null;
+  const refreshFastIndex = project => { if (fastIndex) void fastIndex.invalidate(project).catch(() => {}); };
+  let closePromise;
+  let closing = false;
+  const workspaceIndex = new WorkspaceIndex({
+    store: options.indexStorage === 'sqlite' ? store : undefined,
+    directory: options.workspaceIndexRoot || (options.storePath ? path.join(path.dirname(options.storePath), 'workspace-index') : undefined),
+    intervalMs: options.indexIntervalMs,
+    onChanges: async (project, changes) => {
+      refreshFastIndex(project);
+      await lspManager.workspaceChanged(project, changes);
+      void lspManager.refreshNavigation(project, workspaceIndex.pendingQueries(project));
+    },
+  });
+  lspManager.navigationCache = workspaceIndex;
   const agentRuntime = store ? new LocalAgentRuntime({ store, credentialCodec, commands: options.agentCommands, timeoutMs: options.agentTimeoutMs, codeIntelligence: (project, name, input) => runCodeIntelligenceTool(lspManager, project, name, input) }) : null;
   const previewRuntime = new LocalPreviewRuntime({ command: options.previewCommand });
   const javaRuntime = new LocalJavaRuntime(lspManager);
+  const javaConfigurations = new JavaRunConfigurationStore(store, credentialCodec);
+  const javaBreakpoints = new JavaBreakpointConfigurationStore(store, credentialCodec);
   const terminalRuntime = new LocalTerminalRuntime();
-  const connectorRuntime = new LocalConnectorRuntime();
+  const connectorRuntime = options.connectorRuntime || new LocalConnectorRuntime();
+  const gitHistory = new LocalGitHistory(runGit);
   const executionRuntime = { shutdown: () => Promise.all([terminalRuntime.shutdown(), javaRuntime.shutdown()]) };
   const projects = new Map((store?.listProjects() ?? []).map((project) => [project.id, project]));
   const agentWriteApprovals = new Map();
   let origin;
   const server = http.createServer(async (request, response) => {
     try {
+    if (closing) { json(response, 503, { code: 'LOCAL_API_CLOSING', message: '客户端正在退出' }); return; }
     const url = new URL(request.url || '/', origin);
     const isApi = url.pathname.startsWith(`${LOCAL_API_PREFIX}/`) || url.pathname === LOCAL_API_PREFIX;
     if (isApi) {
@@ -96,22 +128,26 @@ function createLocalApi(options = {}) {
         json(response, 200, { ...licenseStatus(), deviceId }); return;
       }
       if (request.method === 'GET' && url.pathname === `${LOCAL_API_PREFIX}/account`) {
-        json(response, 200, { serverUrl: resolveControlServerUrl(options.controlServerUrl), signedIn: Boolean(store?.getSetting(CONTROL_TOKEN_SETTING)), user: store?.getSetting(CONTROL_USER_SETTING) || null, license: licenseStatus(), policy: policyStatus(), deviceId }); return;
+        const serverUrl = resolveControlServerUrl(options.controlServerUrl);
+        const signedIn = Boolean(store?.getSetting(CONTROL_TOKEN_SETTING)) && store?.getSetting(CONTROL_ORIGIN_SETTING) === serverUrl;
+        json(response, 200, { serverUrl, signedIn, user: signedIn ? store?.getSetting(CONTROL_USER_SETTING) || null : null, ...(signedIn ? { controlSessionId } : {}), license: licenseStatus(), policy: policyStatus(), deviceId }); return;
       }
       if (request.method === 'POST' && url.pathname === `${LOCAL_API_PREFIX}/account/login`) {
         if (!store) { json(response, 503, { code: 'LOCAL_STORE_UNAVAILABLE', message: '本地配置存储不可用' }); return; }
         const body = await readJsonBody(request, 32 * 1024); const username = typeof body.username === 'string' ? body.username.trim() : ''; const password = typeof body.password === 'string' ? body.password : '';
         if (!username || !password || username.length > 254 || password.length > 1024) { json(response, 400, { code: 'LOCAL_ACCOUNT_LOGIN_INVALID', message: '请输入有效的账号和密码' }); return; }
         try {
-          const remote = await controlRequest(options.controlServerUrl, '/api/auth/login', { method: 'POST', body: { username, password } });
+          const loginServer = resolveControlServerUrl(options.controlServerUrl);
+          const remote = await controlRequest(loginServer, '/api/auth/login', { method: 'POST', body: { username, password } });
           if (typeof remote.accessToken !== 'string' || !remote.accessToken || !remote.user?.id) throw new Error('服务端登录响应无效');
           store.setSetting(CONTROL_TOKEN_SETTING, encryptCredential(remote.accessToken, credentialCodec)); store.setSetting(CONTROL_USER_SETTING, { id: remote.user.id, username: remote.user.username });
+          store.setSetting(CONTROL_ORIGIN_SETTING, loginServer); controlSessionId = crypto.randomUUID();
           json(response, 200, { signedIn: true, user: store.getSetting(CONTROL_USER_SETTING) });
         } catch (error) { json(response, 422, { code: 'LOCAL_ACCOUNT_LOGIN_FAILED', message: safeConnectorError(error, password) }); }
         return;
       }
       if (request.method === 'DELETE' && url.pathname === `${LOCAL_API_PREFIX}/account`) {
-        store?.deleteSetting(CONTROL_TOKEN_SETTING); store?.deleteSetting(CONTROL_USER_SETTING); response.writeHead(204); response.end(); return;
+        store?.deleteSetting(CONTROL_TOKEN_SETTING); store?.deleteSetting(CONTROL_USER_SETTING); store?.deleteSetting(CONTROL_ORIGIN_SETTING); controlSessionId = crypto.randomUUID(); response.writeHead(204); response.end(); return;
       }
       if (request.method === 'POST' && url.pathname === `${LOCAL_API_PREFIX}/account/license/redeem`) {
         let code = '';
@@ -145,6 +181,22 @@ function createLocalApi(options = {}) {
           if (!/^[A-Za-z0-9_-]{43}$/.test(invitationToken)) { json(response, 400, { code: 'LOCAL_INVITATION_INVALID', message: '请输入有效的邀请代码' }); return; }
           json(response, 200, await authenticatedControlRequest(store, credentialCodec, options.controlServerUrl, '/api/control/enterprise/invitations/accept', { method: 'POST', body: { token: invitationToken } }));
         } catch (error) { json(response, error?.code === 'LOCAL_ACCOUNT_REQUIRED' ? 401 : 422, { code: error?.code || 'LOCAL_INVITATION_FAILED', message: safeConnectorError(error, invitationToken) }); }
+        return;
+      }
+      if (url.pathname.startsWith(`${LOCAL_API_PREFIX}/account/enterprise/organizations`)) {
+        try {
+          if (!store?.getSetting(CONTROL_TOKEN_SETTING) || store.getSetting(CONTROL_ORIGIN_SETTING) !== resolveControlServerUrl(options.controlServerUrl)) throw Object.assign(new Error('请先登录当前服务账号'), { code: 'LOCAL_ACCOUNT_REQUIRED', status: 401 });
+          if (request.headers['x-code-studio-control-session'] !== controlSessionId) throw Object.assign(new Error('登录会话已改变，请刷新账户页'), { code: 'LOCAL_CONTROL_SESSION_CHANGED', status: 409 });
+          const body = ['POST', 'PUT'].includes(request.method) ? await readJsonBody(request, 16 * 1024, true) : {};
+          const target = organizationRequest(request.method, url, body);
+          const result = await authenticatedControlRequest(store, credentialCodec, options.controlServerUrl, target.pathname, { method: request.method, isCurrentSession: () => request.headers['x-code-studio-control-session'] === controlSessionId, ...(target.body ? { body: target.body } : {}) });
+          if (request.headers['x-code-studio-control-session'] !== controlSessionId || !store.getSetting(CONTROL_TOKEN_SETTING) || store.getSetting(CONTROL_ORIGIN_SETTING) !== resolveControlServerUrl(options.controlServerUrl)) throw Object.assign(new Error('登录会话已改变，请刷新账户页'), { code: 'LOCAL_CONTROL_SESSION_CHANGED', status: 409 });
+          json(response, 200, result);
+        } catch (error) {
+          const policyErrors = { ORGANIZATION_POLICY_CONFLICT: '策略已被更新，请重新读取后再保存', ORGANIZATION_POLICY_FORBIDDEN: '仅组织所有者可以修改安全策略' };
+          const policyMessage = Object.hasOwn(policyErrors, error?.remoteCode) ? policyErrors[error.remoteCode] : null;
+          json(response, error?.code === 'LOCAL_ACCOUNT_REQUIRED' ? 401 : error?.status || 422, { code: policyMessage ? error.remoteCode : error?.code || 'LOCAL_ORGANIZATION_REQUEST_FAILED', message: policyMessage || (error?.code?.startsWith('LOCAL_') ? error.message : '组织操作失败，请检查服务连接或管理权限') });
+        }
         return;
       }
       if (request.method === 'GET' && url.pathname === `${LOCAL_API_PREFIX}/account/devices`) {
@@ -228,7 +280,19 @@ function createLocalApi(options = {}) {
         const blockedHost = firstBlockedNetworkHost(activePolicy, connectorHosts(config)); if (blockedHost) { json(response, 403, policyDenied(`当前企业策略不允许访问网络主机 ${blockedHost}`)); return; }
         store.upsertConnector(config, encryptCredential(body.secret, credentialCodec)); json(response, 201, publicConnector(store.getConnector(config.id))); return;
       }
-      const connectorMatch = url.pathname.match(/^\/api\/local\/connectors\/([a-f0-9]{24})(?:\/(test|explore))?$/);
+      const connectorMatch = url.pathname.match(/^\/api\/local\/connectors\/([a-f0-9]{24})(?:\/(test|explore|metadata))?$/);
+      if (connectorMatch && request.method === 'PUT' && !connectorMatch[2]) {
+        const current = store?.getConnector(connectorMatch[1]);
+        if (!current) { json(response, 404, { code: 'LOCAL_CONNECTOR_NOT_FOUND', message: '连接配置不存在' }); return; }
+        const body = await readJsonBody(request, 64 * 1024);
+        if (body.type !== undefined && body.type !== current.type) { json(response, 400, { code: 'LOCAL_CONNECTOR_INVALID', message: '已有连接不能更改类型，请新建连接' }); return; }
+        const config = validateConnector({ ...current, ...body, settings: { ...current.settings, ...body.settings } }, current.id);
+        const activePolicy = policyStatus();
+        if (!policyAllows(activePolicy, 'connector', config.type)) { json(response, 403, policyDenied('当前企业策略不允许使用该连接器')); return; }
+        const blockedHost = firstBlockedNetworkHost(activePolicy, connectorHosts(config)); if (blockedHost) { json(response, 403, policyDenied(`当前企业策略不允许访问网络主机 ${blockedHost}`)); return; }
+        store.upsertConnector(config, encryptCredential(body.secret, credentialCodec));
+        json(response, 200, publicConnector(store.getConnector(config.id))); return;
+      }
       if (connectorMatch && request.method === 'POST' && connectorMatch[2] === 'test') {
         const row = store?.getConnector(connectorMatch[1]); if (!row) { json(response, 404, { code: 'LOCAL_CONNECTOR_NOT_FOUND', message: '连接配置不存在' }); return; }
         const activePolicy = policyStatus(); if (!policyAllows(activePolicy, 'connector', row.type)) { json(response, 403, policyDenied('当前企业策略不允许使用该连接器')); return; }
@@ -244,6 +308,14 @@ function createLocalApi(options = {}) {
         const personalDatabaseAccess = ['community', 'personal-pro'].includes(licenseStatus().edition) && !activePolicy.enforcementRequired;
         try { if (row.credentialCiphertext) secret = credentialCodec?.decrypt(row.credentialCiphertext) || ''; json(response, 200, await connectorRuntime.explore(row, secret, { ...body, readOnly: !personalDatabaseAccess })); }
         catch (error) { json(response, 422, { code: 'LOCAL_CONNECTOR_EXPLORE_FAILED', message: safeConnectorError(error, secret) }); } return;
+      }
+      if (connectorMatch && request.method === 'POST' && connectorMatch[2] === 'metadata') {
+        const row = store?.getConnector(connectorMatch[1]); if (!row) { json(response, 404, { code: 'LOCAL_CONNECTOR_NOT_FOUND', message: '连接配置不存在' }); return; }
+        const activePolicy = policyStatus(); if (!policyAllows(activePolicy, 'connector', row.type)) { json(response, 403, policyDenied('当前企业策略不允许使用该连接器')); return; }
+        const blockedHost = firstBlockedNetworkHost(activePolicy, connectorHosts(row)); if (blockedHost) { json(response, 403, policyDenied(`当前企业策略不允许访问网络主机 ${blockedHost}`)); return; }
+        const body = await readJsonBody(request, 16 * 1024); let secret = '';
+        try { if (row.credentialCiphertext) secret = credentialCodec?.decrypt(row.credentialCiphertext) || ''; json(response, 200, await connectorRuntime.metadata(row, secret, body)); }
+        catch (error) { json(response, 422, { code: 'LOCAL_CONNECTOR_METADATA_FAILED', message: safeConnectorError(error, secret) }); } return;
       }
       if (connectorMatch && request.method === 'DELETE' && !connectorMatch[2]) {
         if (!store?.getConnector(connectorMatch[1])) { json(response, 404, { code: 'LOCAL_CONNECTOR_NOT_FOUND', message: '连接配置不存在' }); return; }
@@ -291,24 +363,58 @@ function createLocalApi(options = {}) {
       }
       const filesMatch = url.pathname.match(/^\/api\/local\/projects\/([a-f0-9]{24})\/files$/);
       const lspPrepareMatch = url.pathname.match(/^\/api\/local\/projects\/([a-f0-9]{24})\/language\/prepare$/);
+      const lspStatusMatch = url.pathname.match(/^\/api\/local\/projects\/([a-f0-9]{24})\/language\/status$/);
       const javaSourceMatch = url.pathname.match(/^\/api\/local\/projects\/([a-f0-9]{24})\/language\/source$/);
       if (javaSourceMatch && request.method === 'GET') {
         const project = projects.get(javaSourceMatch[1]); if (!project) { json(response, 404, { code: 'LOCAL_PROJECT_NOT_FOUND', message: '项目不存在或尚未打开' }); return; }
         json(response, 200, await lspManager.javaSource(project, url.searchParams.get('path'))); return;
       }
+      if (lspStatusMatch && request.method === 'GET') {
+        const project = projects.get(lspStatusMatch[1]); if (!project) { json(response, 404, { code: 'LOCAL_PROJECT_NOT_FOUND', message: '项目不存在或尚未打开' }); return; }
+        json(response, 200, lspManager.projectStatus(project)); return;
+      }
       if (lspPrepareMatch && request.method === 'POST') {
         const project = projects.get(lspPrepareMatch[1]); if (!project) { json(response, 404, { code: 'LOCAL_PROJECT_NOT_FOUND', message: '项目不存在或尚未打开' }); return; }
         json(response, 200, await lspManager.prepareProject(project)); return;
       }
-      const lspMatch = url.pathname.match(/^\/api\/local\/projects\/([a-f0-9]{24})\/language\/(definition|declaration|type-definition|implementation|references|hover|completion|diagnostics|rename|code-actions|call-hierarchy-prepare|call-hierarchy-incoming|call-hierarchy-outgoing|document-symbols|workspace-symbols)$/);
+      const lspMatch = url.pathname.match(/^\/api\/local\/projects\/([a-f0-9]{24})\/language\/(definition|declaration|type-definition|implementation|references|hover|completion|diagnostics|rename|code-actions|call-hierarchy-prepare|call-hierarchy-incoming|call-hierarchy-outgoing|document-symbols|workspace-symbols|fast-symbols|fast-document-symbols|index-status|index-refresh)$/);
       if (lspMatch && (request.method === 'GET' || request.method === 'POST')) {
         const project = projects.get(lspMatch[1]); if (!project) { json(response, 404, { code: 'LOCAL_PROJECT_NOT_FOUND', message: '项目不存在或尚未打开' }); return; }
         const operation = lspMatch[2];
+        if (['fast-symbols', 'fast-document-symbols', 'index-status', 'index-refresh'].includes(operation)) {
+          if (!fastIndex) { json(response, 503, { code: 'FAST_INDEX_UNAVAILABLE', message: '索引暂不可用' }); return; }
+          if (operation === 'index-refresh') {
+            if (request.method !== 'POST') { json(response, 405, { code: 'LOCAL_METHOD_INVALID', message: '请求方法无效' }); return; }
+            await fastIndex.invalidate(project, true); json(response, 200, { index: await fastIndex.status(project) }); return;
+          }
+          const input = request.method === 'POST' ? await readJsonBody(request, 1024 * 1024) : {};
+          const query = input.query ?? url.searchParams.get('query') ?? '';
+          if (typeof query !== 'string' || query.length > 200) { json(response, 400, { code: 'LOCAL_LSP_REQUEST_INVALID', message: '搜索内容无效' }); return; }
+          if (operation === 'fast-symbols' && (!query.trim() || query.includes('\0'))) { json(response, 400, { code: 'LOCAL_LSP_REQUEST_INVALID', message: '搜索内容无效' }); return; }
+          if (operation === 'fast-document-symbols') resolveWorkspaceFile(project.path, input.path ?? url.searchParams.get('path'));
+          if (input.documents !== undefined && (!Array.isArray(input.documents) || input.documents.length > 20 || input.documents.some(document => !document || typeof document.path !== 'string' || typeof document.content !== 'string'))) { json(response, 400, { code: 'FAST_INDEX_OVERLAY_INVALID', message: '未保存代码内容无效' }); return; }
+          const documents = (input.documents || []).filter(document => document.path.endsWith('.java'));
+          if (operation === 'fast-document-symbols' && input.content !== undefined) {
+            if (typeof input.content !== 'string') { json(response, 400, { code: 'FAST_INDEX_OVERLAY_INVALID', message: '未保存代码内容无效' }); return; }
+            const currentPath = input.path ?? url.searchParams.get('path');
+            const existing = documents.findIndex(document => document.path === currentPath);
+            if (existing >= 0) documents.splice(existing, 1);
+            documents.push({ path: currentPath, content: input.content });
+          }
+          const result = operation === 'index-status' ? { index: await fastIndex.status(project) } : operation === 'fast-symbols' ? await fastIndex.search(project, query, 200, documents) : await fastIndex.outline(project, input.path ?? url.searchParams.get('path'), documents);
+          json(response, 200, result); return;
+        }
         if (operation === 'workspace-symbols') {
           const query = String(url.searchParams.get('query') || '').trim(); if (query.length > 200) { json(response, 400, { code: 'LOCAL_LSP_REQUEST_INVALID', message: '搜索内容过长' }); return; }
           json(response, 200, { items: await lspManager.workspaceSymbols(project, query) }); return;
         }
         const body = request.method === 'POST' ? await readJsonBody(request, 2 * 1024 * 1024) : {};
+        if (body.documents !== undefined) {
+          if (!Array.isArray(body.documents) || body.documents.length > 20 || body.documents.some((item) => !item || typeof item.path !== 'string' || typeof item.content !== 'string')) {
+            json(response, 400, { code: 'LOCAL_LSP_REQUEST_INVALID', message: '未保存文件缓冲区无效' }); return;
+          }
+          await lspManager.syncDocuments(project, body.documents);
+        }
         const input = { ...body, path: body.path || body.item?.path || url.searchParams.get('path'), content: body.content, line: Number(body.line || url.searchParams.get('line') || 0), column: Number(body.column || url.searchParams.get('column') || 0) };
         const positionRequired = !['document-symbols', 'diagnostics', 'call-hierarchy-incoming', 'call-hierarchy-outgoing'].includes(operation);
         if (!input.path || (positionRequired && (!Number.isInteger(input.line) || input.line < 1 || !Number.isInteger(input.column) || input.column < 1))) { json(response, 400, { code: 'LOCAL_LSP_REQUEST_INVALID', message: '代码位置无效' }); return; }
@@ -338,6 +444,7 @@ function createLocalApi(options = {}) {
         const project = projects.get(projectTerminalMatch[1]); if (!project) { json(response, 404, { code: 'LOCAL_PROJECT_NOT_FOUND', message: '项目不存在或尚未打开' }); return; }
         if (!policyAllows(policyStatus(), 'terminal')) { json(response, 403, policyDenied('当前企业策略已关闭终端')); return; }
         const body = await readJsonBody(request, 16 * 1024); if (body.confirmed !== true) { json(response, 400, { code: 'LOCAL_TERMINAL_CONFIRMATION_REQUIRED', message: '启动终端前需要确认' }); return; }
+        if (!policyAllows(policyStatus(), 'terminal')) { json(response, 403, policyDenied('当前企业策略已关闭终端')); return; }
         json(response, 201, terminalRuntime.create(project, body)); return;
       }
       const terminalMatch = url.pathname.match(/^\/api\/local\/terminal\/([a-f0-9]{24})(?:\/(input|resize))?$/);
@@ -347,19 +454,39 @@ function createLocalApi(options = {}) {
       }
       if (terminalMatch && request.method === 'POST' && terminalMatch[2] === 'input') {
         const body = await readJsonBody(request, 128 * 1024); if (typeof body.data !== 'string' || body.data.length > 65_536) { json(response, 400, { code: 'LOCAL_TERMINAL_INPUT_INVALID', message: '终端输入无效' }); return; }
+        if (!policyAllows(policyStatus(), 'terminal')) { json(response, 403, policyDenied('当前企业策略已关闭终端')); return; }
         if (!terminalRuntime.write(terminalMatch[1], body.data)) { json(response, 409, { code: 'LOCAL_TERMINAL_NOT_RUNNING', message: '终端已结束' }); return; } response.writeHead(204); response.end(); return;
       }
       if (terminalMatch && request.method === 'POST' && terminalMatch[2] === 'resize') {
-        const body = await readJsonBody(request, 16 * 1024); if (!terminalRuntime.resize(terminalMatch[1], body.cols, body.rows)) { json(response, 409, { code: 'LOCAL_TERMINAL_NOT_RUNNING', message: '终端已结束' }); return; } response.writeHead(204); response.end(); return;
+        const body = await readJsonBody(request, 16 * 1024);
+        if (!policyAllows(policyStatus(), 'terminal')) { json(response, 403, policyDenied('当前企业策略已关闭终端')); return; }
+        if (!terminalRuntime.resize(terminalMatch[1], body.cols, body.rows)) { json(response, 409, { code: 'LOCAL_TERMINAL_NOT_RUNNING', message: '终端已结束' }); return; } response.writeHead(204); response.end(); return;
       }
       if (terminalMatch && request.method === 'DELETE' && !terminalMatch[2]) { if (!terminalRuntime.close(terminalMatch[1])) { json(response, 404, { code: 'LOCAL_TERMINAL_NOT_FOUND', message: '终端会话已结束' }); return; } response.writeHead(204); response.end(); return; }
-      const javaRunMatch = url.pathname.match(/^\/api\/local\/projects\/([a-f0-9]{24})\/java-run(?:\/(targets|start|stop|continue|next|stepIn|stepOut|pause|breakpoints|scopes|variables))?$/);
+      const javaRunMatch = url.pathname.match(/^\/api\/local\/projects\/([a-f0-9]{24})\/java-run(?:\/(configuration|configurations|breakpoint-configuration|targets|start|stop|continue|continueAll|next|stepIn|stepOut|pause|breakpoints|scopes|variables|evaluate|threads|selectThread))?$/);
       if (javaRunMatch) {
         try {
         const project = projects.get(javaRunMatch[1]);
         if (!project) { json(response, 404, { message: '本地项目不存在' }); return; }
         if (!policyAllows(policyStatus(), 'terminal')) { json(response, 403, policyDenied('当前企业策略不允许运行程序')); return; }
         const action = javaRunMatch[2];
+        if (action === 'configurations') {
+          if (request.method === 'GET') { json(response, 200, javaConfigurations.list(project)); return; }
+          if (request.method === 'POST') { const body = await readJsonBody(request, 80 * 1024); json(response, 200, javaConfigurations.mutate(project, body)); return; }
+          json(response, 405, { message: '不支持的运行配置列表操作' }); return;
+        }
+        if (action === 'breakpoint-configuration') {
+          if (request.method === 'GET') { json(response, 200, { breakpoints: javaBreakpoints.read(project) }); return; }
+          if (request.method === 'POST') { const body = await readJsonBody(request, 80 * 1024); json(response, 200, { breakpoints: javaBreakpoints.save(project, body.breakpoints) }); return; }
+          if (request.method === 'DELETE') { javaBreakpoints.remove(project); json(response, 200, { breakpoints: {} }); return; }
+          json(response, 405, { message: '不支持的断点配置操作' }); return;
+        }
+        if (action === 'configuration') {
+          if (request.method === 'GET') { json(response, 200, { configuration: javaConfigurations.read(project) }); return; }
+          if (request.method === 'POST') { const body = await readJsonBody(request, 80 * 1024); json(response, 200, { configuration: javaConfigurations.save(project, body) }); return; }
+          if (request.method === 'DELETE') { javaConfigurations.remove(project); json(response, 200, { configuration: null }); return; }
+          json(response, 405, { message: '不支持的运行配置操作' }); return;
+        }
         if (request.method === 'GET' && !action) { json(response, 200, javaRuntime.inspect(project)); return; }
         if (request.method === 'GET' && action === 'targets') { json(response, 200, { targets: await javaRuntime.targets(project) }); return; }
         if (request.method === 'POST' && action && action !== 'targets') {
@@ -437,7 +564,10 @@ function createLocalApi(options = {}) {
       if (request.method === 'GET' && filesMatch) {
         const project = projects.get(filesMatch[1]);
         if (!project) { json(response, 404, { code: 'LOCAL_PROJECT_NOT_FOUND', message: '本地项目不存在或尚未打开' }); return; }
-        json(response, 200, { items: listWorkspace(project.path) });
+        if (fastIndex) void fastIndex.warm(project).catch(() => {});
+        const snapshot = await workspaceIndex.get(project, url.searchParams.get('refresh') === 'true');
+        if (url.searchParams.get('since') === String(snapshot.revision)) json(response, 200, { notModified: true, revision: snapshot.revision });
+        else json(response, 200, { items: snapshot.items, revision: snapshot.revision, updatedAt: snapshot.updatedAt, truncated: snapshot.truncated });
         return;
       }
       if (request.method === 'POST' && filesMatch) {
@@ -449,6 +579,7 @@ function createLocalApi(options = {}) {
         if (fs.existsSync(target.absolute)) { json(response, 409, { code: 'LOCAL_FILE_EXISTS', message: '同名文件或文件夹已存在' }); return; }
         if (body.type === 'directory') fs.mkdirSync(target.absolute);
         else fs.writeFileSync(target.absolute, '', { encoding: 'utf8', flag: 'wx' });
+        refreshFastIndex(project);
         json(response, 201, { path: target.relativePath, type: body.type }); return;
       }
       if (request.method === 'DELETE' && filesMatch) {
@@ -458,13 +589,46 @@ function createLocalApi(options = {}) {
         const stat = fs.lstatSync(target.absolute);
         if (stat.isSymbolicLink()) { json(response, 400, { code: 'LOCAL_FILE_SYMLINK_FORBIDDEN', message: '不允许通过工作区删除符号链接' }); return; }
         if (stat.isDirectory()) fs.rmSync(target.absolute, { recursive: true, force: false }); else fs.unlinkSync(target.absolute);
+        refreshFastIndex(project);
         response.writeHead(204); response.end(); return;
+      }
+      if (request.method === 'PATCH' && filesMatch) {
+        const project = projects.get(filesMatch[1]);
+        if (!project) { json(response, 404, { code: 'LOCAL_PROJECT_NOT_FOUND', message: '本地项目不存在或尚未打开' }); return; }
+        const body = await readJsonBody(request, 1024 * 1024);
+        const source = resolveExistingWorkspaceEntry(project.path, body.from);
+        const target = resolveNewWorkspaceEntry(project.path, body.to);
+        if (source.absolute !== path.resolve(project.path, source.relativePath) || fs.realpathSync(path.dirname(target.absolute)) !== path.dirname(target.absolute)) {
+          json(response, 400, { code: 'WORKSPACE_PATH_INVALID', message: '不能通过符号链接路径移动文件' }); return;
+        }
+        if ([source.relativePath, target.relativePath].some(value => value.split('/').includes('.git')) || target.absolute.startsWith(`${source.absolute}${path.sep}`)) {
+          json(response, 400, { code: 'WORKSPACE_PATH_INVALID', message: '不能移动 Git 元数据或将文件夹移入自身' }); return;
+        }
+        if (['starting', 'building', 'running', 'paused'].includes(javaRuntime.inspect(project).status)) {
+          json(response, 409, { code: 'LOCAL_FILE_MOVE_BUSY', message: '请先停止 Java 运行或调试，再移动文件' }); return;
+        }
+        if (fs.existsSync(target.absolute) || (() => { try { fs.lstatSync(target.absolute); return true; } catch (error) { if (error.code === 'ENOENT') return false; throw error; } })()) {
+          json(response, 409, { code: 'LOCAL_FILE_EXISTS', message: '目标文件或文件夹已存在，不能覆盖' }); return;
+        }
+        const current = body.breakpoints === undefined ? javaBreakpoints.read(project) : body.breakpoints;
+        const points = relocateBreakpointPaths(current, source.relativePath, target.relativePath);
+        const persist = Object.keys(current).length > 0;
+        if (persist) javaBreakpoints.available();
+        fs.renameSync(source.absolute, target.absolute);
+        try { if (persist) javaBreakpoints.save(project, points); }
+        catch (error) { fs.renameSync(target.absolute, source.absolute); throw error; }
+        refreshFastIndex(project);
+        void lspManager.workspaceChanged(project, [{ path: source.relativePath, type: 3 }, { path: target.relativePath, type: 1 }]).catch(() => {});
+        json(response, 200, { from: source.relativePath, to: target.relativePath, breakpoints: points }); return;
       }
       const indexMatch = url.pathname.match(/^\/api\/local\/projects\/([a-f0-9]{24})\/index$/);
       if (request.method === 'GET' && indexMatch) {
         const project = projects.get(indexMatch[1]);
         if (!project) { json(response, 404, { code: 'LOCAL_PROJECT_NOT_FOUND', message: '本地项目不存在或尚未打开' }); return; }
-        json(response, 200, buildSourceIndex(project.path));
+        const snapshot = await workspaceIndex.get(project);
+        if (url.searchParams.get('metadata') === 'true') {
+          json(response, 200, { updatedAt: snapshot.updatedAt, truncated: snapshot.truncated, files: snapshot.items.filter((item) => item.type === 'file').map((item) => ({ path: item.path })) });
+        } else json(response, 200, await buildSourceIndex(project.path, snapshot.items, snapshot.truncated));
         return;
       }
       const contentMatch = url.pathname.match(/^\/api\/local\/projects\/([a-f0-9]{24})\/content$/);
@@ -473,6 +637,31 @@ function createLocalApi(options = {}) {
       const searchMatch = url.pathname.match(/^\/api\/local\/projects\/([a-f0-9]{24})\/search$/);
       const symbolsMatch = url.pathname.match(/^\/api\/local\/projects\/([a-f0-9]{24})\/symbols$/);
       const gitStatusMatch = url.pathname.match(/^\/api\/local\/projects\/([a-f0-9]{24})\/git\/status$/);
+      const gitBlameMatch = url.pathname.match(/^\/api\/local\/projects\/([a-f0-9]{24})\/git\/blame$/);
+      if (request.method === 'POST' && gitBlameMatch) {
+        const project = projects.get(gitBlameMatch[1]);
+        if (!project) { json(response, 404, { message: '项目不存在或尚未打开' }); return; }
+        const body = await readJsonBody(request, 2 * 1024 * 1024);
+        try { json(response, 200, await gitBlame(project.path, body.path, body.content)); }
+        catch (error) { json(response, 400, { code: 'GIT_BLAME_UNAVAILABLE', message: error.message }); }
+        return;
+      }
+      const gitHistoryMatch = url.pathname.match(/^\/api\/local\/projects\/([a-f0-9]{24})\/git\/(commits|rollback)(?:\/([a-f0-9]{7,64})\/(diff))?$/i);
+      if (gitHistoryMatch) {
+        const project = projects.get(gitHistoryMatch[1]);
+        if (!project) { json(response, 404, { code: 'LOCAL_PROJECT_NOT_FOUND', message: '项目不存在或尚未打开' }); return; }
+        if (request.method === 'GET' && gitHistoryMatch[2] === 'commits') {
+          json(response, 200, gitHistoryMatch[3] ? await gitHistory.diff(project.path, gitHistoryMatch[3]) : await gitHistory.commits(project.path, Number(url.searchParams.get('offset') || 0))); return;
+        }
+        if (request.method === 'POST' && gitHistoryMatch[2] === 'rollback' && !gitHistoryMatch[3]) {
+          const body = await readJsonBody(request, 4096);
+          const result = await gitHistory.mutate(project.path, async () => {
+            const restored = await gitHistory.rollback(project.path, body.hash);
+            await workspaceIndex.get(project, true); return restored;
+          });
+          json(response, 200, result); return;
+        }
+      }
       const gitDiffMatch = url.pathname.match(/^\/api\/local\/projects\/([a-f0-9]{24})\/git\/diff$/);
       const gitCommitMatch = url.pathname.match(/^\/api\/local\/projects\/([a-f0-9]{24})\/git\/commit$/);
       const gitBranchesMatch = url.pathname.match(/^\/api\/local\/projects\/([a-f0-9]{24})\/git\/branches$/);
@@ -488,9 +677,12 @@ function createLocalApi(options = {}) {
         const project = projects.get(gitDiffMatch[1]);
         if (!project) { json(response, 404, { code: 'LOCAL_PROJECT_NOT_FOUND', message: '本地项目不存在或尚未打开' }); return; }
         const relativePath = validateRelativePath(project.path, url.searchParams.get('path'));
+        const status = await gitStatus(project.path);
+        const selectedFile = status.files.find(file => file.path === relativePath);
+        const selected = [relativePath, ...(selectedFile?.originalPath ? [selectedFile.originalPath] : [])].map(item => `:(literal)${item}`);
         const [working, staged] = await Promise.all([
-          runGit(project.path, ['diff', '--no-ext-diff', '--', relativePath]),
-          runGit(project.path, ['diff', '--cached', '--no-ext-diff', '--', relativePath]),
+          selectedFile?.indexStatus === '?' ? runGit(project.path, ['diff', '--no-index', '--no-ext-diff', '--no-textconv', '--', process.platform === 'win32' ? 'NUL' : '/dev/null', relativePath], { allowFailure: true }) : runGit(project.path, ['diff', '--no-ext-diff', '--no-textconv', '--', ...selected]),
+          runGit(project.path, ['diff', '--cached', '--no-ext-diff', '--no-textconv', '--', ...selected]),
         ]);
         json(response, 200, { path: relativePath, working: working.stdout, staged: staged.stdout });
         return;
@@ -503,12 +695,22 @@ function createLocalApi(options = {}) {
         const paths = Array.isArray(body.paths) ? [...new Set(body.paths.map((item) => validateRelativePath(project.path, item)))] : [];
         if (!message || message.length > 500) { json(response, 400, { code: 'LOCAL_GIT_MESSAGE_INVALID', message: '提交信息长度应为 1～500 个字符' }); return; }
         if (!paths.length || paths.length > 500) { json(response, 400, { code: 'LOCAL_GIT_PATHS_INVALID', message: '请选择需要提交的文件' }); return; }
-        await runGit(project.path, ['add', '--all', '--', ...paths]);
-        const committed = await runGit(project.path, ['commit', '-m', message], { allowFailure: true });
+        await gitHistory.mutate(project.path, async () => {
+        const current = await gitStatus(project.path);
+        const expanded = [...new Set(paths.flatMap(item => { const file = current.files.find(file => file.path === item); return file?.originalPath ? [item, validateRelativePath(project.path, file.originalPath)] : [item]; }))];
+        // Literal pathspecs cannot turn a selected filename into a Git pattern.
+        const selected = expanded.map(item => `:(literal)${item}`);
+        // Already-staged deletions/rename sources no longer exist in the index;
+        // git add rejects those pathspecs. Keep them in the commit selection only.
+        const indexed = new Set((await runGit(project.path, ['ls-files', '-z', '--', ...selected])).stdout.split('\0'));
+        const toStage = expanded.filter(item => fs.existsSync(path.join(project.path, item)) || indexed.has(item)).map(item => `:(literal)${item}`);
+        if (toStage.length) await runGit(project.path, ['add', '--all', '--', ...toStage]);
+        const committed = await runGit(project.path, ['commit', '--only', '-m', message, '--', ...selected], { allowFailure: true });
         if (committed.code !== 0) {
           json(response, 409, { code: 'LOCAL_GIT_COMMIT_FAILED', message: gitErrorMessage(committed.stderr || committed.stdout) }); return;
         }
         json(response, 200, { committed: true, output: committed.stdout.trim(), status: await gitStatus(project.path) });
+        });
         return;
       }
       if (gitBranchesMatch && request.method === 'GET') {
@@ -518,8 +720,9 @@ function createLocalApi(options = {}) {
           runGit(project.path, ['branch', '--format=%(refname:short)']),
           runGit(project.path, ['remote']),
         ]);
+        const status = await gitStatus(project.path);
         json(response, 200, {
-          branches: branchesResult.stdout.split(/\r?\n/).map((item) => item.trim()).filter(Boolean),
+          branches: [...new Set([...branchesResult.stdout.split(/\r?\n/).map((item) => item.trim()).filter(Boolean), ...(status.branch ? [status.branch] : [])])],
           remotes: remotesResult.stdout.split(/\r?\n/).map((item) => item.trim()).filter(Boolean),
         });
         return;
@@ -529,8 +732,11 @@ function createLocalApi(options = {}) {
         if (!project) { json(response, 404, { code: 'LOCAL_PROJECT_NOT_FOUND', message: '本地项目不存在或尚未打开' }); return; }
         const body = await readJsonBody(request, 16 * 1024);
         const branch = await validateBranchName(project.path, body.branch);
-        await runGit(project.path, body.create ? ['switch', '-c', branch] : ['switch', branch]);
-        json(response, 200, { switched: true, status: await gitStatus(project.path) });
+        await gitHistory.mutate(project.path, async () => {
+          await runGit(project.path, body.create ? ['switch', '-c', branch] : ['switch', branch]);
+          await workspaceIndex.get(project, true);
+          json(response, 200, { switched: true, status: await gitStatus(project.path) });
+        });
         return;
       }
       if (gitSyncMatch && request.method === 'POST') {
@@ -539,20 +745,26 @@ function createLocalApi(options = {}) {
         const body = await readJsonBody(request, 16 * 1024);
         const operation = body.operation;
         if (!['fetch', 'pull', 'push'].includes(operation)) { json(response, 400, { code: 'LOCAL_GIT_SYNC_INVALID', message: '不支持的 Git 同步操作' }); return; }
-        const remote = body.remote == null || body.remote === '' ? null : validateGitRemote(body.remote);
-        const gitPolicy = await checkGitRemotePolicy(project.path, policyStatus(), operation, remote);
-        if (!gitPolicy.allowed) { json(response, 403, policyDenied(`当前企业策略不允许访问 Git 主机 ${gitPolicy.host}`)); return; }
+        const requestedRemote = body.remote == null || body.remote === '' ? null : validateGitRemote(body.remote);
+        await gitHistory.mutate(project.path, async () => {
         const currentStatus = await gitStatus(project.path);
+        const remote = await resolveGitRemote(project.path, operation, requestedRemote, currentStatus.branch, runGit);
+        if (remote?.startsWith('-')) { json(response, 400, { code: 'LOCAL_GIT_SYNC_INVALID', message: '远程仓库配置无效' }); return; }
+        const gitPolicy = await checkGitRemotePolicy(project.path, policyStatus(), operation, remote, runGit);
+        if (!gitPolicy.allowed) { json(response, 403, policyDenied(`当前企业策略不允许访问 Git 主机 ${gitPolicy.host}`)); return; }
         let args;
         if (operation === 'fetch') args = remote ? ['fetch', '--prune', remote] : ['fetch', '--all', '--prune'];
         else if (operation === 'pull') args = remote ? ['pull', '--ff-only', remote] : ['pull', '--ff-only'];
-        else if (currentStatus.upstream) args = ['push'];
+        else if (currentStatus.upstream && (!requestedRemote || currentStatus.upstream.startsWith(`${remote}/`))) args = ['push', remote];
         else {
           if (!remote) { json(response, 400, { code: 'LOCAL_GIT_REMOTE_REQUIRED', message: '当前分支没有上游，请选择远程仓库' }); return; }
+          if (!currentStatus.branch) { json(response, 409, { code: 'LOCAL_GIT_BRANCH_REQUIRED', message: '请先创建或切换到本地分支，再推送' }); return; }
           args = ['push', '--set-upstream', remote, currentStatus.branch];
         }
         const syncResult = await runGit(project.path, args, { timeout: 120_000 });
+        if (operation === 'pull') await workspaceIndex.get(project, true);
         json(response, 200, { operation, output: `${syncResult.stdout}\n${syncResult.stderr}`.trim(), status: await gitStatus(project.path) });
+        });
         return;
       }
       if (searchMatch && request.method === 'GET') {
@@ -569,12 +781,25 @@ function createLocalApi(options = {}) {
         json(response, 200, result);
         return;
       }
-      if (symbolsMatch && request.method === 'GET') {
+      if (symbolsMatch && ['GET', 'POST'].includes(request.method)) {
         const project = projects.get(symbolsMatch[1]);
         if (!project) { json(response, 404, { code: 'LOCAL_PROJECT_NOT_FOUND', message: '本地项目不存在或尚未打开' }); return; }
-        const query = (url.searchParams.get('query') || '').trim();
-        if (!query || query.length > 200) { json(response, 400, { code: 'LOCAL_SYMBOL_QUERY_INVALID', message: '符号搜索词长度应为 1～200 个字符' }); return; }
-        json(response, 200, searchWorkspaceSymbols(project.path, query));
+        const input = request.method === 'POST' ? await readJsonBody(request, 1024 * 1024) : {};
+        if (input.query !== undefined && typeof input.query !== 'string') { json(response, 400, { code: 'LOCAL_SYMBOL_QUERY_INVALID', message: '搜索内容无效' }); return; }
+        const query = (input.query ?? url.searchParams.get('query') ?? '').trim();
+        if (!query || query.length > 200 || query.includes('\0')) { json(response, 400, { code: 'LOCAL_SYMBOL_QUERY_INVALID', message: '符号搜索词长度应为 1～200 个字符' }); return; }
+        if (input.documents !== undefined && (!Array.isArray(input.documents) || input.documents.length > 20 || input.documents.some(document => !document || typeof document.path !== 'string' || typeof document.content !== 'string'))) { json(response, 400, { code: 'FAST_INDEX_OVERLAY_INVALID', message: '未保存代码内容无效' }); return; }
+        const documents = (input.documents || []).filter(document => document.path.endsWith('.java'));
+        const snapshot = await workspaceIndex.get(project);
+        if (!fastIndex) json(response, 200, await searchWorkspaceSymbols(project.path, query, snapshot.items, snapshot.truncated));
+        else {
+          const [java, other] = await Promise.all([
+            fastIndex.search(project, query, 200, documents),
+            searchWorkspaceSymbols(project.path, query, snapshot.items.filter(item => !/\.java$/i.test(item.path)), snapshot.truncated),
+          ]);
+          const matches = [...java.items, ...other.items];
+          json(response, 200, { ...java, items: matches.slice(0, 200), truncated: java.truncated || other.truncated || matches.length > 200, sourceTruncated: java.sourceTruncated || other.sourceTruncated, sourceFiles: java.sourceFiles + other.sourceFiles, nonJavaLimits: other.limits });
+        }
         return;
       }
       if (rawFileMatch && request.method === 'GET') {
@@ -600,11 +825,15 @@ function createLocalApi(options = {}) {
         if (!project) { json(response, 404, { code: 'LOCAL_PROJECT_NOT_FOUND', message: '本地项目不存在或尚未打开' }); return; }
         const file = resolveWorkspaceFile(project.path, url.searchParams.get('path'));
         const stat = fs.statSync(file); const descriptor = describeFile(file);
+        if (descriptor.kind !== 'text') {
+          json(response, 200, { path: path.relative(project.path, file).split(path.sep).join('/'), version: fileVersion(Buffer.from(`${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}`)), size: stat.size, ...descriptor, readOnly: true }); return;
+        }
+        if (stat.size > 2 * 1024 * 1024) { json(response, 413, { code: 'LOCAL_FILE_TOO_LARGE', message: '暂不支持编辑超过 2 MiB 的文本文件' }); return; }
         const content = fs.readFileSync(file);
         const metadata = { path: path.relative(project.path, file).split(path.sep).join('/'), version: fileVersion(content), size: content.length, ...descriptor };
         if (url.searchParams.get('metadata') === 'true' || descriptor.kind !== 'text') { json(response, 200, metadata); return; }
         if (stat.size > 2 * 1024 * 1024) { json(response, 413, { code: 'LOCAL_FILE_TOO_LARGE', message: '暂不支持编辑超过 2 MiB 的文本文件' }); return; }
-        json(response, 200, { ...metadata, content: content.toString('utf8') });
+        json(response, 200, { ...metadata, ...decodeText(content) });
         return;
       }
       if (contentMatch && request.method === 'PUT') {
@@ -615,16 +844,19 @@ function createLocalApi(options = {}) {
           json(response, 400, { code: 'LOCAL_FILE_INVALID', message: '文件路径或内容无效' }); return;
         }
         const file = resolveWorkspaceFile(project.path, body.path);
+        if (describeFile(file).kind !== 'text') { json(response, 400, { code: 'LOCAL_FILE_READ_ONLY', message: '此文件仅支持预览，不能作为文本保存' }); return; }
         const current = fs.readFileSync(file);
         if (fileVersion(current) !== body.expectedVersion) {
           json(response, 409, { code: 'LOCAL_FILE_CONFLICT', message: '文件已被其他程序修改，请重新加载后再编辑' }); return;
         }
         const temporary = `${file}.code-studio-${crypto.randomBytes(6).toString('hex')}.tmp`;
         const mode = fs.statSync(file).mode;
-        try { fs.writeFileSync(temporary, body.content, { encoding: 'utf8', mode }); fs.renameSync(temporary, file); }
+        const encoded = encodeText(body.content, textEncoding(current));
+        try { fs.writeFileSync(temporary, encoded, { mode }); fs.renameSync(temporary, file); }
         finally { if (fs.existsSync(temporary)) fs.unlinkSync(temporary); }
+        refreshFastIndex(project);
         await lspManager.saved(project, body.path);
-        json(response, 200, { saved: true, path: body.path, version: fileVersion(Buffer.from(body.content)) });
+        json(response, 200, { saved: true, path: body.path, version: fileVersion(encoded) });
         return;
       }
       json(response, 404, { code: 'LOCAL_API_NOT_FOUND', message: '本地接口不存在' });
@@ -632,7 +864,13 @@ function createLocalApi(options = {}) {
     }
     serveStatic(request, response, url.pathname, staticDir, token);
     } catch (error) {
-      const code = error?.code === 'PAYLOAD_TOO_LARGE' ? 413 : ['WORKSPACE_PATH_INVALID', 'LOCAL_PREVIEW_SCRIPT_INVALID', 'LOCAL_CONNECTOR_INVALID', 'LOCAL_LSP_REQUEST_INVALID'].includes(error?.code) ? 400 : ['LOCAL_AGENT_BUSY', 'LOCAL_PREVIEW_BUSY'].includes(error?.code) ? 409 : ['LOCAL_CREDENTIAL_STORE_UNAVAILABLE', 'LOCAL_LSP_UNAVAILABLE'].includes(error?.code) ? 503 : 500;
+      if (error?.code === 'FILE_TEXT_ENCODING_INVALID') { json(response, 400, { code: error.code, message: error.message }); return; }
+      if (error?.code === 'LOCAL_LSP_REFACTOR_UNSUPPORTED') {
+        json(response, 400, { code: error.code, message: error.message }); return;
+      }
+      if (error?.code === 'FAST_INDEX_OVERLAY_INVALID') { json(response, 400, { code: error.code, message: '未保存代码的路径或内容无效，请检查文件及编辑内容大小' }); return; }
+      if (typeof error?.code === 'string' && error.code.startsWith('FAST_INDEX_')) { json(response, 503, { code: error.code === 'FAST_INDEX_BUSY' ? 'FAST_INDEX_BUSY' : 'FAST_INDEX_UNAVAILABLE', message: error.code === 'FAST_INDEX_BUSY' ? '正在等待索引资源，请稍后重试' : '索引暂不可用，请稍后重试' }); return; }
+      const code = error?.code === 'PAYLOAD_TOO_LARGE' ? 413 : ['WORKSPACE_PATH_INVALID', 'LOCAL_PREVIEW_SCRIPT_INVALID', 'LOCAL_CONNECTOR_INVALID', 'LOCAL_LSP_REQUEST_INVALID'].includes(error?.code) ? 400 : ['LOCAL_AGENT_BUSY', 'LOCAL_PREVIEW_BUSY', 'LOCAL_GIT_ERROR'].includes(error?.code) ? 409 : ['LOCAL_CREDENTIAL_STORE_UNAVAILABLE', 'LOCAL_LSP_UNAVAILABLE'].includes(error?.code) ? 503 : 500;
       const filesystemMessage = ['EACCES', 'EPERM'].includes(error?.code) ? '没有权限读取该文件或目录' : error?.code === 'ENOENT' ? '文件或目录已不存在' : null;
       if (code === 500) console.error('[Local API]', request.method, request.url, error);
       json(response, code, { code: error?.code || 'LOCAL_API_ERROR', message: filesystemMessage || (code === 500 ? '本地操作失败，请查看客户端日志' : error.message) });
@@ -682,16 +920,34 @@ function createLocalApi(options = {}) {
           if (!['active', 'grace'].includes(status.state) || status.challengeNonce !== pending.nonce) throw new Error(status.error || '离线许可证签名或设备信息无效');
           store.setSetting(LICENSE_SETTING, file.token); store.deleteSetting(OFFLINE_CHALLENGE_SETTING); return { ...status, deviceId };
         },
-        close: async () => {
-          await agentRuntime?.shutdown();
-          await previewRuntime.shutdown();
-          await javaRuntime.shutdown();
-          await terminalRuntime.shutdown();
-          await lspManager.shutdown();
-          return new Promise((closeResolve, closeReject) => server.close((error) => {
-            try { store?.close(); } catch {}
-            error ? closeReject(error) : closeResolve();
-          }));
+        close: () => {
+          if (closePromise) return closePromise;
+          closing = true;
+          closePromise = (async () => {
+            const errors = [];
+            const phase = async (name, action) => {
+              const started = performance.now();
+              try { await action(); } catch (error) { errors.push(error); }
+              finally { try { options.onLifecycle?.({ component: 'local-api', event: name, durationMs: Math.round(performance.now() - started) }); } catch {} }
+            };
+            await Promise.all([
+              phase('agent-stopped', () => agentRuntime?.shutdown()),
+              phase('preview-stopped', () => previewRuntime.shutdown()),
+              phase('terminal-stopped', () => terminalRuntime.shutdown()),
+              phase('index-flushed', () => workspaceIndex.close()),
+              phase('fast-index-stopped', () => fastIndex?.close()),
+              phase('java-debug-stopped', () => javaRuntime.shutdown()),
+            ]);
+            await phase('language-services-stopped', () => lspManager.shutdown());
+            await phase('http-stopped', () => new Promise((resolve, reject) => {
+              const timer = setTimeout(() => server.closeAllConnections?.(), 5_000);
+              server.close((error) => { clearTimeout(timer); error ? reject(error) : resolve(); });
+              server.closeIdleConnections?.();
+            }));
+            await phase('store-closed', () => store?.close());
+            if (errors.length) throw new AggregateError(errors, '关闭部分运行时失败');
+          })();
+          return closePromise;
         },
       });
     });
@@ -740,33 +996,6 @@ function connectorHosts(config) {
   if (config.type === 'kafka') return config.settings.brokers.map((broker) => broker.startsWith('[') ? broker.slice(1, broker.indexOf(']')).toLowerCase() : broker.split(':')[0].toLowerCase());
   if (config.type === 'kubernetes') { try { return [new URL(config.settings.server).hostname.toLowerCase()]; } catch { return []; } }
   return [];
-}
-
-async function checkGitRemotePolicy(root, status, operation, requestedRemote) {
-  if (!status.enforcementRequired) return { allowed: true };
-  let remotes = requestedRemote ? [requestedRemote] : [];
-  if (!remotes.length && operation === 'fetch') {
-    const result = await runGit(root, ['remote']); remotes = result.stdout.split(/\r?\n/).map((item) => item.trim()).filter(Boolean);
-  }
-  if (!remotes.length) {
-    const upstream = await runGit(root, ['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{upstream}'], { allowFailure: true });
-    if (upstream.code === 0) remotes = [upstream.stdout.trim().split('/')[0]].filter(Boolean);
-  }
-  for (const remote of remotes) {
-    const result = await runGit(root, ['remote', 'get-url', '--all', remote], { allowFailure: true });
-    if (result.code !== 0) continue;
-    for (const value of result.stdout.split(/\r?\n/).map((item) => item.trim()).filter(Boolean)) {
-      const host = gitRemoteHost(value);
-      if (!status.policy.allowedGitHosts.includes(host)) return { allowed: false, host };
-    }
-  }
-  return { allowed: true };
-}
-
-function gitRemoteHost(value) {
-  if (/^(?:\.{0,2}\/|\/|[A-Za-z]:[\\/])/.test(value) || value.startsWith('file://')) return 'local';
-  try { const parsed = new URL(value); if (parsed.hostname) return parsed.hostname.toLowerCase(); } catch {}
-  const scp = value.match(/^(?:[^@\s]+@)?([^:\s/]+):/); return scp ? scp[1].toLowerCase() : 'local';
 }
 
 const LOCAL_MODEL_ENGINES = new Set(['codex-cli', 'claude-code', 'aider', 'openai-compatible', 'ollama']);
@@ -822,7 +1051,7 @@ async function controlRequest(source, pathname, options = {}) {
   try {
     const response = await fetch(`${origin}${pathname}`, { method: options.method || 'GET', signal: controller.signal, headers: { Accept: 'application/json', ...(options.body ? { 'Content-Type': 'application/json' } : {}), ...(options.token ? { Authorization: `Bearer ${options.token}` } : {}) }, body: options.body ? JSON.stringify(options.body) : undefined });
     const body = await response.json().catch(() => ({}));
-    if (!response.ok) throw Object.assign(new Error(Array.isArray(body.message) ? body.message.join('；') : body.message || `服务端返回 HTTP ${response.status}`), { code: response.status === 401 ? 'CONTROL_UNAUTHORIZED' : 'CONTROL_REQUEST_FAILED' });
+    if (!response.ok) throw Object.assign(new Error(Array.isArray(body.message) ? body.message.join('；') : body.message || `服务端返回 HTTP ${response.status}`), { code: response.status === 401 ? 'CONTROL_UNAUTHORIZED' : 'CONTROL_REQUEST_FAILED', status: response.status, remoteCode: typeof body.code === 'string' ? body.code : null });
     return body;
   } finally { clearTimeout(timer); }
 }
@@ -830,11 +1059,15 @@ async function controlRequest(source, pathname, options = {}) {
 async function authenticatedControlRequest(store, codec, source, pathname, options = {}) {
   const ciphertext = store?.getSetting(CONTROL_TOKEN_SETTING);
   if (!ciphertext) throw Object.assign(new Error('请先登录账号'), { code: 'LOCAL_ACCOUNT_REQUIRED' });
+  if (store.getSetting(CONTROL_ORIGIN_SETTING) !== resolveControlServerUrl(source)) throw Object.assign(new Error('服务地址已改变，请重新登录'), { code: 'LOCAL_ACCOUNT_REQUIRED' });
   if (!codec?.available?.()) throw new Error('系统凭据解密当前不可用');
   let token; try { token = codec.decrypt(ciphertext); } catch { throw Object.assign(new Error('登录凭据已失效，请重新登录'), { code: 'LOCAL_ACCOUNT_REQUIRED' }); }
   try { return await controlRequest(source, pathname, { ...options, token }); }
   catch (error) {
-    if (error?.code === 'CONTROL_UNAUTHORIZED') { store.deleteSetting(CONTROL_TOKEN_SETTING); store.deleteSetting(CONTROL_USER_SETTING); throw Object.assign(new Error('登录已过期，请重新登录'), { code: 'LOCAL_ACCOUNT_REQUIRED' }); }
+    if (error?.code === 'CONTROL_UNAUTHORIZED') {
+      if (store.getSetting(CONTROL_TOKEN_SETTING) !== ciphertext || (options.isCurrentSession && !options.isCurrentSession())) throw Object.assign(new Error('登录会话已改变，请刷新账户页'), { code: 'LOCAL_CONTROL_SESSION_CHANGED', status: 409 });
+      store.deleteSetting(CONTROL_TOKEN_SETTING); store.deleteSetting(CONTROL_USER_SETTING); store.deleteSetting(CONTROL_ORIGIN_SETTING); throw Object.assign(new Error('登录已过期，请重新登录'), { code: 'LOCAL_ACCOUNT_REQUIRED' });
+    }
     throw error;
   }
 }
@@ -971,55 +1204,8 @@ function consumeAgentWriteApproval(approvals, request, token) {
   return Boolean(approval && approval.fingerprint === agentApprovalFingerprint(request) && approval.expiresAt > Date.now());
 }
 
-const IMAGE_MIME = new Map([
-  ['.png', 'image/png'], ['.jpg', 'image/jpeg'], ['.jpeg', 'image/jpeg'], ['.gif', 'image/gif'],
-  ['.webp', 'image/webp'], ['.svg', 'image/svg+xml'], ['.bmp', 'image/bmp'], ['.ico', 'image/x-icon'],
-]);
-const TEXT_EXTENSIONS = new Set(['.txt', '.md', '.json', '.jsonc', '.js', '.jsx', '.ts', '.tsx', '.mjs', '.cjs', '.css', '.scss', '.less', '.html', '.htm', '.xml', '.yaml', '.yml', '.toml', '.ini', '.env', '.sh', '.bash', '.zsh', '.fish', '.py', '.java', '.kt', '.kts', '.go', '.rs', '.c', '.h', '.cpp', '.hpp', '.cs', '.sql', '.graphql', '.gql', '.vue', '.svelte', '.properties', '.gradle', '.gitignore', '.dockerfile']);
-
-function describeFile(file) {
-  const extension = path.extname(file).toLowerCase();
-  if (IMAGE_MIME.has(extension)) return { kind: 'image', mime: IMAGE_MIME.get(extension) };
-  if (extension === '.pdf') return { kind: 'pdf', mime: 'application/pdf' };
-  if (extension === '.xlsx' || extension === '.csv') return { kind: 'spreadsheet', mime: extension === '.csv' ? 'text/csv' : 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' };
-  if (extension === '.xls') return { kind: 'unsupported', mime: 'application/vnd.ms-excel', reason: '旧版 .xls 暂不支持，请另存为 .xlsx 或 .csv' };
-  if (TEXT_EXTENSIONS.has(extension) || !extension) return { kind: 'text', mime: 'text/plain; charset=utf-8' };
-  const sample = Buffer.alloc(8_192); let bytes = 0; const descriptor = fs.openSync(file, 'r');
-  try { bytes = fs.readSync(descriptor, sample, 0, sample.length, 0); } finally { fs.closeSync(descriptor); }
-  return sample.subarray(0, bytes).includes(0) ? { kind: 'unsupported', mime: 'application/octet-stream', reason: '该二进制格式暂不支持预览' } : { kind: 'text', mime: 'text/plain; charset=utf-8' };
-}
-
-async function readSpreadsheet(file) {
-  const workbook = new ExcelJS.Workbook();
-  if (path.extname(file).toLowerCase() === '.csv') await workbook.csv.readFile(file);
-  else await workbook.xlsx.readFile(file);
-  let truncated = workbook.worksheets.length > 20;
-  const sheets = workbook.worksheets.slice(0, 20).map((sheet) => {
-    const rows = [];
-    sheet.eachRow({ includeEmpty: true }, (row, rowNumber) => {
-      if (rowNumber > 500) { truncated = true; return; }
-      const values = [];
-      for (let column = 1; column <= Math.min(row.cellCount, 100); column += 1) values.push(spreadsheetCell(row.getCell(column).value));
-      if (row.cellCount > 100) truncated = true;
-      rows.push(values);
-    });
-    return { name: sheet.name, rows };
-  });
-  return { sheets, truncated, limits: { sheets: 20, rows: 500, columns: 100 } };
-}
-
-function spreadsheetCell(value) {
-  if (value == null) return '';
-  if (value instanceof Date) return value.toISOString();
-  if (typeof value === 'object') {
-    if ('result' in value) return spreadsheetCell(value.result);
-    if ('text' in value) return String(value.text).slice(0, 10_000);
-    if ('richText' in value) return value.richText.map((item) => item.text || '').join('').slice(0, 10_000);
-    if ('hyperlink' in value) return String(value.text || value.hyperlink).slice(0, 10_000);
-    return JSON.stringify(value).slice(0, 10_000);
-  }
-  return String(value).slice(0, 10_000);
-}
+const { describeFile, readSpreadsheet: parseSpreadsheet } = require("@codegen/code-intelligence/file-preview.cjs");
+const readSpreadsheet = file => parseSpreadsheet(file, new ExcelJS.Workbook());
 
 const IGNORED_DIRECTORIES = new Set(['.git', 'node_modules', 'dist', 'build', 'target', '.idea', '.vscode', '.venv', 'venv', '__pycache__']);
 
@@ -1055,20 +1241,30 @@ function listWorkspace(root) {
   return items;
 }
 
-function buildSourceIndex(root) {
+async function buildSourceIndex(root, entries, treeTruncated = false) {
   const allowed = /\.(?:[cm]?[jt]sx?|json|py|java|c|h|cc|cpp|cxx|hh|hpp|hxx|go|rs|vue)$/i;
-  const files = []; let totalBytes = 0; let truncated = false;
-  for (const entry of listWorkspace(root)) {
+  const files = []; let totalBytes = 0; let truncated = treeTruncated;
+  if (!entries) {
+    const scanner = new WorkspaceIndex();
+    try { const snapshot = await scanner.get({ id: root, path: root }); entries = snapshot.items; truncated ||= snapshot.truncated; }
+    finally { await scanner.close(); }
+  }
+  const canonicalRoot = await fs.promises.realpath(root);
+  for (const entry of entries) {
     if (entry.type !== 'file' || !allowed.test(entry.path)) continue;
     const file = path.join(root, entry.path);
     try {
-      const stat = fs.statSync(file);
+      const actual = await fs.promises.realpath(file);
+      if (!actual.startsWith(`${canonicalRoot}${path.sep}`)) continue;
+      const stat = await fs.promises.stat(actual);
       if (stat.size > SOURCE_INDEX_LIMITS.fileBytes) { truncated = true; continue; }
       if (files.length >= SOURCE_INDEX_LIMITS.files || totalBytes + stat.size > SOURCE_INDEX_LIMITS.totalBytes) { truncated = true; break; }
-      const content = fs.readFileSync(file);
-      if (content.includes(0)) continue;
-      files.push({ path: entry.path, content: content.toString('utf8') });
-      totalBytes += content.length;
+      const content = await fs.promises.readFile(actual);
+      let text; try { text = decodeText(content).content; } catch { truncated = true; continue; }
+      const textBytes = Buffer.byteLength(text, 'utf8');
+      if (totalBytes + textBytes > SOURCE_INDEX_LIMITS.totalBytes) { truncated = true; break; }
+      files.push({ path: entry.path, content: text });
+      totalBytes += textBytes;
     } catch (error) {
       if (!isSkippableFilesystemError(error)) throw error;
     }
@@ -1076,11 +1272,12 @@ function buildSourceIndex(root) {
   return { files, totalBytes, truncated, limits: SOURCE_INDEX_LIMITS };
 }
 
-function searchWorkspaceSymbols(root, query) {
+async function searchWorkspaceSymbols(root, query, entries, treeTruncated = false) {
   const needle = query.toLowerCase();
   const items = [];
   const declaration = /(?:^|\s)(?:export\s+)?(?:default\s+)?(?:async\s+)?(class|interface|type|enum|function|const|let|var)\s+([A-Za-z_$][\w$]*)/g;
-  for (const file of buildSourceIndex(root).files) {
+  const source = await buildSourceIndex(root, entries, treeTruncated);
+  for (const file of source.files) {
     const lines = file.content.split(/\r?\n/);
     for (let lineIndex = 0; lineIndex < lines.length && items.length < 200; lineIndex += 1) {
       declaration.lastIndex = 0;
@@ -1092,7 +1289,7 @@ function searchWorkspaceSymbols(root, query) {
     }
     if (items.length >= 200) break;
   }
-  return { items, truncated: items.length >= 200 };
+  return { items, truncated: items.length >= 200 || source.truncated, sourceTruncated: source.truncated, sourceFiles: source.files.length, sourceBytes: source.totalBytes, limits: source.limits };
 }
 
 function isSkippableFilesystemError(error) {
@@ -1113,7 +1310,7 @@ function validateRelativePath(root, value) {
 }
 
 async function gitStatus(root) {
-  const result = await runGit(root, ['-c', 'core.quotepath=false', 'status', '--porcelain=v1', '-z', '--branch'], { allowFailure: true });
+  const result = await runGit(root, ['-c', 'core.quotepath=false', 'status', '--porcelain=v1', '--untracked-files=all', '-z', '--branch', '--', '.'], { allowFailure: true });
   if (result.code !== 0) {
     const detail = `${result.stderr}\n${result.stdout}`;
     if (/not a git repository/i.test(detail)) return { repository: false, branch: null, ahead: 0, behind: 0, files: [] };
@@ -1122,17 +1319,23 @@ async function gitStatus(root) {
   const records = result.stdout.split('\0').filter(Boolean);
   const branchLine = records.shift() || '';
   const branchMatch = branchLine.match(/^## (.+?)(?:\.\.\.(.+?))?(?: \[ahead (\d+)(?:, behind (\d+))?\]| \[behind (\d+)\])?$/);
+  const symbolic = await runGit(root, ['symbolic-ref', '--quiet', '--short', 'HEAD'], { allowFailure: true });
+  const head = await runGit(root, ['rev-parse', '--verify', 'HEAD'], { allowFailure: true });
+  const prefix = (await runGit(root, ['rev-parse', '--show-prefix'])).stdout.replace(/\r?\n$/, '');
   const files = [];
   for (let index = 0; index < records.length; index += 1) {
     const record = records[index];
     const indexStatus = record[0]; const worktreeStatus = record[1];
     let filePath = record.slice(3); let originalPath;
     if (indexStatus === 'R' || indexStatus === 'C') { originalPath = records[++index]; }
-    files.push({ path: filePath, originalPath, indexStatus, worktreeStatus });
+    if (!filePath.startsWith(prefix)) continue;
+    files.push({ path: filePath.slice(prefix.length), originalPath: originalPath?.startsWith(prefix) ? originalPath.slice(prefix.length) : undefined, indexStatus, worktreeStatus });
   }
   return {
     repository: true,
-    branch: branchMatch?.[1] || branchLine.replace(/^## /, ''),
+    branch: symbolic.code === 0 ? symbolic.stdout.trim() : null,
+    head: head.code === 0 ? head.stdout.trim() : null,
+    detached: symbolic.code !== 0,
     upstream: branchMatch?.[2] || null,
     ahead: Number(branchMatch?.[3] || 0),
     behind: Number(branchMatch?.[4] || branchMatch?.[5] || 0),
@@ -1168,7 +1371,7 @@ async function validateBranchName(root, value) {
 }
 
 function validateGitRemote(value) {
-  if (typeof value !== 'string' || !/^[A-Za-z0-9._-]{1,100}$/.test(value)) {
+  if (typeof value !== 'string' || !/^(?!-)[A-Za-z0-9._-]{1,100}$/.test(value)) {
     const error = new Error('远程仓库名称无效'); error.code = 'WORKSPACE_PATH_INVALID'; throw error;
   }
   return value;
@@ -1222,7 +1425,7 @@ function resolveExistingWorkspaceEntry(root, relativePath) {
   return { absolute: realEntry, relativePath: safeRelativePath };
 }
 
-function readJsonBody(request, maximumBytes) {
+function readJsonBody(request, maximumBytes, allowEmpty = false) {
   return new Promise((resolve, reject) => {
     const chunks = []; let size = 0;
     request.on('data', (chunk) => {
@@ -1231,6 +1434,7 @@ function readJsonBody(request, maximumBytes) {
       else chunks.push(chunk);
     });
     request.on('end', () => {
+      if (allowEmpty && size === 0) { resolve({}); return; }
       try { resolve(JSON.parse(Buffer.concat(chunks).toString('utf8'))); } catch { const error = new Error('请求内容不是有效 JSON'); error.code = 'WORKSPACE_PATH_INVALID'; reject(error); }
     });
     request.on('error', reject);
@@ -1300,8 +1504,8 @@ function fallbackSearch(root, options) {
     const file = path.join(root, entry.path);
     if (fs.statSync(file).size > 1024 * 1024) continue;
     const content = fs.readFileSync(file);
-    if (content.includes(0)) continue;
-    const lines = content.toString('utf8').split(/\r?\n/);
+    let text; try { text = decodeText(content).content; } catch { continue; }
+    const lines = text.split(/\r?\n/);
     lines.forEach((line, index) => {
       if (items.length >= 200) return;
       const match = matcher ? (matcher.lastIndex = 0, matcher.exec(line)) : null;

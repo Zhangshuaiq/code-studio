@@ -18,6 +18,7 @@ import {
 import { useFeedback } from '../common/FeedbackProvider';
 import { Card, PageHeader, errText } from './ui';
 import { OrganizationInvitation } from './OrganizationInvitation';
+import { OrganizationMemberships } from './OrganizationMemberships';
 
 export function AccountPage() {
   const username = useAuth((state) => state.username);
@@ -86,6 +87,7 @@ export function AccountPage() {
 
       <div className="space-y-5">
         <OrganizationInvitation />
+        <OrganizationMemberships />
         <Card>
           <div className="flex items-center gap-4">
             <span className="grid h-12 w-12 place-items-center rounded-2xl bg-gradient-to-br from-indigo-500 to-violet-600 text-lg font-semibold text-white shadow-lg shadow-indigo-500/20">

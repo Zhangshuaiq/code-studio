@@ -1,8 +1,31 @@
 const { Client } = require('pg');
+const { isIP } = require('node:net');
 const mysql = require('mysql2/promise');
 const { Kafka, logLevel } = require('kafkajs');
 
 class LocalConnectorRuntime {
+  async metadata(config, secret = '', input = {}) {
+    if (!['postgres', 'mysql'].includes(config.type)) throw invalid('该连接不支持数据库结构浏览');
+    const action = input.action;
+    if (!['databases', 'tables', 'columns'].includes(action)) throw invalid('数据库结构操作无效');
+    const database = input.database === undefined ? config.settings.database : identifier(input.database, '数据库');
+    const connection = { ...config, settings: { ...config.settings, database } };
+    let result;
+    if (action === 'databases') result = await queryDatabase(connection, secret, config.type === 'postgres'
+      ? "SELECT datname AS name FROM pg_database WHERE NOT datistemplate AND datallowconn AND has_database_privilege(oid, 'CONNECT') ORDER BY datname"
+      : 'SELECT SCHEMA_NAME AS name FROM information_schema.SCHEMATA ORDER BY SCHEMA_NAME', true);
+    else if (action === 'tables') result = await queryDatabase(connection, secret, config.type === 'postgres'
+      ? "SELECT table_schema AS schema, table_name AS name, table_type AS type FROM information_schema.tables WHERE table_schema NOT IN ('pg_catalog', 'information_schema') ORDER BY table_schema, table_name"
+      : 'SELECT TABLE_SCHEMA AS `schema`, TABLE_NAME AS name, TABLE_TYPE AS type FROM information_schema.TABLES WHERE TABLE_SCHEMA = ? ORDER BY TABLE_NAME', true, config.type === 'mysql' ? [identifier(database, '数据库')] : []);
+    else {
+      const schema = identifier(input.schema || (config.type === 'postgres' ? 'public' : database), 'Schema');
+      const table = identifier(input.table, '表名');
+      result = await queryDatabase(connection, secret, config.type === 'postgres'
+        ? 'SELECT column_name AS name, data_type AS type, is_nullable AS nullable, column_default AS "default", ordinal_position AS position FROM information_schema.columns WHERE table_schema = $1 AND table_name = $2 ORDER BY ordinal_position'
+        : 'SELECT COLUMN_NAME AS name, COLUMN_TYPE AS type, IS_NULLABLE AS nullable, COLUMN_DEFAULT AS `default`, ORDINAL_POSITION AS position FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? ORDER BY ORDINAL_POSITION', true, [schema, table]);
+    }
+    return { items: result.rows, truncated: result.truncated };
+  }
   async test(config, secret = '') {
     const started = Date.now();
     if (config.type === 'postgres') await testPostgres(config.settings, secret);
@@ -14,14 +37,14 @@ class LocalConnectorRuntime {
   }
 
   async explore(config, secret = '', input = {}) {
-    if (config.type === 'postgres' || config.type === 'mysql') return queryDatabase(config, secret, input.sql, input.readOnly !== false);
+    if (config.type === 'postgres' || config.type === 'mysql') return queryDatabase(input.database === undefined ? config : { ...config, settings: { ...config.settings, database: identifier(input.database, '数据库') } }, secret, input.sql, input.readOnly !== false);
     if (config.type === 'kafka') return listKafkaTopics(config.settings, secret);
     if (config.type === 'kubernetes') return listKubernetesPods(config.settings, secret);
     throw invalid('该连接暂不支持浏览');
   }
 }
 
-async function queryDatabase(config, password, value, readOnly = true) {
+async function queryDatabase(config, password, value, readOnly = true, values = []) {
   const sql = String(value || '').trim();
   if (!sql || sql.length > 100_000) throw invalid('请输入 SQL，长度不能超过 100000 字符');
   if (readOnly && (!/^(select|with|show|describe|desc|explain)\b/i.test(sql) || /;\s*\S/.test(sql))) throw invalid('当前工作区仅允许执行单条只读查询');
@@ -30,7 +53,7 @@ async function queryDatabase(config, password, value, readOnly = true) {
     try {
       await client.connect();
       if (readOnly) await client.query('BEGIN READ ONLY');
-      const result = await client.query({ text: sql, queryMode: 'extended' });
+      const result = await client.query({ text: sql, values, queryMode: 'extended' });
       if (readOnly) await client.query('ROLLBACK');
       return databaseResult(result.fields, result.rows, { command: result.command, affectedRows: result.rowCount ?? 0 });
     } finally { await client.end().catch(() => {}); }
@@ -38,7 +61,7 @@ async function queryDatabase(config, password, value, readOnly = true) {
   const connection = await mysql.createConnection({ host: config.settings.host, port: config.settings.port, database: config.settings.database || undefined, user: config.settings.username, password: password || undefined, ssl: config.settings.ssl ? {} : undefined, connectTimeout: 5_000 });
   try {
     if (readOnly) { await connection.query('SET SESSION TRANSACTION READ ONLY'); await connection.beginTransaction(); }
-    const [rows, fields] = await connection.query(sql);
+    const [rows, fields] = await connection.query(sql, values);
     if (readOnly) await connection.rollback();
     return databaseResult(fields, Array.isArray(rows) ? rows : [], { affectedRows: Array.isArray(rows) ? rows.length : rows.affectedRows ?? 0, ...(rows.insertId ? { insertId: rows.insertId } : {}) });
   } finally { await connection.end(); }
@@ -97,10 +120,17 @@ function validateConnector(input, id) {
   }
   return { id, name, type, settings };
 }
-function hostname(value) { const result = text(value, 253); if (!result || /[\s/]/.test(result)) throw invalid('主机地址无效'); return result; }
+function hostname(value) {
+  let result = text(value, 253);
+  if (result.startsWith('[') && result.endsWith(']')) result = result.slice(1, -1);
+  if (!result || /[\s/]/.test(result)) throw invalid('主机地址无效，请填写 IP 或域名，不要填写连接 URL');
+  if (result.includes(':') && isIP(result) !== 6) throw invalid('主机地址不要包含端口，请分别填写主机和端口，例如主机 10.62.172.112、端口 5432');
+  return result;
+}
 function port(value, fallback) { const number = value === '' || value == null ? fallback : Number(value); if (!Number.isInteger(number) || number < 1 || number > 65535) throw invalid('端口无效'); return number; }
 function broker(value) { const match = value.match(/^([^:\s]+):(\d{1,5})$/); if (!match || Number(match[2]) > 65535) throw invalid(`Broker 地址无效：${value}`); return `${match[1]}:${Number(match[2])}`; }
 function text(value, limit) { return typeof value === 'string' ? value.trim().slice(0, limit) : ''; }
+function identifier(value, label) { if (typeof value !== 'string' || !value || value.length > 200 || value.includes('\0')) throw invalid(`${label}无效`); return value; }
 function invalid(message) { const error = new Error(message); error.code = 'LOCAL_CONNECTOR_INVALID'; return error; }
 
 module.exports = { LocalConnectorRuntime, validateConnector };

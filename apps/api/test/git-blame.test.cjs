@@ -1,0 +1,28 @@
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const os = require('node:os');
+const { execFileSync } = require('node:child_process');
+const { GitController } = require('../dist/git/git.controller');
+const { GitService } = require('../dist/git/git.service');
+const { ConfigService } = require('@nestjs/config');
+const { GitBlameDto } = require('../dist/git/dto/git-blame.dto');
+const { plainToInstance } = require('class-transformer');
+const { validate } = require('class-validator');
+test('web blame resolves only authorized project volumes and shares committed/draft attribution', async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'web-blame-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const git = (...args) => execFileSync('git', args, { cwd: root });
+  git('init', '-q'); git('config', 'user.name', 'WebAuthor'); git('config', 'user.email', 'web@example.test');
+  fs.writeFileSync(path.join(root, 'A.java'), 'class A {}\n'); git('add', '.'); git('-c', 'commit.gpgsign=false', 'commit', '-qm', 'web initial');
+  const controller = new GitController(new GitService(new ConfigService()), { projectVolume: async (user, session) => { if (user !== 'owner' || session !== 'session') throw Object.assign(new Error('Forbidden'), { status: 403 }); return { root }; } }, {}, {}, {});
+  const result = await controller.blame({ id: 'owner' }, 'session', { path: 'A.java' });
+  assert.equal(result.lines[0].author, 'WebAuthor');
+  const draft = await controller.blame({ id: 'owner' }, 'session', { path: 'A.java', content: 'class Changed {}\n' }); assert.equal(draft.lines[0].uncommitted, true);
+  await assert.rejects(controller.blame({ id: 'outsider' }, 'session', { path: 'A.java' }));
+  await assert.rejects(controller.blame({ id: 'owner' }, 'other-session', { path: 'A.java' }));
+  await assert.rejects(controller.blame({ id: 'owner' }, 'session', { path: '../escape' }), error => error.getStatus() === 400);
+  for (const value of [{}, { path: 1 }, { path: 'A.java', content: {} }, { path: 'A.java', command: 'bad' }]) assert.ok((await validate(plainToInstance(GitBlameDto, value), { whitelist: true, forbidNonWhitelisted: true })).length);
+  assert.equal(fs.readFileSync(path.join(root, 'A.java'), 'utf8'), 'class A {}\n');
+});

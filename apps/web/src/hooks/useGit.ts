@@ -1,6 +1,13 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../lib/api";
-import type { FileChange } from "./useSessionChanges";
+
+export interface GitHistoryChange { path: string; before: string; after: string; kind: string; oldPath?: string; fileType?: string }
+export interface GitHistoryTransport {
+  scope: string;
+  commits(offset: number, signal?: AbortSignal): Promise<Commit[]>;
+  diff(hash: string, signal?: AbortSignal): Promise<GitHistoryChange[]>;
+  rollback(hash: string): Promise<any>;
+}
 
 export interface Commit {
   hash: string;
@@ -11,21 +18,22 @@ export interface Commit {
   authorEmail: string;
 }
 
-export function useCommits(sessionId?: string) {
-  return useQuery<Commit[]>({
-    queryKey: ["commits", sessionId],
-    enabled: !!sessionId,
-    queryFn: async () =>
-      (await api.get(`/sessions/${sessionId}/git/commits`)).data,
+export function useCommits(sessionId?: string, transport?: GitHistoryTransport) {
+  const query = useInfiniteQuery({
+    queryKey: transport ? ['local-git', transport.scope, 'commits'] : ["commits", sessionId],
+    enabled: !!sessionId || !!transport,
+    initialPageParam: 0,
+    queryFn: async ({ pageParam, signal }): Promise<Commit[]> => transport ? transport.commits(pageParam, signal) : (await api.get(`/sessions/${sessionId}/git/commits`, { signal })).data,
+    getNextPageParam: (last, pages) => transport && last.length === 100 ? pages.length * 100 : undefined,
   });
+  return { ...query, data: query.data?.pages.flat() };
 }
 
-export function useCommitDiff(sessionId?: string, hash?: string) {
-  return useQuery<FileChange[]>({
-    queryKey: ["commit-diff", sessionId, hash],
-    enabled: !!sessionId && !!hash,
-    queryFn: async () =>
-      (await api.get(`/sessions/${sessionId}/git/commits/${hash}/diff`)).data,
+export function useCommitDiff(sessionId?: string, hash?: string, transport?: GitHistoryTransport) {
+  return useQuery<GitHistoryChange[]>({
+    queryKey: transport ? ['local-git', transport.scope, 'commit-diff', hash] : ["commit-diff", sessionId, hash],
+    enabled: (!!sessionId || !!transport) && !!hash,
+    queryFn: async ({ signal }) => transport ? transport.diff(hash!, signal) : (await api.get(`/sessions/${sessionId}/git/commits/${hash}/diff`, { signal })).data,
   });
 }
 
@@ -347,12 +355,12 @@ export function usePush(sessionId?: string) {
   });
 }
 
-export function useRollback(sessionId?: string) {
+export function useRollback(sessionId?: string, transport?: GitHistoryTransport) {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (hash: string) =>
-      api.post(`/sessions/${sessionId}/git/rollback/${hash}`),
+    mutationFn: (hash: string) => transport ? transport.rollback(hash) : api.post(`/sessions/${sessionId}/git/rollback/${hash}`),
     onSuccess: () => {
+      if (transport) qc.invalidateQueries({ queryKey: ['local-git', transport.scope] });
       // 回滚后代码/预览/历史都变了，全部刷新
       for (const key of ["files", "file", "changes", "commits", "preview"]) {
         qc.invalidateQueries({ queryKey: [key, sessionId] });

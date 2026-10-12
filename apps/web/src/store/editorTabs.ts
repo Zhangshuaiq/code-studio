@@ -1,10 +1,15 @@
 import { create } from 'zustand';
+import { appendNavigation, restoreNavigation, type EditorLocation } from '../lib/editor-navigation';
 
 interface TabState {
   openFiles: string[]; // 打开的文件路径列表
   activeFile: string | undefined; // 当前激活的文件
   drafts: Record<string, EditorDraft>; // 跨标签/页面保留的未保存草稿
   navigation?: { path: string; line: number; column: number };
+  navigationHistory: EditorLocation[];
+  navigationHistoryIndex: number;
+  jumpToLocation: (from: EditorLocation, target: EditorLocation) => void;
+  restoreHistory: (index: number, current?: EditorLocation) => void;
   openFile: (path: string, line?: number, column?: number) => void; // 打开文件（如果已打开则切换）
   clearNavigation: () => void;
   closeFile: (path: string) => void; // 关闭文件
@@ -27,6 +32,29 @@ export const useEditorTabs = create<TabState>((set) => ({
   openFiles: [],
   activeFile: undefined,
   drafts: {},
+  navigationHistory: [],
+  navigationHistoryIndex: -1,
+
+  jumpToLocation: (from, target) => set((state) => {
+    const history = appendNavigation({ entries: state.navigationHistory, index: state.navigationHistoryIndex }, from, target);
+    return {
+      navigationHistory: history.entries, navigationHistoryIndex: history.index,
+      openFiles: state.openFiles.includes(target.path) ? state.openFiles : [...state.openFiles, target.path],
+      activeFile: target.path, navigation: target,
+    };
+  }),
+
+  restoreHistory: (index, current) => set((state) => {
+    const before = { entries: state.navigationHistory, index: state.navigationHistoryIndex };
+    const history = restoreNavigation(before, index, current);
+    if (history === before) return state;
+    const target = history.entries[index];
+    return {
+      navigationHistory: history.entries, navigationHistoryIndex: history.index,
+      openFiles: state.openFiles.includes(target.path) ? state.openFiles : [...state.openFiles, target.path],
+      activeFile: target.path, navigation: target,
+    };
+  }),
 
   openFile: (path: string, line?: number, column?: number) =>
     set((state) => {
@@ -74,7 +102,7 @@ export const useEditorTabs = create<TabState>((set) => ({
     set({ activeFile: path }),
 
   closeAllFiles: () =>
-    set({ openFiles: [], activeFile: undefined, drafts: {}, navigation: undefined }),
+    set({ openFiles: [], activeFile: undefined, drafts: {}, navigation: undefined, navigationHistory: [], navigationHistoryIndex: -1 }),
 
   closeOtherFiles: (path: string) =>
     set({ openFiles: [path], activeFile: path, navigation: undefined }),
@@ -137,6 +165,6 @@ export const useEditorTabs = create<TabState>((set) => ({
         state.activeFile && valid.has(state.activeFile)
           ? state.activeFile
           : openFiles[0];
-      return { openFiles, activeFile, drafts: {}, navigation: undefined };
+      return { openFiles, activeFile, drafts: {}, navigation: undefined, navigationHistory: [], navigationHistoryIndex: -1 };
     }),
 }));

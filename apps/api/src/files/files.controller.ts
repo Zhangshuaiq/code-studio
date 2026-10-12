@@ -50,6 +50,24 @@ export class FilesController {
     return this.files.read(user.id, sessionId, path);
   }
 
+  /** 鉴权后读取受限图片/PDF，供浏览器创建短生命周期 Blob URL。 */
+  @Get('preview')
+  async preview(@CurrentUser() user: AuthUser, @Param('id') sessionId: string, @Query('path') path: string, @Res() res: Response) {
+    const file = await this.files.preview(user.id, sessionId, path);
+    res.setHeader('Content-Type', file.mime);
+    res.setHeader('Content-Length', file.content.length);
+    res.setHeader('Content-Disposition', `inline; filename*=UTF-8''${encodeURIComponent(file.path.split('/').pop() || 'file')}`);
+    res.setHeader('Cache-Control', 'no-store');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Content-Security-Policy', "sandbox; default-src 'none'");
+    res.send(file.content);
+  }
+
+  @Get('spreadsheet')
+  spreadsheet(@CurrentUser() user: AuthUser, @Param('id') sessionId: string, @Query('path') path: string) {
+    return this.files.spreadsheet(user.id, sessionId, path);
+  }
+
   /** 为浏览器语言服务加载受限源码模型，不包含依赖、隐藏文件或大文件。 */
   @Get('index')
   index(@CurrentUser() user: AuthUser, @Param('id') sessionId: string) {
@@ -110,6 +128,6 @@ export class FilesController {
     @Param('id') sessionId: string,
     @Body() dto: WriteFileDto,
   ) {
-    return this.files.write(user.id, sessionId, dto.path, dto.content);
+    return this.files.write(user.id, sessionId, dto.path, dto.content, dto.expectedVersion);
   }
 }

@@ -4,11 +4,13 @@ import {
   Database,
   LoaderCircle,
   Network,
+  Pencil,
   Plus,
   TestTube2,
   Trash2,
 } from "lucide-react";
 import { Select } from "../common/Select";
+import { DesktopDatabaseDetail } from './DesktopDatabaseDetail';
 
 export type ConnectorType = "postgres" | "mysql" | "kafka" | "kubernetes";
 interface Connector {
@@ -17,6 +19,7 @@ interface Connector {
   type: ConnectorType;
   settings: Record<string, any>;
   hasCredential: boolean;
+  updatedAt?: string;
 }
 const TYPES: Array<{ value: ConnectorType; label: string }> = [
   { value: "postgres", label: "PostgreSQL" },
@@ -40,6 +43,8 @@ export function DesktopConnectors({
 }) {
   const [items, setItems] = useState<Connector[]>([]);
   const [showForm, setShowForm] = useState(false);
+  const [editingId, setEditingId] = useState<string>();
+  const [detailId, setDetailId] = useState<string>();
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
   const [result, setResult] = useState<Record<string, string>>({});
@@ -82,6 +87,11 @@ export function DesktopConnectors({
         type === "postgres" ? "5432" : type === "mysql" ? "3306" : current.port,
     }));
   }
+  function edit(item: Connector) {
+    const settings = item.settings;
+    setEditingId(item.id); setError(''); setShowForm(true);
+    setForm({ name: item.name, type: item.type, host: settings.host || '127.0.0.1', port: String(settings.port || (item.type === 'mysql' ? 3306 : 5432)), database: settings.database || '', username: settings.username || '', secret: '', brokers: (settings.brokers || []).join(','), clientId: settings.clientId || 'code-studio', server: settings.server || 'https://127.0.0.1:6443', namespace: settings.namespace || 'default', ssl: Boolean(settings.ssl) });
+  }
   async function save() {
     setBusy("save");
     setError("");
@@ -103,8 +113,8 @@ export function DesktopConnectors({
               ssl: form.ssl,
             };
     try {
-      const response = await fetch("/api/local/connectors", {
-        method: "POST",
+      const response = await fetch(editingId ? `/api/local/connectors/${editingId}` : '/api/local/connectors', {
+        method: editingId ? 'PUT' : 'POST',
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           name: form.name,
@@ -116,7 +126,12 @@ export function DesktopConnectors({
       const body = await response.json();
       if (!response.ok) throw new Error(body.message);
       await load();
+      if (editingId) {
+        setResult((current) => { const next = { ...current }; delete next[editingId]; return next; });
+        if (active === editingId) { setActive(undefined); setExplorer(undefined); }
+      }
       setShowForm(false);
+      setEditingId(undefined);
       setForm((current) => ({ ...current, name: "", secret: "" }));
     } catch (reason: any) {
       setError(String(reason?.message || reason));
@@ -164,6 +179,8 @@ export function DesktopConnectors({
       setBusy("");
     }
   }
+  const detail = items.find((item) => item.id === detailId);
+  if (detail && !showForm && (detail.type === 'postgres' || detail.type === 'mysql')) return <DesktopDatabaseDetail key={`${detail.id}:${detail.updatedAt}`} connector={{ ...detail, type: detail.type }} onBack={() => setDetailId(undefined)} onEdit={() => edit(detail)} />;
   const content = (
     <div
       className={
@@ -179,7 +196,11 @@ export function DesktopConnectors({
         </div>
         <button
           className="btn btn-primary btn-sm mr-2"
-          onClick={() => setShowForm((value) => !value)}
+          disabled={Boolean(busy)}
+          onClick={() => {
+            setError(''); setEditingId(undefined); setShowForm(!showForm);
+            if (!showForm) setForm((current) => ({ ...current, name: '', secret: '' }));
+          }}
         >
           {showForm ? (
             "取消"
@@ -201,6 +222,8 @@ export function DesktopConnectors({
       >
         {showForm && (
           <section className="rounded-2xl border border-slate-200 p-5 dark:border-slate-700">
+            <p className="mb-3 text-sm font-medium">{editingId ? '编辑连接' : '新建连接'}</p>
+            {editingId && <p className="mb-3 text-[11px] text-slate-500">密码或令牌留空将保留原有凭据，不会清除。</p>}
             <div className="grid gap-3 sm:grid-cols-2">
               <Field
                 label="连接名称"
@@ -214,6 +237,7 @@ export function DesktopConnectors({
                 <Select
                   className="w-full"
                   value={form.type}
+                  disabled={Boolean(editingId) || Boolean(busy)}
                   onChange={(value) => changeType(value as ConnectorType)}
                   options={TYPES.filter((item) => types.includes(item.value)).map((item) => ({ value: item.value, label: item.label }))}
                 />
@@ -278,7 +302,7 @@ export function DesktopConnectors({
               ) : (
                 <>
                   <Field
-                    label="主机"
+                    label="主机（IP / 域名，不含端口）"
                     value={form.host}
                     onChange={(value) =>
                       setForm((current) => ({ ...current, host: value }))
@@ -337,9 +361,9 @@ export function DesktopConnectors({
               {busy === "save" ? (
                 <LoaderCircle size={14} className="animate-spin" />
               ) : (
-                <Plus size={14} />
+                editingId ? <Pencil size={14} /> : <Plus size={14} />
               )}
-              保存连接
+              {editingId ? '保存修改' : '保存连接'}
             </button>
             {error && <p className="mt-2 text-xs text-red-500">{error}</p>}
           </section>
@@ -358,7 +382,7 @@ export function DesktopConnectors({
                     <Database size={16} className="text-indigo-500" />
                   )}
                   <div className="min-w-0 flex-1">
-                    <div className="text-sm font-medium">{item.name}</div>
+                    <button className="text-left text-sm font-medium hover:text-indigo-500" onClick={() => { if (item.type === 'postgres' || item.type === 'mysql') setDetailId(item.id); else void explore(item); }}>{item.name}</button>
                     <div className="truncate text-[10px] text-slate-400">
                       {TYPES.find((type) => type.value === item.type)?.label}
                       {item.hasCredential ? " · 凭据已保护" : ""}
@@ -371,6 +395,7 @@ export function DesktopConnectors({
                       </div>
                     )}
                   </div>
+                  <button className="btn btn-ghost btn-sm" disabled={Boolean(busy)} onClick={() => edit(item)} aria-label={`编辑连接 ${item.name}`}><Pencil size={13} />编辑</button>
                   <button
                     className="btn btn-ghost btn-sm"
                     disabled={busy === item.id}
@@ -387,13 +412,12 @@ export function DesktopConnectors({
                     className="btn btn-ghost btn-sm"
                     disabled={Boolean(busy)}
                     onClick={() => {
+                      if (item.type === 'postgres' || item.type === 'mysql') { setDetailId(item.id); return; }
                       if (active === item.id) {
                         setActive(undefined);
                         return;
                       }
-                      if (item.type === 'postgres' || item.type === 'mysql') {
-                        setActive(item.id); setExplorer(undefined); setSql('SELECT 1');
-                      } else void explore(item);
+                      void explore(item);
                     }}
                   >
                     {busy === `explore:${item.id}` ? (
@@ -405,10 +429,11 @@ export function DesktopConnectors({
                         ? "Topics"
                         : item.type === "kubernetes"
                           ? "Pods"
-                          : "查询"}
+                          : "详情"}
                   </button>
                   <button
                     className="icon-btn text-red-500"
+                    disabled={Boolean(busy)}
                     onClick={() => void remove(item)}
                   >
                     <Trash2 size={14} />

@@ -196,7 +196,7 @@ model OrganizationMember {
   organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   userId         String
   user           User         @relation(fields: [userId], references: [id], onDelete: Cascade)
-  role           String       @default("member") // owner | admin | member
+  role           String       @default("member") // owner | admin | auditor (read-only audit) | member
   status         String       @default("active") // active | suspended
   createdAt      DateTime     @default(now())
 
@@ -209,7 +209,7 @@ model OrganizationInvitation {
   organizationId String
   organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   email          String
-  role           String       @default("member") // admin | member
+  role           String       @default("member") // admin | auditor | member
   tokenHash      String       @unique
   status         String       @default("pending") // pending | accepted | revoked
   invitedById    String

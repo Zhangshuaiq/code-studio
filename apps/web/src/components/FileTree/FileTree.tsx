@@ -1,14 +1,20 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { WorkspaceFileIcon } from '../CodeEditor/WorkspaceFileIcon';
 import {
   ChevronRight,
-  FileCode2,
   Files,
   Folder,
   FolderOpen,
   Search,
   X,
 } from "lucide-react";
-import { useSessionFiles, useWorkspaceSearch } from "../../hooks/useSessionFiles";
+import { isFastIndexLoading, useSessionFiles, useWorkspaceSearch, useWorkspaceFastSymbols, useWorkspaceFastIndexStatus } from "../../hooks/useSessionFiles";
+import { fetchWorkspaceFile, type WorkspaceSearchResult } from '../../hooks/useSessionFiles';
+import { useQueryClient } from '@tanstack/react-query';
+import { useEditorTabs } from '../../store/editorTabs';
+import { api } from '../../lib/api';
+import { verifyFastSymbolTarget, staleFastSymbol, type FastSymbolTarget } from '../../lib/fast-symbol-target';
+import { buildWorkspaceFileTree } from '../../lib/workspace-file-tree';
 
 interface TreeNode {
   name: string;
@@ -19,30 +25,7 @@ interface TreeNode {
 
 // 把 ["src/App.jsx","package.json"] 这类相对路径列表构造成嵌套树
 function buildTree(paths: string[]): TreeNode[] {
-  const root: TreeNode = { name: "", path: "", isDir: true, children: [] };
-  for (const p of paths) {
-    const parts = p.split("/");
-    let cur = root;
-    parts.forEach((part, i) => {
-      const isLeaf = i === parts.length - 1;
-      const path = parts.slice(0, i + 1).join("/");
-      let next = cur.children.find((c) => c.name === part);
-      if (!next) {
-        next = { name: part, path, isDir: !isLeaf, children: [] };
-        cur.children.push(next);
-      }
-      cur = next;
-    });
-  }
-  const sortRec = (n: TreeNode) => {
-    // 文件夹在前，各自按名排序
-    n.children.sort((a, b) =>
-      a.isDir === b.isDir ? a.name.localeCompare(b.name) : a.isDir ? -1 : 1,
-    );
-    n.children.forEach(sortRec);
-  };
-  sortRec(root);
-  return root.children;
+  return buildWorkspaceFileTree(paths);
 }
 
 export function FileTree({
@@ -59,6 +42,12 @@ export function FileTree({
   const { data: paths = [], isLoading, isError } = useSessionFiles(sessionId);
   const [searchInput, setSearchInput] = useState("");
   const [searchQuery, setSearchQuery] = useState("");
+  const [targetNotice, setTargetNotice] = useState('');
+  const queryClient = useQueryClient();
+  const targetSequence = useRef(0);
+  const context = useRef({ sessionId, selected, searchInput });
+  context.current = { sessionId, selected, searchInput };
+  useEffect(() => { setTargetNotice(''); return () => { targetSequence.current++; }; }, [sessionId, selected, searchInput]);
   const searchInputRef = useRef<HTMLInputElement>(null);
   useEffect(() => {
     const timer = window.setTimeout(
@@ -78,16 +67,56 @@ export function FileTree({
     window.addEventListener("keydown", focusGlobalSearch);
     return () => window.removeEventListener("keydown", focusGlobalSearch);
   }, []);
-  const search = useWorkspaceSearch(sessionId, searchQuery);
+  const symbolMode = searchQuery.startsWith('@');
+  const textSearch = useWorkspaceSearch(sessionId, symbolMode ? '' : searchQuery);
+  const symbolSearch = useWorkspaceFastSymbols(sessionId, symbolMode ? searchQuery.slice(1).trim() : '');
+  const search = symbolMode ? symbolSearch : textSearch;
+  const fastStatus = useWorkspaceFastIndexStatus(sessionId, paths.some(path => /\.java$/i.test(path)));
+  const indexLoading = isFastIndexLoading(symbolMode ? symbolSearch.data?.index ?? fastStatus.data?.index : fastStatus.data?.index);
+  const indexBusy = symbolMode && (symbolSearch.error as any)?.response?.data?.code === 'FAST_INDEX_BUSY';
   const tree = useMemo(() => buildTree(paths), [paths]);
 
   // 用项目名作为根节点，文件从根目录展示
-  const root: TreeNode = {
+  const root: TreeNode = useMemo(() => ({
     name: rootName,
     path: "",
     isDir: true,
     children: tree,
-  };
+  }), [rootName, tree]);
+
+  async function openSearchResult(item: WorkspaceSearchResult) {
+    if (!symbolMode) { onSelect?.(item.path, item.line, item.column); return; }
+    if (!sessionId) return;
+    const sequence = ++targetSequence.current;
+    const origin = context.current;
+    const current = () => sequence === targetSequence.current && context.current.sessionId === origin.sessionId && context.current.selected === origin.selected && context.current.searchInput === origin.searchInput;
+    const drafts = useEditorTabs.getState().drafts;
+    setTargetNotice('正在确认代码位置…');
+    try {
+      // Read through the authorized API even for an overlay; this also refreshes
+      // an unopened target and avoids displaying an old React Query file cache.
+      const file = await fetchWorkspaceFile(sessionId, item.path);
+      if (!current()) return;
+      const draft = drafts[item.path];
+      const content = draft && draft.content !== draft.baseline ? draft.content : file.content;
+      await verifyFastSymbolTarget(item as FastSymbolTarget, content);
+      if (!current()) return;
+      if (useEditorTabs.getState().drafts !== drafts) throw staleFastSymbol();
+      queryClient.setQueryData(['file', sessionId, item.path], file);
+      useEditorTabs.getState().syncDraft(item.path, file.content);
+      setTargetNotice('');
+      onSelect?.(item.path, item.line, item.column);
+    } catch (error: any) {
+      if (!current()) return;
+      if (error.code === 'FAST_SYMBOL_STALE' || error.response?.status === 404) {
+        setTargetNotice('代码已变化，正在更新搜索结果…');
+        try {
+          await api.post(`/sessions/${sessionId}/language/index-refresh`, {});
+          if (current()) { await symbolSearch.refetch(); if (current()) setTargetNotice('代码已变化，请从更新后的结果打开'); }
+        } catch { if (current()) setTargetNotice('代码已变化，请稍后重新搜索'); }
+      } else setTargetNotice(error.response?.data?.message || '暂时无法确认代码位置，请稍后重试');
+    }
+  }
 
   return (
     <div className="h-full overflow-y-auto bg-slate-50/80 text-sm dark:bg-slate-950/35">
@@ -100,6 +129,7 @@ export function FileTree({
           </span>
         )}
       </div>
+      {targetNotice && <p role="status" className="px-3 py-2 text-[10px] text-muted">{targetNotice}</p>}
       <div className="relative border-b border-slate-200/80 p-2 dark:border-slate-800">
         <Search size={13} className="absolute left-4 top-4 text-slate-400" />
         <input
@@ -107,7 +137,7 @@ export function FileTree({
           className="input h-8 w-full pl-8 pr-8 text-xs"
           value={searchInput}
           onChange={(event) => setSearchInput(event.target.value)}
-          placeholder="搜索文件或代码…"
+          placeholder="搜索文件或代码，@ 搜索 Java 符号…"
           title="全局搜索 (⌘/Ctrl+Shift+F)"
         />
         {searchInput && (
@@ -120,17 +150,18 @@ export function FileTree({
           </button>
         )}
       </div>
+      {(indexLoading || indexBusy) && <div className="border-b border-slate-200/80 px-3 py-2 text-[10px] text-muted dark:border-slate-800" role="status"><span>{indexBusy ? '正在等待索引资源…' : `正在更新代码索引${fastStatus.data?.index.files ? ` · ${fastStatus.data.index.files} 个文件` : ''}…`}</span><div className="mt-1 h-0.5 overflow-hidden rounded bg-indigo-100 dark:bg-indigo-950"><div className="h-full w-1/3 animate-pulse bg-indigo-400" /></div></div>}
       {searchQuery ? (
         <div className="py-1">
           {search.isLoading ? (
             <p className="p-4 text-xs text-muted">正在搜索…</p>
-          ) : search.isError ? (
+          ) : search.isError && !indexBusy ? (
             <p className="p-4 text-xs text-red-500">搜索失败，请稍后重试</p>
           ) : (
             (search.data?.items ?? []).map((item, index) => (
               <button
                 key={`${item.path}:${item.line}:${index}`}
-                onClick={() => onSelect?.(item.path, item.line, item.column)}
+                onClick={() => void openSearchResult(item)}
                 className="block w-full border-b px-3 py-2 text-left text-xs hover:bg-indigo-50 dark:border-slate-800 dark:hover:bg-indigo-500/10"
               >
                 <span className="block truncate font-medium" title={item.path}>
@@ -142,12 +173,12 @@ export function FileTree({
               </button>
             ))
           )}
-          {!search.isLoading && !search.isError && !search.data?.items.length && (
+          {!search.isLoading && !search.isError && !indexLoading && !search.data?.items.length && (
             <p className="p-6 text-center text-xs text-muted">没有匹配结果</p>
           )}
           {search.data?.truncated && (
             <p className="p-2 text-center text-[10px] text-amber-600">
-              结果已达到扫描上限，请缩小关键词
+              {symbolMode && indexLoading ? '索引更新中，先展示已有匹配结果' : symbolMode && symbolSearch.data?.overlayTruncated ? '未保存代码索引未完整，请保存文件后重试' : symbolMode && symbolSearch.data?.sourceTruncated ? '部分文件尚未完成索引' : '结果较多，请缩小关键词'}
             </p>
           )}
         </div>
@@ -241,7 +272,7 @@ function TreeItem({
         }`}
       >
         <span className="w-[13px] shrink-0" />
-        <FileCode2
+        <WorkspaceFileIcon path={node.path}
           size={13}
           className={active ? "text-indigo-500" : "text-slate-400"}
         />

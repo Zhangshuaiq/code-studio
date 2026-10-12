@@ -1,8 +1,10 @@
 import { useState } from 'react';
+import { useQueryClient } from '@tanstack/react-query';
 import { api } from '../../lib/api';
 import { Card, errText } from './ui';
 
 export function OrganizationInvitation({ desktop = false }: { desktop?: boolean }) {
+  const qc = useQueryClient();
   const [token, setToken] = useState('');
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState('');
@@ -14,6 +16,7 @@ export function OrganizationInvitation({ desktop = false }: { desktop?: boolean 
         ? await fetch(endpoint, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token: token.trim() }) }).then(async (response) => { const body = await response.json(); if (!response.ok) throw new Error(body.message); return body; })
         : (await api.post(endpoint, { token: token.trim() })).data;
       setToken(''); setMessage(`已加入 ${result.organization.name}`);
+      await qc.invalidateQueries({ queryKey: ['my-organizations'] });
     } catch (error) { setMessage(errText(error)); }
     finally { setBusy(false); }
   }

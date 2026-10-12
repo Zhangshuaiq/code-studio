@@ -1,0 +1,20 @@
+{
+  "name": "@codegen/code-intelligence",
+  "version": "0.1.0",
+  "private": true,
+  "main": "local-lsp-manager.cjs",
+  "scripts": {
+    "prepare-language-servers": "node scripts/install-jdtls.cjs && node scripts/install-java-tools.cjs"
+  },
+  "dependencies": {
+    "@vue/language-server": "^2.2.12",
+    "pyright": "^1.1.414",
+    "tar": "^7.5.22",
+    "tree-sitter-java": "0.23.5",
+    "typescript": "^5.9.3",
+    "typescript-language-server": "^5.3.0",
+    "vscode-jsonrpc": "^8.2.1",
+    "web-tree-sitter": "0.27.1",
+    "yauzl": "^3.4.0"
+  }
+}

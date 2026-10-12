@@ -3,11 +3,22 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { createLocalApi } = require('./local-api.cjs');
+const { installGracefulQuit } = require('./graceful-lifecycle.cjs');
 
 const DEFAULT_SERVER_URL = process.env.CODEGEN_SERVER_URL || '';
 let mainWindow;
 let settingsWindow;
 let localApi;
+const bootStarted = performance.now();
+function lifecycle(event) {
+  try {
+    const directory = path.join(app.getPath('userData'), 'logs');
+    fs.mkdirSync(directory, { recursive: true });
+    const file = path.join(directory, 'lifecycle.jsonl');
+    if (fs.existsSync(file) && fs.statSync(file).size > 1024 * 1024) fs.renameSync(file, `${file}.previous`);
+    fs.appendFileSync(file, `${JSON.stringify({ timestamp: new Date().toISOString(), ...event })}\n`, { mode: 0o600 });
+  } catch {}
+}
 
 function augmentDesktopPath() {
   const candidates = [
@@ -66,7 +77,7 @@ function createMainWindow(serverUrl) {
     webPreferences: { preload: path.join(__dirname, 'preload.cjs'), contextIsolation: true, nodeIntegration: false, sandbox: true },
   });
   mainWindow = window;
-  window.once('ready-to-show', () => window.show());
+  window.once('ready-to-show', () => { lifecycle({ component: 'desktop', event: 'window-ready', elapsedMs: Math.round(performance.now() - bootStarted) }); window.show(); });
   window.webContents.setWindowOpenHandler(({ url }) => {
     if (isAllowedNavigation(url, serverUrl)) return { action: 'allow' };
     openExternalUrl(url);
@@ -165,11 +176,13 @@ ipcMain.handle('runtime:open-directory', async (event) => {
 });
 
 app.whenReady().then(async () => {
+  lifecycle({ component: 'desktop', event: 'electron-ready', elapsedMs: Math.round(performance.now() - bootStarted) });
   augmentDesktopPath();
   localApi = await createLocalApi({
     staticDir: path.join(__dirname, '..', 'renderer'),
     storePath: path.join(app.getPath('userData'), 'code-studio.sqlite3'),
     lspDataRoot: path.join(app.getPath('userData'), 'language-data'),
+    onLifecycle: lifecycle,
     credentialCodec: {
       available: () => safeStorage.isEncryptionAvailable(),
       encrypt: (value) => safeStorage.encryptString(value).toString('base64'),
@@ -180,6 +193,7 @@ app.whenReady().then(async () => {
     policyPublicKey: process.env.CODE_STUDIO_POLICY_PUBLIC_KEY?.replace(/\\n/g, '\n'),
     appVersion: app.getVersion(),
   });
+  lifecycle({ component: 'desktop', event: 'api-ready', elapsedMs: Math.round(performance.now() - bootStarted) });
   installMenu();
   createMainWindow(localApi.origin);
   app.on('activate', () => {
@@ -187,8 +201,18 @@ app.whenReady().then(async () => {
   });
 });
 
-app.on('before-quit', () => {
-  void localApi?.close().catch(() => {});
+installGracefulQuit(app, () => localApi?.close(), {
+  onEvent: (event) => lifecycle({ component: 'desktop', ...event }),
+  canQuit: async () => {
+    if (!mainWindow || mainWindow.isDestroyed()) return true;
+    const dirty = await mainWindow.webContents.executeJavaScript(`(() => { const detail = { dirty: false }; window.dispatchEvent(new CustomEvent('code-studio:quit-check', { detail })); return detail.dirty; })()`);
+    if (!dirty) return true;
+    const result = await dialog.showMessageBox(mainWindow, {
+      type: 'warning', title: '有未保存的修改', message: '工作区中有未保存的代码。',
+      detail: '取消退出并保存，或明确放弃修改后退出。', buttons: ['取消', '放弃未保存修改并退出'], defaultId: 0, cancelId: 0,
+    });
+    return result.response === 1;
+  },
 });
 
 app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });

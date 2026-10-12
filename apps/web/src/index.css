@@ -9,6 +9,12 @@
 .monaco-editor .desktop-java-current-line {
   background-color: rgba(234, 179, 8, 0.18);
 }
+.monaco-editor .desktop-java-breakpoint-conditional {
+  background: radial-gradient(circle, #fff 0 2px, #ef4444 2.5px 5px, transparent 5.5px);
+}
+.monaco-editor .desktop-java-logpoint {
+  background: radial-gradient(circle, #22c55e 0 5px, transparent 5.5px);
+}
 
 @layer components {
   .yuque-editor h1 { @apply mb-6 mt-8 border-b border-slate-200 pb-3 text-4xl font-bold tracking-tight dark:border-slate-800; }
@@ -418,6 +424,19 @@ html.theme-fallback-transition *::after {
   transition-duration: 560ms !important;
   transition-timing-function: ease-in-out !important;
 }
+
+.workspace-markdown h1 { font-size: 1.75rem; font-weight: 700; margin: 1rem 0; }
+.workspace-markdown h2 { font-size: 1.4rem; font-weight: 650; margin: 1rem 0; }
+.workspace-markdown h3 { font-size: 1.15rem; font-weight: 600; margin: .8rem 0; }
+.workspace-markdown p, .workspace-markdown ul, .workspace-markdown ol { margin: .7rem 0; line-height: 1.75; }
+.workspace-markdown ul { list-style: disc; padding-left: 1.5rem; }
+.workspace-markdown ol { list-style: decimal; padding-left: 1.5rem; }
+.workspace-markdown pre { overflow: auto; padding: 1rem; border-radius: .5rem; background: rgb(148 163 184 / .12); }
+.workspace-markdown code { font-size: .85em; font-family: monospace; }
+.workspace-markdown a { color: #6366f1; text-decoration: underline; }
+.workspace-markdown blockquote { border-left: 3px solid #a5b4fc; padding-left: 1rem; }
+.workspace-markdown table { border-collapse: collapse; margin: 1rem 0; }
+.workspace-markdown td, .workspace-markdown th { border: 1px solid rgb(148 163 184 / .4); padding: .4rem .7rem; }
 
 @media (prefers-reduced-motion: reduce) {
   *,

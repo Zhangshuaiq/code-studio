@@ -230,6 +230,53 @@ test('signed enterprise policy is cached and enforced by Local API', async (t) =
   assert.equal(status.organizationId, 'org-1'); assert.equal(status.policy.terminalEnabled, false);
 });
 
+test('existing terminal operations recheck enterprise expiry and preserve output/cleanup access', async (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'code-studio-terminal-policy-'));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const keys = crypto.generateKeyPairSync('ed25519');
+  const issuedAt = Math.floor(Date.now() / 1000);
+  let now = issuedAt * 1000;
+  const writes = []; const sizes = []; let kills = 0;
+  // Exercise the real HTTP handlers/runtime without spawning a user shell.
+  t.mock.method(require('node-pty'), 'spawn', () => ({
+    onData() {}, onExit() {}, write: data => writes.push(data),
+    resize: (...size) => sizes.push(size), kill: () => { kills++; },
+  }));
+  const api = await createLocalApi({ token: 'test-token', storePath: path.join(directory, 'local.sqlite3'), policyPublicKey: keys.publicKey, policyNow: () => now, appVersion: '0.1.0' });
+  t.after(() => api.close());
+  const project = api.registerWorkspace(directory);
+  const headers = { Authorization: 'Bearer test-token', 'Content-Type': 'application/json' };
+  const post = (route, body) => fetch(`${api.origin}/api/local/${route}`, { method: 'POST', headers, body: JSON.stringify(body) });
+  const create = await post(`projects/${project.id}/terminal`, { confirmed: true });
+  assert.equal(create.status, 201); // Anonymous personal mode remains available.
+  const session = await create.json();
+  const policy = { terminalEnabled: true, allowedModelEngines: [], allowedConnectorTypes: [], allowedGitHosts: ['local'], allowedNetworkHosts: [], minimumClientVersion: '0.1.0' };
+  const token = enabled => signLicense(keys.privateKey, { organizationId: 'org-terminal', issuedAt, expiresAt: issuedAt + 60, offlineUntil: issuedAt + 120, policy: { ...policy, terminalEnabled: enabled } });
+  assert.equal((await post('enterprise/policy', { token: token(true) })).status, 200);
+  for (const seconds of [30, 90]) {
+    now = (issuedAt + seconds) * 1000;
+    assert.equal((await post(`terminal/${session.id}/input`, { data: 'fixture-input' })).status, 204);
+    assert.equal((await post(`terminal/${session.id}/resize`, { cols: 80, rows: 24 })).status, 204);
+  }
+  now = (issuedAt + 121) * 1000;
+  for (const [action, body] of [['input', { data: 'must-not-execute' }], ['resize', { cols: 100, rows: 30 }]]) {
+    const denied = await post(`terminal/${session.id}/${action}`, body);
+    assert.equal(denied.status, 403); assert.equal((await denied.json()).code, 'LOCAL_ENTERPRISE_POLICY_DENIED');
+  }
+  assert.equal((await post(`projects/${project.id}/terminal`, { confirmed: true })).status, 403);
+  assert.deepEqual(writes, ['fixture-input', 'fixture-input']); assert.equal(sizes.length, 2);
+  assert.equal((await fetch(`${api.origin}/api/local/terminal/${session.id}`, { headers })).status, 200);
+  assert.equal((await fetch(`${api.origin}/api/local/terminal/${session.id}`, { method: 'DELETE', headers })).status, 204);
+  assert.equal(kills, 1);
+  now = (issuedAt + 30) * 1000;
+  assert.equal((await post('enterprise/policy', { token: token(true) })).status, 200);
+  const second = await (await post(`projects/${project.id}/terminal`, { confirmed: true })).json();
+  assert.equal((await post('enterprise/policy', { token: token(false) })).status, 200);
+  assert.equal(kills, 2, 'policy refresh stops existing terminal sessions');
+  assert.equal((await post(`terminal/${second.id}/input`, { data: 'denied' })).status, 403);
+  assert.equal(writes.length, 2);
+});
+
 test('local model configs persist encrypted credentials without returning secrets', async (t) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'code-studio-models-'));
   const databasePath = path.join(directory, 'local.sqlite3');
@@ -273,6 +320,9 @@ test('connector credentials stay encrypted and Kubernetes connection tests use t
   const createdResponse = await fetch(`${api.origin}/api/local/connectors`, { method: 'POST', headers, body: JSON.stringify({ name: 'Development Cluster', type: 'kubernetes', settings: { server: `http://127.0.0.1:${address.port}`, namespace: 'default' }, secret }) });
   assert.equal(createdResponse.status, 201); const connector = await createdResponse.json(); assert.equal(connector.hasCredential, true); assert.equal(JSON.stringify(connector).includes(secret), false);
   assert.equal(fs.readFileSync(path.join(directory, 'local.sqlite3')).includes(Buffer.from(secret)), false);
+  const updatedResponse = await fetch(`${api.origin}/api/local/connectors/${connector.id}`, { method: 'PUT', headers, body: JSON.stringify({ name: 'Edited Cluster', settings: { namespace: 'default' } }) });
+  assert.equal(updatedResponse.status, 200); const updated = await updatedResponse.json();
+  assert.equal(updated.id, connector.id); assert.equal(updated.hasCredential, true); assert.equal(JSON.stringify(updated).includes(secret), false);
   const tested = await fetch(`${api.origin}/api/local/connectors/${connector.id}/test`, { method: 'POST', headers });
   assert.equal(tested.status, 200); assert.equal((await tested.json()).ok, true); assert.equal(authorization, `Bearer ${secret}`);
   const explored = await fetch(`${api.origin}/api/local/connectors/${connector.id}/explore`, { method: 'POST', headers, body: '{}' });
@@ -448,6 +498,11 @@ test('large workspace source index reports deterministic resource limits and tru
   assert.equal(body.files.length, 500);
   assert.equal(body.truncated, true);
   assert.deepEqual(body.limits, { files: 500, totalBytes: 8388608, fileBytes: 262144 });
+  const symbols = await (await fetch(`${api.origin}/api/local/projects/${project.id}/symbols?query=missing`, { headers: { Authorization: 'Bearer test-token' } })).json();
+  assert.equal(symbols.items.length, 0);
+  assert.equal(symbols.truncated, true, 'No matches in a limited source subset must not claim complete coverage');
+  assert.equal(symbols.sourceTruncated, true);
+  assert.equal(symbols.sourceFiles, 500);
 });
 
 test('workspace automatically previews images, PDF metadata and Excel workbooks without decoding them as text', async (t) => {
@@ -469,6 +524,8 @@ test('workspace automatically previews images, PDF metadata and Excel workbooks 
   const rawImage = await fetch(`${api.origin}/api/local/projects/${project.id}/file-preview?path=pixel.png`, { headers });
   assert.equal(rawImage.headers.get('content-type'), 'image/png');
   assert.deepEqual(Buffer.from(await rawImage.arrayBuffer()), imageBytes);
+  const binarySave = await fetch(contentUrl, { method: 'PUT', headers: { ...headers, 'Content-Type': 'application/json' }, body: JSON.stringify({ path: 'pixel.png', content: 'invalid text replacement', expectedVersion: imageMetadata.version }) });
+  assert.equal(binarySave.status, 400); assert.deepEqual(fs.readFileSync(path.join(workspace, 'pixel.png')), imageBytes);
 
   const pdfMetadata = await (await fetch(`${contentUrl}?path=manual.pdf`, { headers })).json();
   assert.equal(pdfMetadata.kind, 'pdf');

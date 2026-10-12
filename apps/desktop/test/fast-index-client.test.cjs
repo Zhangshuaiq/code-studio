@@ -1,0 +1,30 @@
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+const { FastIndexClient } = require('@codegen/code-intelligence/fast-index-client.cjs');
+test('background thread builds, persists, searches and closes without retaining source models', async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'fast-index-client-'));
+  const workspace = path.join(root, 'project'); fs.mkdirSync(workspace);
+  fs.writeFileSync(path.join(workspace, 'A.java'), 'class BackgroundService { void build() {} }');
+  let client = new FastIndexClient({ root: workspace, databasePath: path.join(root, 'index.sqlite3') });
+  t.after(async () => { await client.close(); fs.rmSync(root, { recursive: true, force: true }); });
+  const scan = client.refresh();
+  assert.equal((await client.status()).complete, false);
+  assert.equal((await scan).complete, true);
+  assert.equal((await client.search('groundService')).items[0].name, 'BackgroundService');
+  assert.equal((await client.outline('A.java')).length, 2);
+  await client.close();
+  client = new FastIndexClient({ root: workspace, databasePath: path.join(root, 'index.sqlite3') });
+  assert.equal((await client.status()).state, 'needs-validation');
+  assert.equal((await client.search('Background')).items.length, 1);
+  assert.equal((await client.refresh()).parsedFiles, 0);
+  await client.close(); await assert.rejects(client.search('build'), /closed/);
+});
+test('background initialization failures are observable and close is bounded', async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'fast-index-failure-'));
+  const client = new FastIndexClient({ root, databasePath: path.join(root, 'missing', 'index.sqlite3') });
+  t.after(async () => { await client.close(); fs.rmSync(root, { recursive: true, force: true }); });
+  await assert.rejects(client.status()); await client.close();
+});

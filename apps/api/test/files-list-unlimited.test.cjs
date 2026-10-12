@@ -27,3 +27,23 @@ test('file tree lists later directories even after the first directory has over 
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test('saving with an old version rejects conflicting changes and preserves disk content', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'files-save-conflict-'));
+  try {
+    await writeFile(join(root, 'Main.java'), 'original');
+    const service = new FilesService(
+      { requireSession: async () => ({ project: { name: 'test' } }) },
+      { ensureForSession: async () => ({ path: root }) },
+      { get: (_key, fallback) => fallback },
+    );
+    const before = await service.read('user', 'session', 'Main.java');
+    assert.match(before.version, /^[a-f0-9]{64}$/);
+    await writeFile(join(root, 'Main.java'), 'external');
+    await assert.rejects(service.write('user', 'session', 'Main.java', 'draft', before.version), (error) => error.getStatus() === 409);
+    assert.equal((await service.read('user', 'session', 'Main.java')).content, 'external');
+    const current = await service.read('user', 'session', 'Main.java');
+    await service.write('user', 'session', 'Main.java', 'draft', current.version);
+    assert.equal((await service.read('user', 'session', 'Main.java')).content, 'draft');
+  } finally { await rm(root, { recursive: true, force: true }); }
+});

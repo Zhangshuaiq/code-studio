@@ -29,6 +29,28 @@ export interface AuditQuery {
   pageSize?: number;
 }
 
+/** The same row shape is used for best-effort and transactional audit writes. */
+export function auditRecordData(e: AuditEntry): Prisma.AuditLogCreateInput {
+  const detail = e.detail === undefined ? undefined : (e.detail as Prisma.InputJsonValue);
+  return {
+    actorId: e.actorId ?? null, actorName: e.actorName || 'system', action: e.action,
+    resourceType: e.resourceType ?? null, resourceId: e.resourceId ?? null,
+    resourceName: e.resourceName ?? null, result: e.result || 'success',
+    ip: e.ip ?? null, method: e.method ?? null, path: e.path ?? null,
+    statusCode: e.statusCode ?? null, detail,
+    searchText: [e.actorName, e.action, e.resourceType, e.resourceId, e.resourceName, e.path,
+      detail !== undefined ? JSON.stringify(detail) : ''].filter(Boolean).join(' '),
+  };
+}
+
+export type AuditActorContext = Pick<AuditEntry, 'actorId' | 'actorName' | 'ip' | 'method' | 'path'>;
+/** Call only with the server-authenticated request, never with a request body. */
+export function auditActorContext(req: { user?: { id: string; username?: string }; ip?: string; socket?: { remoteAddress?: string }; method?: string; originalUrl?: string; url?: string }): AuditActorContext {
+  return { actorId: req.user?.id ?? null, actorName: req.user?.username || 'anonymous',
+    ip: req.ip || req.socket?.remoteAddress || null, method: req.method,
+    path: String(req.originalUrl || req.url || '').split('?')[0] };
+}
+
 @Injectable()
 export class AuditService {
   private readonly logger = new Logger(AuditService.name);
@@ -42,36 +64,7 @@ export class AuditService {
   }
 
   private async write(e: AuditEntry) {
-    const detail =
-      e.detail === undefined ? undefined : (e.detail as Prisma.InputJsonValue);
-    const searchText = [
-      e.actorName,
-      e.action,
-      e.resourceType,
-      e.resourceId,
-      e.resourceName,
-      e.path,
-      detail !== undefined ? JSON.stringify(detail) : '',
-    ]
-      .filter(Boolean)
-      .join(' ');
-    await this.prisma.auditLog.create({
-      data: {
-        actorId: e.actorId ?? null,
-        actorName: e.actorName || 'system',
-        action: e.action,
-        resourceType: e.resourceType ?? null,
-        resourceId: e.resourceId ?? null,
-        resourceName: e.resourceName ?? null,
-        result: e.result || 'success',
-        ip: e.ip ?? null,
-        method: e.method ?? null,
-        path: e.path ?? null,
-        statusCode: e.statusCode ?? null,
-        detail,
-        searchText,
-      },
-    });
+    await this.prisma.auditLog.create({ data: auditRecordData(e) });
   }
 
   async search(p: AuditQuery) {
@@ -93,15 +86,16 @@ export class AuditService {
         ...(p.to ? { lte: new Date(p.to) } : {}),
       };
 
-    const [items, total] = await this.prisma.$transaction([
-      this.prisma.auditLog.findMany({
+    // List and count must observe the same snapshot during concurrent ingestion.
+    const [items, total] = await this.prisma.$transaction(async (tx) => Promise.all([
+      tx.auditLog.findMany({
         where,
-        orderBy: { createdAt: 'desc' },
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
         skip: (page - 1) * pageSize,
         take: pageSize,
       }),
-      this.prisma.auditLog.count({ where }),
-    ]);
+      tx.auditLog.count({ where }),
+    ]), { isolationLevel: 'RepeatableRead' });
     return { items, total, page, pageSize };
   }
 
@@ -117,7 +111,7 @@ export class AuditService {
         distinct: ['resourceType'],
         select: { resourceType: true },
       }),
-    ]);
+    ], { isolationLevel: 'RepeatableRead' });
     return {
       actions: actions.map((a) => a.action),
       resourceTypes: types.map((t) => t.resourceType).filter(Boolean),

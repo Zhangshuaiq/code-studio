@@ -10,7 +10,7 @@ test('SQLite store migrates and persists projects and settings across restarts',
   const databasePath = path.join(directory, 'local.sqlite3');
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
   let store = new LocalStore(databasePath);
-  assert.equal(store.getSchemaVersion(), 7);
+  assert.equal(store.getSchemaVersion(), 8);
   store.upsertProject({ id: 'project-1', name: 'Demo', path: '/tmp/demo', openedAt: '2026-09-23T01:00:00.000Z' });
   store.setSetting('theme', { value: 'dark' });
   store.setPrivacySetting('settingsSync', true);

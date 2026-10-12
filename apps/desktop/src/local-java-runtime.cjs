@@ -4,6 +4,7 @@ const path = require('node:path');
 const { randomUUID } = require('node:crypto');
 const { pathToFileURL, fileURLToPath } = require('node:url');
 const { EventEmitter } = require('node:events');
+const { validateBreakpoints } = require('./java-breakpoint-configuration.cjs');
 
 class DapConnection extends EventEmitter {
   constructor(socket) {
@@ -50,7 +51,7 @@ class LocalJavaRuntime {
   }
   inspect(project) {
     const session = this.sessions.get(project.id);
-    return session ? { sessionId: session.id, stopVersion: session.stopVersion, framesLoading: session.framesLoading, framesError: session.framesError, status: session.status, mode: session.mode, mainClass: session.mainClass, logs: session.logs, issues: session.issues || [], threadId: session.threadId, frames: session.frames, reason: session.reason, breakpoints: session.breakpoints } : { status: 'idle', logs: [], frames: [], issues: [], breakpoints: [] };
+    return session ? { sessionId: session.id, stopVersion: session.stopVersion, framesLoading: session.framesLoading, framesError: session.framesError, status: session.status, mode: session.mode, mainClass: session.mainClass, logs: session.logs, issues: session.issues || [], threadId: session.threadId, pausedThreadIds: [...(session.pausedThreads || [])], threads: session.threads || [], threadsTruncated: !!session.threadsTruncated, frames: session.frames, reason: session.reason, breakpoints: session.breakpoints } : { status: 'idle', logs: [], frames: [], issues: [], breakpoints: [] };
   }
   source(project, relative) {
     if (typeof relative !== 'string' || path.isAbsolute(relative) || relative.includes('\0')) throw new Error('断点文件路径无效');
@@ -59,16 +60,30 @@ class LocalJavaRuntime {
     return file;
   }
   async setBreakpoints(project, session, groups = {}) {
-    if (!groups || typeof groups !== 'object' || Array.isArray(groups) || Object.keys(groups).length > 200) throw new Error('断点配置无效');
-    const checked = Object.entries(groups).map(([relative, lines]) => {
-      if (!Array.isArray(lines) || lines.length > 1000 || lines.some((line) => !Number.isInteger(line) || line < 1 || line > 1_000_000)) throw new Error('断点行号无效');
+    const checked = Object.entries(validateBreakpoints(groups)).map(([relative, points]) => {
+      const lines = points.map(point => typeof point === 'number' ? { line: point } : { ...point });
+      if (lines.some(point => point.condition) && !session.capabilities?.supportsConditionalBreakpoints) throw Object.assign(new Error('当前 Java 调试器不支持条件断点'), { code: 'LOCAL_JAVA_CONDITIONAL_BREAKPOINT_UNSUPPORTED' });
+      if (lines.some(point => point.hitCondition) && !session.capabilities?.supportsHitConditionalBreakpoints) throw Object.assign(new Error('当前 Java 调试器不支持命中次数断点'), { code: 'LOCAL_JAVA_HIT_BREAKPOINT_UNSUPPORTED' });
+      if (lines.some(point => point.logMessage) && !session.capabilities?.supportsLogPoints) throw Object.assign(new Error('当前 Java 调试器不支持日志断点'), { code: 'LOCAL_JAVA_LOGPOINT_UNSUPPORTED' });
       return { relative, file: this.source(project, relative), lines };
     });
+    const update = (session.breakpointQueue || Promise.resolve()).catch(() => {}).then(() => this.applyBreakpoints(session, checked));
+    session.breakpointQueue = update;
+    return update;
+  }
+  async applyBreakpoints(session, checked) {
     const result = [];
-    for (const item of checked) {
-      const response = await session.dap.request('setBreakpoints', { source: { path: item.file }, breakpoints: item.lines.map((line) => ({ line })), sourceModified: false });
-      result.push(...(response.breakpoints || []).map((point) => ({ path: item.relative, line: point.line, verified: point.verified, message: point.message })));
+    // DAP replaces breakpoints per source, not globally. Explicitly clear sources
+    // removed from the next snapshot, including the last breakpoint in a file.
+    const sources = new Map(checked.map(item => [item.relative, item]));
+    for (const previous of session.breakpointSources || []) {
+      if (!sources.has(previous.relative)) checked.push({ ...previous, lines: [] });
     }
+    for (const item of checked) {
+      const response = await session.dap.request('setBreakpoints', { source: { path: item.file }, breakpoints: item.lines, sourceModified: false });
+      result.push(...(response.breakpoints || []).map((point, index) => ({ path: item.relative, line: point.line, verified: point.verified, message: point.message, ...Object.fromEntries(['condition', 'hitCondition', 'logMessage'].filter(field => item.lines[index]?.[field]).map(field => [field, item.lines[index][field]])) })));
+    }
+    session.breakpointSources = [...sources.values()].filter(item => item.lines.length).map(({ relative, file }) => ({ relative, file }));
     session.breakpoints = result; return result;
   }
   async start(project, input) {
@@ -104,21 +119,24 @@ class LocalJavaRuntime {
       const socket = net.connect({ host: '127.0.0.1', port });
       const dap = new DapConnection(socket); session.dap = dap;
       dap.on('output', (event) => { session.logs.push(String(event.output || '')); if (session.logs.length > 2000) session.logs.splice(0, session.logs.length - 2000); });
-      dap.on('terminated', () => { session.status = 'stopped'; session.frames = []; session.release?.(); socket.end(); });
-      dap.on('closed', () => { if (session.status !== 'failed') session.status = 'stopped'; session.frames = []; session.release?.(); });
-      dap.on('continued', () => { session.status = 'running'; session.frames = []; });
+      dap.on('userNotification', (event) => { if (typeof event.message === 'string') { session.logs.push(`[调试器] ${event.message.slice(0, 2000)}\n`); if (session.logs.length > 2000) session.logs.splice(0, session.logs.length - 2000); } });
+      dap.on('terminated', () => { session.status = 'stopped'; session.frames = []; session.threads = []; session.pausedThreads?.clear(); session.release?.(); socket.end(); });
+      dap.on('closed', () => { if (session.status !== 'failed') session.status = 'stopped'; session.frames = []; session.threads = []; session.pausedThreads?.clear(); session.release?.(); });
+      dap.on('continued', event => { void this.resumedThreads(project, session, event.threadId, event.allThreadsContinued !== false); });
       dap.on('stopped', (event) => {
         session.status = 'paused'; session.threadId = event.threadId; session.reason = event.reason;
-        const version = ++session.stopVersion; session.frames = []; session.framesLoading = true; session.framesError = '';
+        session.pausedThreads ||= new Set();
+        if (Number.isInteger(event.threadId)) session.pausedThreads.add(event.threadId);
+        session.allThreadsStopped = event.allThreadsStopped === true;
+        const version = ++session.stopVersion; session.frames = []; session.threads = []; session.framesLoading = true; session.framesError = '';
         void (async () => {
-          if (!Number.isInteger(session.threadId)) { const body = await dap.request('threads'); if (version !== session.stopVersion || session.status !== 'paused') return; session.threadId = body.threads?.[0]?.id; }
+          const threads = await this.pausedThreads(project, session, version);
+          if (!Number.isInteger(session.threadId)) session.threadId = threads[0]?.id;
           if (!Number.isInteger(session.threadId)) throw new Error('调试器未返回暂停线程');
-          const body = await dap.request('stackTrace', { threadId: session.threadId, startFrame: 0, levels: 50 });
-          if (session.status !== 'paused' || version !== session.stopVersion) return;
-          session.frames = (body.stackFrames || []).map((frame) => ({ id: frame.id, name: frame.name, line: frame.line, column: frame.column, path: debugSourcePath(project.path, frame.source?.path) }));
+          await this.pausedFrames(project, session, version);
         })().catch((error) => { if (version === session.stopVersion && session.status === 'paused') { session.framesError = error.message; session.logs.push(`${error.message}\n`); } }).finally(() => { if (version === session.stopVersion) session.framesLoading = false; });
       });
-      await dap.request('initialize', { adapterID: 'java', clientID: 'code-studio', linesStartAt1: true, columnsStartAt1: true, pathFormat: 'path', supportsRunInTerminalRequest: false, supportsVariableType: true });
+      session.capabilities = await dap.request('initialize', { adapterID: 'java', clientID: 'code-studio', linesStartAt1: true, columnsStartAt1: true, pathFormat: 'path', supportsRunInTerminalRequest: false, supportsVariableType: true });
       let initializeTimer;
       const initialized = new Promise((resolve, reject) => { dap.once('initialized', resolve); initializeTimer = setTimeout(() => reject(new Error('等待调试初始化超时')), 60_000); initializeTimer.unref(); });
       const launch = dap.request('launch', { ...target, cwd: fs.realpathSync(project.path), javaExec, modulePaths, classPaths, noDebug: input.mode === 'run', console: 'internalConsole', stopOnEntry: false, shortenCommandLine: 'argfile', args: input.args || '', vmArgs: input.vmArgs || '' });
@@ -137,26 +155,54 @@ class LocalJavaRuntime {
   async action(project, action, input = {}) {
     const session = this.sessions.get(project.id);
     if (!session?.dap || !['paused', 'running'].includes(session.status)) throw new Error('当前没有活动调试会话');
-    if (action === 'stop') { await session.dap.request('disconnect', { terminateDebuggee: true }); session.status = 'stopped'; session.frames = []; session.release?.(); session.dap.socket.end(); return this.inspect(project); }
+    if (action === 'stop') { await session.dap.request('disconnect', { terminateDebuggee: true }); session.status = 'stopped'; session.frames = []; session.threads = []; session.pausedThreads?.clear(); session.release?.(); session.dap.socket.end(); return this.inspect(project); }
     if (session.mode !== 'debug') throw new Error('当前不是调试模式');
     if (action === 'breakpoints') return this.setBreakpoints(project, session, input.breakpoints);
-    if (['continue', 'next', 'stepIn', 'stepOut'].includes(action)) {
+    if (['continue', 'continueAll', 'next', 'stepIn', 'stepOut'].includes(action)) {
       if (session.status !== 'paused') throw new Error('请先暂停程序');
       const version = session.stopVersion;
-      await session.dap.request(action, { threadId: session.threadId });
+      const threadId = session.threadId;
+      const response = await session.dap.request(action, { threadId });
       // A new stopped event can arrive before the step response. Never erase it.
-      if (session.stopVersion === version && session.status === 'paused') { session.status = 'running'; session.frames = []; }
+      if (session.stopVersion === version && session.status === 'paused') await this.resumedThreads(project, session, threadId, action === 'continueAll' || (action === 'continue' && response?.allThreadsContinued !== false));
       return this.inspect(project);
     }
     if (action === 'pause') {
-      const threads = await session.dap.request('threads'); const threadId = threads.threads?.[0]?.id;
+      if (input.threadId !== undefined && (input.sessionId !== session.id || input.stopVersion !== session.stopVersion || !Number.isSafeInteger(input.threadId) || input.threadId < 1)) throw new Error('线程选择已过期或无效，请刷新');
+      const version = session.stopVersion;
+      const threads = await session.dap.request('threads'); const threadId = input.threadId ?? threads.threads?.[0]?.id;
+      if (this.sessions.get(project.id) !== session || session.stopVersion !== version || !threads.threads?.some(thread => thread.id === threadId)) throw new Error('线程已变化，请刷新');
       if (!threadId) throw new Error('暂无可暂停的线程');
       await session.dap.request('pause', { threadId }); return this.inspect(project);
     }
     if (session.status !== 'paused') throw new Error('变量只在暂停时可查看');
     if (input.sessionId !== undefined && (input.sessionId !== session.id || input.stopVersion !== session.stopVersion)) throw new Error('暂停位置已变化，请刷新变量');
     const stopVersion = session.stopVersion;
-    const assertCurrentPause = () => { if (session.status !== 'paused' || session.stopVersion !== stopVersion) throw new Error('暂停位置已变化，请刷新变量'); };
+    const assertCurrentPause = () => this.assertPause(project, session, stopVersion);
+    if (action === 'threads') { await this.pausedThreads(project, session, stopVersion); return this.inspect(project); }
+    if (action === 'selectThread') {
+      if (input.sessionId !== session.id || input.stopVersion !== stopVersion || !Number.isSafeInteger(input.threadId) || input.threadId < 1) throw new Error('线程选择已过期或无效，请刷新');
+      const threads = await this.pausedThreads(project, session, stopVersion);
+      assertCurrentPause();
+      if (!threads.some(thread => thread.id === input.threadId)) throw new Error('线程已不存在，请刷新');
+      session.threadId = input.threadId;
+      const version = ++session.stopVersion;
+      session.frames = []; session.framesError = ''; session.framesLoading = true;
+      try { await this.pausedFrames(project, session, version); }
+      catch (error) { if (session.status === 'paused' && session.stopVersion === version) session.framesError = error.message; throw error; }
+      finally { if (session.stopVersion === version) session.framesLoading = false; }
+      return this.inspect(project);
+    }
+    if (action === 'evaluate') {
+      // Evaluation can execute application code. Require an explicit, current
+      // pause identity instead of guessing a frame or accepting stale clients.
+      if (input.sessionId !== session.id || input.stopVersion !== stopVersion) throw new Error('暂停位置已变化，请刷新表达式');
+      if (!Number.isInteger(input.frameId) || !session.frames.some((frame) => frame.id === input.frameId)) throw new Error('调用帧无效');
+      if (typeof input.expression !== 'string' || !input.expression.trim() || input.expression.length > 4000 || input.expression.includes('\0')) throw new Error('表达式无效（最多 4000 字符）');
+      const body = await session.dap.request('evaluate', { frameId: input.frameId, expression: input.expression, context: 'watch' });
+      assertCurrentPause();
+      return { result: String(body.result ?? ''), type: body.type, variablesReference: Number.isInteger(body.variablesReference) && body.variablesReference > 0 ? body.variablesReference : 0 };
+    }
     if (action === 'scopes') {
       if (!session.frames.some((frame) => frame.id === input.frameId)) throw new Error('调用帧无效');
       const body = await session.dap.request('scopes', { frameId: input.frameId }); assertCurrentPause(); return body;
@@ -178,6 +224,41 @@ class LocalJavaRuntime {
       return { ...body, variables };
     }
     throw new Error('调试操作无效');
+  }
+  assertPause(project, session, version) {
+    if (this.sessions.get(project.id) !== session || session.status !== 'paused' || session.stopVersion !== version) throw new Error('暂停位置已变化，请刷新');
+  }
+  async pausedThreads(project, session, version) {
+    this.assertPause(project, session, version);
+    const body = await session.dap.request('threads');
+    this.assertPause(project, session, version);
+    const threads = (Array.isArray(body.threads) ? body.threads : []).filter(thread => Number.isSafeInteger(thread.id) && thread.id > 0).map(thread => ({ id: thread.id, name: String(thread.name || `线程 ${thread.id}`).slice(0, 500) }));
+    if (session.allThreadsStopped) session.pausedThreads = new Set(threads.map(thread => thread.id));
+    session.threads = threads.slice(0, 1000); session.threadsTruncated = threads.length > 1000;
+    if (!session.threads.some(thread => thread.id === session.threadId)) {
+      const selected = threads.find(thread => thread.id === session.threadId);
+      if (selected) session.threads = [...session.threads.slice(0, 999), selected];
+    }
+    return threads;
+  }
+  async pausedFrames(project, session, version) {
+    this.assertPause(project, session, version);
+    const body = await session.dap.request('stackTrace', { threadId: session.threadId, startFrame: 0, levels: 50 });
+    this.assertPause(project, session, version);
+    session.frames = (body.stackFrames || []).map(frame => ({ id: frame.id, name: frame.name, line: frame.line, column: frame.column, path: debugSourcePath(project.path, frame.source?.path) }));
+  }
+  async resumedThreads(project, session, threadId, all) {
+    if (this.sessions.get(project.id) !== session || !['paused', 'running'].includes(session.status)) return;
+    session.pausedThreads ||= new Set(Number.isInteger(session.threadId) ? [session.threadId] : []);
+    if (all) session.pausedThreads.clear(); else session.pausedThreads.delete(threadId);
+    session.allThreadsStopped = false;
+    session.frames = []; session.threads = [];
+    if (!session.pausedThreads.size) { session.status = 'running'; return; }
+    session.status = 'paused'; session.threadId = session.pausedThreads.values().next().value;
+    const version = ++session.stopVersion; session.framesLoading = true; session.framesError = '';
+    try { await this.pausedThreads(project, session, version); await this.pausedFrames(project, session, version); }
+    catch (error) { if (session.status === 'paused' && session.stopVersion === version) session.framesError = error.message; }
+    finally { if (session.stopVersion === version) session.framesLoading = false; }
   }
   async shutdown() {
     await Promise.all([...this.sessions.values()].map(async (session) => {

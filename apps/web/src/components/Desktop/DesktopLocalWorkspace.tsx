@@ -1,7 +1,10 @@
 import Editor from "@monaco-editor/react";
-import { useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
+import { WorkspaceFileViewer } from '../CodeEditor/WorkspaceFileViewer';
+import { WorkspaceFileIcon } from '../CodeEditor/WorkspaceFileIcon';
+import type { MarkdownNavigation } from '../../lib/markdown-resource';
 import {
   ArrowLeft,
   ArrowRight,
@@ -13,6 +16,7 @@ import {
   File,
   FileCode2,
   FilePlus2,
+  Pencil,
   Folder,
   FolderOpen,
   FolderPlus,
@@ -32,7 +36,6 @@ import {
   installDesktopLanguageProviders,
   monacoLang,
   setupIntelliSense,
-  syncWorkspaceModels,
   workspaceModelUri,
   workspacePathFromUri,
 } from "../../lib/monaco";
@@ -40,8 +43,20 @@ import { useTheme } from "../../store/theme";
 import { DesktopLocalAgentPanel } from "./DesktopLocalAgentPanel";
 import { DesktopLocalPreview } from "./DesktopLocalPreview";
 import { DesktopLocalOutputPanel } from "./DesktopLocalOutputPanel";
-import { useDesktopJavaRun } from "./DesktopJavaRun";
+import { DesktopLanguageStatus, isLanguageStartupError } from "./DesktopLanguageStatus";
+import { useDesktopJavaRun, breakpointLine, breakpointCondition, breakpointHitCondition, breakpointLogMessage } from "./DesktopJavaRun";
 import { Select } from "../common/Select";
+import { useFeedback } from "../common/FeedbackProvider";
+import { HistoryPanel } from "../HistoryPanel/HistoryPanel";
+import type { GitHistoryTransport } from "../../hooks/useGit";
+import { appendNavigation, restoreNavigation } from "../../lib/editor-navigation";
+import { navigationDirection, navigationShortcuts } from "../../lib/editor-keymap";
+import { useEditorPreferences } from "../../store/editorPreferences";
+import { collectJavaDrafts } from '../../lib/fast-index-drafts';
+import { buildWorkspaceFileTree } from '../../lib/workspace-file-tree';
+import { verifyFastSymbolTarget, staleFastSymbol } from '../../lib/fast-symbol-target';
+import { useGitBlame } from '../../hooks/useGitBlame';
+import { GitBlameDetails } from '../CodeEditor/GitBlameDetails';
 
 interface LocalProject {
   id: string;
@@ -75,6 +90,7 @@ interface GitFile {
 interface GitStatus {
   repository: boolean;
   branch: string | null;
+  head?: string | null;
   upstream?: string | null;
   ahead: number;
   behind: number;
@@ -96,6 +112,8 @@ interface SymbolResult {
   path: string;
   line: number;
   column: number;
+  hash?: string;
+  hashSource?: 'disk' | 'overlay';
 }
 interface FileView {
   readOnly?: boolean;
@@ -104,6 +122,10 @@ interface FileView {
   reason?: string;
   sheets?: Array<{ name: string; rows: string[][] }>;
   truncated?: boolean;
+  language?: string;
+  preview?: string;
+  encoding?: string;
+  bom?: boolean;
 }
 interface OpenFileState {
   path: string;
@@ -121,6 +143,8 @@ type EverywhereItem =
       path: string;
       line: number;
       column: number;
+      hash?: string;
+      hashSource?: 'disk' | 'overlay';
     }
   | {
       type: "action";
@@ -139,6 +163,7 @@ export function DesktopLocalWorkspace({
   active?: boolean;
 }) {
   const theme = useTheme((state) => state.theme);
+  const { prompt: askPrompt, confirm: askConfirm } = useFeedback();
   const [files, setFiles] = useState<FileEntry[]>([]);
   const [activePath, setActivePath] = useState<string>();
   const [openFiles, setOpenFiles] = useState<string[]>([]);
@@ -157,6 +182,10 @@ export function DesktopLocalWorkspace({
   const [indexTruncated, setIndexTruncated] = useState(false);
   const [loadingFile, setLoadingFile] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [movingFile, setMovingFile] = useState(false);
+  const [markdownTarget, setMarkdownTarget] = useState<MarkdownNavigation>();
+  const markdownRequest = useRef(0);
+  useEffect(() => () => { markdownRequest.current++; }, [project.id]);
   const [error, setError] = useState("");
   const [searchInput, setSearchInput] = useState("");
   const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
@@ -171,8 +200,16 @@ export function DesktopLocalWorkspace({
     Array<SearchResult | SymbolResult>
   >([]);
   const [everywhereLoading, setEverywhereLoading] = useState(false);
+  const [everywhereNotice, setEverywhereNotice] = useState('');
+  const [everywhereReload, setEverywhereReload] = useState(0);
+  const symbolTargetSequence = useRef(0);
+  const quickContextRef = useRef({ quickOpen, quickQuery, projectId: project.id });
+  quickContextRef.current = { quickOpen, quickQuery, projectId: project.id };
+  useEffect(() => () => { symbolTargetSequence.current++; }, [project.id]);
   const [navigation, setNavigation] = useState<NavigationEntry[]>([]);
   const [navigationIndex, setNavigationIndex] = useState(-1);
+  const { navigationKeymap, setNavigationKeymap } = useEditorPreferences();
+  const shortcuts = navigationShortcuts(navigationKeymap, navigator.platform);
   const [sidebarMode, setSidebarMode] = useState<"files" | "git">("files");
   const [workspaceTab, setWorkspaceTab] = useState<
     "code" | "preview" | "history"
@@ -202,22 +239,93 @@ export function DesktopLocalWorkspace({
       line?: number,
       column?: number,
       record?: boolean,
-    ) => Promise<void>
-  >(async () => {});
+    ) => Promise<boolean>
+  >(async () => false);
   const javaRun = useDesktopJavaRun(project.id, files.some((file) => file.path.endsWith(".java")), active,
     Object.values(fileStates).some((file) => !file.view.readOnly && file.content !== file.savedContent),
     (frame) => { setWorkspaceTab("code"); if (frame.path) void openFileRef.current(frame.path, frame.line, frame.column); });
+  const navigateMarkdown = useCallback(async (target: MarkdownNavigation) => {
+    const request = ++markdownRequest.current;
+    setMarkdownTarget(undefined); setWorkspaceTab('code');
+    const opened = await openFileRef.current(target.path, target.line, target.column);
+    if (opened && request === markdownRequest.current && target.anchor && monacoLang(target.path) === 'markdown') setMarkdownTarget(target);
+  }, []);
+  const markdownAnchorApplied = useCallback(() => setMarkdownTarget(undefined), []);
+  useEffect(() => {
+    if (!monaco) return;
+    const listeners = new Map<any, { dispose: () => void }>();
+    const attach = (model: any) => {
+      const path = workspacePathFromUri(model.uri);
+      if (!path?.endsWith('.java') || path.startsWith('@java-source/') || model.uri.authority !== project.id || listeners.has(model)) return;
+      let previousVersion = model.getAlternativeVersionId();
+      const change = model.onDidChangeContent((event: any) => {
+        const version = model.getAlternativeVersionId();
+        const state = fileStatesRef.current[path];
+        if (event.isFlush || (state && !state.view.readOnly)) {
+          if (!event.isFlush && state) {
+            const content = model.getValue();
+            const next = { ...fileStatesRef.current, [path]: { ...state, content } };
+            fileStatesRef.current = next; setFileStates(next);
+            if (activePathRef.current === path) setContent(content);
+          }
+          javaRun.migrateBreakpoint.current(path, event.changes, previousVersion, version, event.isUndoing || event.isRedoing, event.isFlush);
+        }
+        previousVersion = version;
+      });
+      const dispose = model.onWillDispose(() => { change.dispose(); dispose.dispose(); listeners.delete(model); javaRun.migrateBreakpoint.current(path, [], 0, 0, false, true); });
+      listeners.set(model, { dispose: () => { change.dispose(); dispose.dispose(); } });
+    };
+    monaco.editor.getModels().forEach(attach);
+    const created = monaco.editor.onDidCreateModel(attach);
+    return () => { created.dispose(); listeners.forEach(listener => listener.dispose()); };
+  }, [monaco, project.id]);
   useEffect(() => {
     if (!editor || !monaco || !activePath) return;
     const collection = editor.createDecorationsCollection([
-      ...(javaRun.breakpoints[activePath] || []).map((line) => ({ range: new monaco.Range(line, 1, line, 1), options: { isWholeLine: false, glyphMarginClassName: "desktop-java-breakpoint", glyphMarginHoverMessage: { value: "断点（点击移除）" } } })),
+      ...(javaRun.breakpoints[activePath] || []).map((point) => ({ range: new monaco.Range(breakpointLine(point), 1, breakpointLine(point), 1), options: { isWholeLine: false, glyphMarginClassName: `desktop-java-breakpoint${breakpointCondition(point) || breakpointHitCondition(point) ? ' desktop-java-breakpoint-conditional' : ''}${breakpointLogMessage(point) ? ' desktop-java-logpoint' : ''}`, glyphMarginHoverMessage: { value: ['断点（点击移除，右键编辑）', breakpointCondition(point) && `条件：${breakpointCondition(point)}`, breakpointHitCondition(point) && `命中次数：${breakpointHitCondition(point)}`, breakpointLogMessage(point) && `日志：${breakpointLogMessage(point)}`].filter(Boolean).join('\n\n') } } })),
       ...(javaRun.pausedFrame?.path === activePath ? [{ range: new monaco.Range(javaRun.pausedFrame.line, 1, javaRun.pausedFrame.line, 1), options: { isWholeLine: true, className: "desktop-java-current-line" } }] : []),
     ]);
     return () => collection.clear();
   }, [editor, monaco, activePath, javaRun.breakpoints, javaRun.pausedFrame]);
   const openRequestRef = useRef(0);
+  const treeRevisionRef = useRef(0);
   const navigationRef = useRef<NavigationEntry[]>([]);
   const navigationIndexRef = useRef(-1);
+  const editorRef = useRef<any>();
+  const fileStatesRef = useRef(fileStates);
+  fileStatesRef.current = fileStates;
+  const refreshGitFilesRef = useRef<() => Promise<void>>(async () => {});
+  const historyTransport = useMemo<GitHistoryTransport>(() => {
+    const base = `/api/local/projects/${project.id}/git`;
+    const request = async (url: string, options?: RequestInit) => {
+      const response = await fetch(url, options);
+      const body = await response.json();
+      if (!response.ok) throw new Error(body.message || `HTTP ${response.status}`);
+      return body;
+    };
+    return {
+      scope: `${project.id}:${gitStatus?.branch || 'detached'}:${gitStatus?.head || ''}`,
+      commits: (offset, signal) => request(`${base}/commits?offset=${offset}`, { signal }),
+      diff: (hash, signal) => request(`${base}/commits/${hash}/diff`, { signal }),
+      rollback: async (hash) => {
+        if (Object.values(fileStatesRef.current).some(file => !file.view.readOnly && file.content !== file.savedContent)) throw new Error('请先保存编辑器中的修改，再恢复历史版本');
+        const result = await request(`${base}/rollback`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ hash }) });
+        await refreshGitFilesRef.current();
+        return result;
+      },
+    };
+  }, [project.id, gitStatus?.branch, gitStatus?.head]);
+  useEffect(() => {
+    const checkQuit = (event: Event) => {
+      if (Object.values(fileStatesRef.current).some((file) => !file.view.readOnly && file.content !== file.savedContent)) (event as CustomEvent).detail.dirty = true;
+    };
+    window.addEventListener('code-studio:quit-check', checkQuit);
+    return () => window.removeEventListener('code-studio:quit-check', checkQuit);
+  }, []);
+  const viewStatesRef = useRef(new Map<string, any>());
+  const cursorTimerRef = useRef<ReturnType<typeof setTimeout>>();
+  const cursorCheckpointRef = useRef<NavigationEntry>();
+  const movingHistoryRef = useRef(false);
   const dirty = content !== savedContent;
   useEffect(() => {
     if (!active) { setQuickOpen(false); return; }
@@ -229,6 +337,7 @@ export function DesktopLocalWorkspace({
   navigationIndexRef.current = navigationIndex;
 
   const quickFiles = useMemo(() => {
+    if (['@', '#', '>'].includes(quickQuery[0])) return [];
     const candidates = files.filter((entry) => entry.type === "file");
     const query = quickQuery.trim().toLowerCase();
     if (!query) return candidates.slice(0, 100);
@@ -293,6 +402,8 @@ export function DesktopLocalWorkspace({
         path: item.path,
         line: item.line,
         column: item.column,
+        hash: item.hash,
+        hashSource: item.hashSource,
       }));
     if (prefix === "#")
       return (everywhereResults as SearchResult[]).map((item) => ({
@@ -318,7 +429,8 @@ export function DesktopLocalWorkspace({
           throw new Error(
             (await response.json()).message || `HTTP ${response.status}`,
           );
-        const body = (await response.json()) as { items: FileEntry[] };
+        const body = (await response.json()) as { items: FileEntry[]; revision: number };
+        treeRevisionRef.current = body.revision;
         setFiles(body.items);
       })
       .catch((reason) => setError(String(reason?.message || reason)))
@@ -326,10 +438,21 @@ export function DesktopLocalWorkspace({
   }, [project.id]);
 
   useEffect(() => {
+    if (!active) return;
     const controller = new AbortController();
-    void fetch(`/api/local/projects/${project.id}/language/prepare`, { method: "POST", signal: controller.signal }).catch(() => {});
-    return () => controller.abort();
-  }, [project.id]);
+    const timer = window.setInterval(async () => {
+      try {
+        const response = await fetch(`/api/local/projects/${project.id}/files?since=${treeRevisionRef.current}`, { signal: controller.signal });
+        if (!response.ok) return;
+        const body = await response.json();
+        if (!body.notModified && !controller.signal.aborted) {
+          treeRevisionRef.current = body.revision;
+          setFiles(body.items);
+        }
+      } catch { /* Background refresh must not interrupt editing. */ }
+    }, 30_000);
+    return () => { window.clearInterval(timer); controller.abort(); };
+  }, [active, project.id]);
 
   useEffect(() => {
     if (sidebarMode === "git" || workspaceTab === "code") void loadGitStatus();
@@ -337,8 +460,108 @@ export function DesktopLocalWorkspace({
 
   useEffect(() => {
     if (!monaco) return;
-    const providers = installDesktopLanguageProviders(monaco, project.id);
-    return () => providers.dispose();
+    let disposed = false;
+    const editListeners = new Map<string, any>();
+    const providers = installDesktopLanguageProviders(monaco, project.id, async (operation, input) => {
+      const response = await fetch(`/api/local/projects/${project.id}/language/${operation}`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...input, documents: dirtyDocuments(String(input.path || '')) }),
+      });
+      if (!response.ok) { const body = await response.json(); throw Object.assign(new Error(body.message || '代码智能请求失败'), { code: body.code }); }
+      return response.json();
+    }, {
+      onError: (reason: any) => { if (!isLanguageStartupError(reason)) setError(reason?.message || '代码智能请求失败，请重试'); },
+      prepareEdits: async (edit) => {
+        const paths = [...new Set<string>(edit.edits.map((file: any) => file.path))];
+        if (paths.length > 100 || paths.some((path) => path.startsWith('@java-source/'))) throw new Error('重命名超出可编辑范围，未应用修改');
+        const staged: OpenFileState[] = [];
+        const versions = new Map<string, number>();
+        let bytes = 0;
+        for (const path of paths) {
+          const response = await fetch(`/api/local/projects/${project.id}/content?path=${encodeURIComponent(path)}`);
+          if (!response.ok) throw new Error(`无法读取重命名目标：${path}`);
+          const body = await response.json();
+          if (typeof body.content !== 'string' || body.readOnly || body.kind !== 'text') throw new Error(`文件不可编辑：${path}`);
+          bytes += body.content.length * 2;
+          if (bytes > 8 * 1024 * 1024) throw new Error('重命名文件内容超过 8 MiB，未应用修改');
+          const current = fileStatesRef.current[path];
+          if (current && current.version !== body.version) throw new Error(`磁盘文件已变化，请先重新加载：${path}`);
+          const uri = monaco.Uri.parse(workspaceModelUri(project.id, path));
+          let model = monaco.editor.getModel(uri);
+          // An old preview model is not a draft. Refresh it before applying the
+          // language service's ranges, but never replace an open unsaved buffer.
+          if (!model) model = monaco.editor.createModel(current?.content ?? body.content, monacoLang(path), uri);
+          else if (!current && model.getValue() !== body.content) model.setValue(body.content);
+          versions.set(path, model.getVersionId());
+          staged.push(current || { path, content: body.content, savedContent: body.content, version: body.version, view: body });
+        }
+        if (disposed || !window.confirm(`重命名将修改 ${paths.length} 个文件：\n${paths.join('\n')}\n\n修改将保留为未保存草稿，可撤销。是否继续？`)) return false;
+        for (const path of paths) {
+          const model = monaco.editor.getModel(monaco.Uri.parse(workspaceModelUri(project.id, path)));
+          if (!model || model.getVersionId() !== versions.get(path)) throw new Error('重命名期间代码发生变化，请重新执行');
+        }
+        const next = { ...fileStatesRef.current };
+        for (const state of staged) next[state.path] = state;
+        fileStatesRef.current = next;
+        setFileStates(next);
+        setOpenFiles((current) => [...new Set([...current, ...paths])]);
+        for (const path of paths) {
+          if (editListeners.has(path)) continue;
+          const model = monaco.editor.getModel(monaco.Uri.parse(workspaceModelUri(project.id, path)));
+          editListeners.set(path, model.onDidChangeContent(() => {
+            const state = fileStatesRef.current[path];
+            if (!state || disposed) return;
+            const content = model.getValue();
+            const next = { ...fileStatesRef.current, [path]: { ...state, content } };
+            fileStatesRef.current = next;
+            setFileStates(next);
+            if (activePathRef.current === path) setContent(content);
+          }));
+        }
+        return true;
+      },
+      prepareLocations: async (locations) => {
+        const paths = [...new Set(locations.map((item: any) => item.path).filter(Boolean))].slice(0, 100) as string[];
+        // Native implementation/reference pickers must be able to resolve their
+        // target models. Bound concurrency, and never overwrite dirty models.
+        let next = 0;
+        let bytes = 0;
+        await Promise.all(Array.from({ length: Math.min(4, paths.length) }, async () => {
+          while (next < paths.length && !disposed) {
+            const path = paths[next++];
+            const uri = monaco.Uri.parse(workspaceModelUri(project.id, path));
+            if (monaco.editor.getModel(uri)) continue;
+            const response = await fetch(`/api/local/projects/${project.id}/${path.startsWith('@java-source/') ? 'language/source' : 'content'}?path=${encodeURIComponent(path)}`);
+            if (!response.ok) continue;
+            const body = await response.json();
+            if (typeof body.content !== 'string') continue;
+            bytes += body.content.length * 2;
+            if (bytes > 8 * 1024 * 1024) break;
+            if (!disposed && !monaco.editor.getModel(uri)) monaco.editor.createModel(body.content, monacoLang(path), uri);
+          }
+        }));
+        const retained = new Set([...Object.keys(fileStatesRef.current), ...paths]);
+        const previews = monaco.editor.getModels().filter((model: any) => model.uri.authority === project.id && !retained.has(workspacePathFromUri(model.uri) || ''));
+        let total = previews.reduce((sum: number, model: any) => sum + model.getValueLength() * 2, 0);
+        while (previews.length > 100 || total > 8 * 1024 * 1024) {
+          const model = previews.shift();
+          total -= model.getValueLength() * 2;
+          model.dispose();
+        }
+      },
+    });
+    const opener = monaco.editor.registerEditorOpener({ openCodeEditor: async (_source: any, uri: any, selection: any) => {
+      if (disposed || uri.scheme !== 'codegen' || uri.authority !== project.id) return false;
+      const path = workspacePathFromUri(uri);
+      if (!path) return false;
+      await openFileRef.current(path, selection?.startLineNumber || selection?.lineNumber || 1, selection?.startColumn || selection?.column || 1);
+      return true;
+    } });
+    return () => {
+      disposed = true; providers.dispose(); opener.dispose();
+      editListeners.forEach((listener) => listener.dispose());
+      for (const model of monaco.editor.getModels()) if (model.uri.authority === project.id) model.dispose();
+    };
   }, [monaco, project.id]);
 
   useEffect(() => {
@@ -349,42 +572,55 @@ export function DesktopLocalWorkspace({
     ) {
       setEverywhereResults([]);
       setEverywhereLoading(false);
+      setEverywhereNotice('');
       return;
     }
     const controller = new AbortController();
-    const timer = window.setTimeout(async () => {
+    setEverywhereNotice('');
+    let timer: number;
+    const search = async () => {
       setEverywhereLoading(true);
       try {
         const query = encodeURIComponent(quickQuery.slice(1).trim());
         const endpoint =
           quickQuery[0] === "@"
-            ? `symbols?query=${query}`
+            ? 'symbols'
             : `search?query=${query}&regex=false&caseSensitive=false`;
         const response = await fetch(
           `/api/local/projects/${project.id}/${endpoint}`,
-          { signal: controller.signal },
+          { signal: controller.signal, ...(quickQuery[0] === '@' ? { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ query: quickQuery.slice(1).trim(), documents: collectJavaDrafts(Object.values(fileStatesRef.current).map(file => ({ path: file.path, content: file.content, baseline: file.savedContent, readOnly: file.view.readOnly }))) }) } : {}) },
         );
         const body = await response.json();
+        if (body.code === 'FAST_INDEX_BUSY' && !controller.signal.aborted) {
+          setEverywhereNotice('正在等待索引资源…');
+          timer = window.setTimeout(search, 2_000);
+          return;
+        }
         if (!response.ok)
           throw new Error(body.message || `HTTP ${response.status}`);
+        if (controller.signal.aborted) return;
         setEverywhereResults(body.items);
+        const indexing = body.index && ['starting', 'scanning', 'needs-scan', 'needs-validation'].includes(body.index.state);
+        setEverywhereNotice(indexing ? `正在更新代码索引 · 已索引 ${body.index.files || 0} 个文件…` : body.overlayTruncated ? '未保存代码索引未完整，请保存文件后重试。' : body.sourceTruncated ? `当前搜索覆盖 ${body.sourceFiles} 个源码文件，尚未覆盖整个项目。` : body.truncated ? '结果较多，当前仅显示部分匹配，请缩小搜索范围。' : '');
+        if (indexing) timer = window.setTimeout(search, 2_000);
       } catch (reason: any) {
         if (reason?.name !== "AbortError")
           setError(String(reason?.message || reason));
       } finally {
         if (!controller.signal.aborted) setEverywhereLoading(false);
       }
-    }, 180);
+    };
+    timer = window.setTimeout(search, 180);
     return () => {
       window.clearTimeout(timer);
       controller.abort();
     };
-  }, [quickOpen, quickQuery, project.id]);
+  }, [quickOpen, quickQuery, project.id, fileStates, everywhereReload]);
 
   useEffect(() => {
     if (!monaco) return;
     const controller = new AbortController();
-    void fetch(`/api/local/projects/${project.id}/index`, {
+    void fetch(`/api/local/projects/${project.id}/index?metadata=true`, {
       signal: controller.signal,
     })
       .then(async (response) => {
@@ -395,7 +631,6 @@ export function DesktopLocalWorkspace({
         }>;
       })
       .then((sourceIndex) => {
-        syncWorkspaceModels(monaco, project.id, sourceIndex.files);
         setIndexTruncated(sourceIndex.truncated);
       })
       .catch((reason) => {
@@ -408,6 +643,13 @@ export function DesktopLocalWorkspace({
   useEffect(() => {
     const handler = (event: KeyboardEvent) => {
       if (!active) return;
+      const direction = navigationDirection(navigationKeymap, navigator.platform, event);
+      if (direction && workspaceTab === 'code' && !(event.target instanceof HTMLElement && event.target.closest('input, select, [role="dialog"]'))) {
+        event.preventDefault();
+        event.stopPropagation();
+        void moveInHistory(direction);
+        return;
+      }
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "s") {
         event.preventDefault();
         if (dirty && !saving) void save();
@@ -420,8 +662,8 @@ export function DesktopLocalWorkspace({
       }
       if (event.key === "Escape") setQuickOpen(false);
     };
-    window.addEventListener("keydown", handler);
-    return () => window.removeEventListener("keydown", handler);
+    window.addEventListener("keydown", handler, true);
+    return () => window.removeEventListener("keydown", handler, true);
   });
 
   useEffect(() => {
@@ -479,6 +721,53 @@ export function DesktopLocalWorkspace({
   }, [active, editor, target, loadingFile, activePath]);
 
   useEffect(() => {
+    if (!editor || !activePath || loadingFile) return;
+    const restore = () => {
+      if (workspacePathFromUri(editor.getModel()?.uri) !== activePath) return;
+      if (!target) {
+        const state = viewStatesRef.current.get(activePath);
+        if (state) editor.restoreViewState(state);
+      }
+      const position = editor.getPosition();
+      if (position) cursorCheckpointRef.current = { path: activePath, line: position.lineNumber, column: position.column };
+    };
+    const frame = requestAnimationFrame(restore);
+    const listener = editor.onDidChangeModel(restore);
+    return () => { cancelAnimationFrame(frame); listener.dispose(); };
+  }, [editor, activePath, loadingFile]);
+
+  function currentCursor(): NavigationEntry | undefined {
+    const instance = editorRef.current;
+    const path = workspacePathFromUri(instance?.getModel()?.uri);
+    const position = instance?.getPosition();
+    return path && position ? { path, line: position.lineNumber, column: position.column } : undefined;
+  }
+
+  function dirtyDocuments(exclude: string) {
+    let bytes = 0;
+    return Object.values(fileStatesRef.current).filter((file) => {
+      if (file.path === exclude || file.view.readOnly || file.content === file.savedContent || !/\.(?:[cm]?[jt]sx?|py|java|c|h|cc|cpp|cxx|hh|hpp|hxx|go|rs|vue)$/i.test(file.path)) return false;
+      bytes += file.content.length * 2;
+      return bytes <= 1024 * 1024;
+    }).slice(0, 20).map((file) => ({ path: file.path, content: file.content }));
+  }
+
+  function commitHistory(entries: NavigationEntry[], index: number) {
+    navigationRef.current = entries;
+    navigationIndexRef.current = index;
+    setNavigation(entries);
+    setNavigationIndex(index);
+  }
+
+  function recordNavigation(origin: NavigationEntry | undefined, destination: NavigationEntry) {
+    if (movingHistoryRef.current) return;
+    const result = appendNavigation({ entries: navigationRef.current, index: navigationIndexRef.current }, origin || destination, destination);
+    if (!result.entries.length) commitHistory([destination], 0);
+    else commitHistory(result.entries, result.index);
+    cursorCheckpointRef.current = destination;
+  }
+
+  useEffect(() => {
     if (!active || !activePath || activePath.startsWith('@java-source/') || !fileVersion || loadingFile || externalChanged) return;
     const timer = window.setInterval(async () => {
       try {
@@ -514,13 +803,18 @@ export function DesktopLocalWorkspace({
     column?: number,
     record = true,
   ) {
+    clearTimeout(cursorTimerRef.current);
+    const origin = currentCursor();
+    if (origin) viewStatesRef.current.set(origin.path, editorRef.current.saveViewState());
+    const remember = () => { if (record) recordNavigation(origin, { path, line: line || 1, column: column || 1 }); };
     const requestId = ++openRequestRef.current;
-    const cached = fileStates[path];
+    const cached = fileStatesRef.current[path];
     if (path === activePathRef.current && cached && line) {
       // Debug/definition navigation within the current file must not reload it
       // from disk or discard edits made while paused.
       setTarget({ line, column: column || 1 });
-      return;
+      remember();
+      return true;
     }
     if (path !== activePathRef.current && cached) {
       setLoadingFile(false);
@@ -531,7 +825,8 @@ export function DesktopLocalWorkspace({
       setFileView(cached.view);
       setExternalChanged(false);
       if (line) setTarget({ line, column: column || 1 });
-      return;
+      remember();
+      return true;
     }
     setLoadingFile(true);
     setError("");
@@ -545,12 +840,16 @@ export function DesktopLocalWorkspace({
       const body = await response.json();
       if (!response.ok)
         throw new Error(body.message || `HTTP ${response.status}`);
-      if (requestId !== openRequestRef.current) return;
+      if (requestId !== openRequestRef.current) return false;
       const nextView: FileView = {
         kind: body.kind || "text",
         mime: body.mime || "application/octet-stream",
         reason: body.reason,
         readOnly: Boolean(body.readOnly),
+        language: body.language,
+        preview: body.preview,
+        encoding: body.encoding,
+        bom: body.bom,
       };
       if (nextView.kind === "spreadsheet") {
         const sheetResponse = await fetch(
@@ -563,7 +862,12 @@ export function DesktopLocalWorkspace({
         nextView.sheets = sheetBody.sheets;
         nextView.truncated = sheetBody.truncated;
       }
+      if (requestId !== openRequestRef.current) return false;
       const nextContent = typeof body.content === "string" ? body.content : "";
+      // keepCurrentModel retains Monaco models across editor unmounts. A disk
+      // reload (especially checkout) must update that retained model as well.
+      const retainedModel = monaco?.editor.getModel(monaco.Uri.parse(workspaceModelUri(project.id, path)));
+      if (retainedModel && retainedModel.getValue() !== nextContent) retainedModel.setValue(nextContent);
       setActivePath(path);
       setFileView(nextView);
       setContent(nextContent);
@@ -584,23 +888,8 @@ export function DesktopLocalWorkspace({
         },
       }));
       if (line) setTarget({ line, column: column || 1 });
-      if (record) {
-        const entry = { path, line: line || 1, column: column || 1 };
-        const current = navigationRef.current[navigationIndexRef.current];
-        if (
-          !current ||
-          current.path !== entry.path ||
-          current.line !== entry.line ||
-          current.column !== entry.column
-        ) {
-          const next = [
-            ...navigationRef.current.slice(0, navigationIndexRef.current + 1),
-            entry,
-          ].slice(-100);
-          setNavigation(next);
-          setNavigationIndex(next.length - 1);
-        }
-      }
+      remember();
+      return true;
     } catch (reason: any) {
       if (requestId === openRequestRef.current)
         setError(
@@ -608,6 +897,7 @@ export function DesktopLocalWorkspace({
             ? "文件读取超时，请重试。"
             : String(reason?.message || reason),
         );
+      return false;
     } finally {
       window.clearTimeout(timeout);
       if (requestId === openRequestRef.current) setLoadingFile(false);
@@ -616,6 +906,8 @@ export function DesktopLocalWorkspace({
   openFileRef.current = openFile;
 
   async function closeFile(path: string) {
+    // Do not discard a buffer while an in-flight save can still advance disk.
+    if (saving || movingFile) return;
     const state = fileStates[path];
     if (
       state &&
@@ -623,6 +915,7 @@ export function DesktopLocalWorkspace({
       !window.confirm(`“${path.split("/").pop()}”尚未保存，确定关闭吗？`)
     )
       return;
+    if (state && state.content !== state.savedContent) javaRun.discardBreakpointEdits.current(path);
     const index = openFiles.indexOf(path);
     const nextFiles = openFiles.filter((item) => item !== path);
     setOpenFiles(nextFiles);
@@ -643,14 +936,65 @@ export function DesktopLocalWorkspace({
   }
 
   async function moveInHistory(offset: number) {
+    if (movingHistoryRef.current) return;
     const nextIndex = navigationIndexRef.current + offset;
     const entry = navigationRef.current[nextIndex];
     if (!entry) return;
-    await openFile(entry.path, entry.line, entry.column, false);
-    setNavigationIndex(nextIndex);
+    const history = restoreNavigation({ entries: navigationRef.current, index: navigationIndexRef.current }, nextIndex, currentCursor());
+    movingHistoryRef.current = true;
+    try {
+      if (await openFile(entry.path, entry.line, entry.column, false)) {
+        commitHistory(history.entries, history.index);
+        cursorCheckpointRef.current = entry;
+      }
+    } finally { movingHistoryRef.current = false; }
   }
 
-  function chooseEverywhereItem(item: EverywhereItem) {
+  async function chooseEverywhereItem(item: EverywhereItem) {
+    if (item.type === 'symbol' && item.path.endsWith('.java')) {
+      const sequence = ++symbolTargetSequence.current;
+      const context = quickContextRef.current;
+      const origin = activePathRef.current;
+      const openedVersion = openRequestRef.current;
+      const snapshot = fileStatesRef.current;
+      const current = () => sequence === symbolTargetSequence.current && quickContextRef.current.quickOpen && quickContextRef.current.quickQuery === context.quickQuery && quickContextRef.current.projectId === context.projectId && activePathRef.current === origin && openRequestRef.current === openedVersion;
+      setEverywhereNotice('正在确认代码位置…');
+      try {
+        const response = await fetch(`/api/local/projects/${project.id}/content?path=${encodeURIComponent(item.path)}`);
+        const body = await response.json();
+        if (!current()) return;
+        if (response.status === 404) throw staleFastSymbol();
+        if (!response.ok) throw new Error(body.message || '暂时无法读取目标文件');
+        const cached = snapshot[item.path];
+        const dirty = cached && cached.content !== cached.savedContent;
+        const actual = dirty ? cached.content : body.content;
+        await verifyFastSymbolTarget({ path: item.path, name: item.label, line: item.line, column: item.column, hash: item.hash || '', hashSource: item.hashSource || 'disk' }, actual);
+        if (!current()) return;
+        if (fileStatesRef.current !== snapshot) throw staleFastSymbol();
+        if (!dirty) {
+          const view: FileView = { kind: body.kind || 'text', mime: body.mime || 'text/plain', readOnly: !!body.readOnly, language: body.language, preview: body.preview, encoding: body.encoding, bom: body.bom };
+          const next = { ...snapshot, [item.path]: { path: item.path, content: actual, savedContent: actual, version: body.version, view } };
+          fileStatesRef.current = next; setFileStates(next);
+          const model = monaco?.editor.getModel(monaco.Uri.parse(workspaceModelUri(project.id, item.path)));
+          if (model && model.getValue() !== actual) model.setValue(actual);
+          if (activePathRef.current === item.path) { setContent(actual); setSavedContent(actual); setFileVersion(body.version); setFileView(view); }
+          setOpenFiles(files => files.includes(item.path) ? files : [...files, item.path]);
+        }
+        setQuickOpen(false); setEverywhereNotice('');
+        await openFile(item.path, item.line, item.column);
+      } catch (error: any) {
+        if (!current()) return;
+        if (error.code === 'FAST_SYMBOL_STALE') {
+          setEverywhereNotice('代码已变化，正在更新搜索结果…');
+          try {
+            const response = await fetch(`/api/local/projects/${project.id}/language/index-refresh`, { method: 'POST' });
+            if (!response.ok) throw new Error('refresh failed');
+            if (current()) setEverywhereReload(value => value + 1);
+          } catch { if (current()) setEverywhereNotice('代码已变化，请稍后重新搜索。'); }
+        } else setEverywhereNotice(error.message || '暂时无法确认代码位置，请稍后重试。');
+      }
+      return;
+    }
     setQuickOpen(false);
     if (item.type === "file") void openFile(item.path);
     else if (item.type === "text" || item.type === "symbol")
@@ -667,7 +1011,10 @@ export function DesktopLocalWorkspace({
   }
 
   async function save() {
-    if (!activePath || fileView.kind !== "text" || fileView.readOnly) return;
+    if (!activePath || fileView.kind !== "text" || fileView.readOnly || saving) return;
+    const path = activePath;
+    const requestedContent = content;
+    const commitBreakpointCheckpoint = javaRun.captureBreakpointCheckpoint.current(path);
     setSaving(true);
     setError("");
     try {
@@ -686,17 +1033,19 @@ export function DesktopLocalWorkspace({
       const body = await response.json();
       if (!response.ok)
         throw new Error(body.message || `HTTP ${response.status}`);
-      setSavedContent(content);
-      setFileVersion(body.version);
-      setExternalChanged(false);
+      commitBreakpointCheckpoint();
+      if (activePathRef.current === path) {
+        setSavedContent(requestedContent);
+        setFileVersion(body.version);
+        setExternalChanged(false);
+      }
       setFileStates((current) =>
         current[activePath]
           ? {
               ...current,
               [activePath]: {
                 ...current[activePath],
-                content,
-                savedContent: content,
+                savedContent: requestedContent,
                 version: body.version,
               },
             }
@@ -708,6 +1057,43 @@ export function DesktopLocalWorkspace({
     } finally {
       setSaving(false);
     }
+  }
+
+  async function saveAll() {
+    const drafts = Object.values(fileStatesRef.current).filter((file) => !file.view.readOnly && file.content !== file.savedContent);
+    const checkpoints = new Map(drafts.map(file => [file.path, javaRun.captureBreakpointCheckpoint.current(file.path)]));
+    if (!drafts.length || saving) return;
+    setSaving(true);
+    setError('');
+    let completed = 0;
+    try {
+      // Preflight the whole selection. Each PUT also checks its version to
+      // protect against a disk write occurring after this check.
+      for (const file of drafts) {
+        const response = await fetch(`/api/local/projects/${project.id}/content?path=${encodeURIComponent(file.path)}`);
+        if (!response.ok || (await response.json()).version !== file.version) throw new Error(`磁盘文件已变化，尚未保存任何文件：${file.path}`);
+      }
+      for (const file of drafts) {
+        const response = await fetch(`/api/local/projects/${project.id}/content`, {
+          method: 'PUT', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ path: file.path, content: file.content, expectedVersion: file.version }),
+        });
+        const body = await response.json();
+        if (!response.ok) throw new Error(`${file.path}：${body.message || '保存失败'}`);
+        checkpoints.get(file.path)?.();
+        completed++;
+        const latest = fileStatesRef.current[file.path];
+        if (latest) {
+          const next = { ...fileStatesRef.current, [file.path]: { ...latest, savedContent: file.content, version: body.version } };
+          fileStatesRef.current = next;
+          setFileStates(next);
+          if (activePathRef.current === file.path) { setSavedContent(file.content); setFileVersion(body.version); }
+        }
+      }
+      void loadGitStatus();
+    } catch (reason: any) {
+      setError(`${reason?.message || reason}${completed ? `；已保存 ${completed} 个文件，其余修改仍保留在草稿中` : ''}`);
+    } finally { setSaving(false); }
   }
 
   async function loadGitStatus() {
@@ -741,7 +1127,7 @@ export function DesktopLocalWorkspace({
         const kept = new Set(
           [...current].filter((item) => available.has(item)),
         );
-        return kept.size ? kept : available;
+        return kept;
       });
     } catch (reason: any) {
       setError(String(reason?.message || reason));
@@ -752,20 +1138,10 @@ export function DesktopLocalWorkspace({
 
   async function reloadWorkspaceFiles(refreshActive = true) {
     try {
-      const response = await fetch(`/api/local/projects/${project.id}/files`);
+      const response = await fetch(`/api/local/projects/${project.id}/files?refresh=true`);
       const body = await response.json();
       if (response.ok) setFiles(body.items);
       if (refreshActive && activePath) await openFile(activePath, undefined, undefined, false);
-      if (monaco) {
-        const indexResponse = await fetch(
-          `/api/local/projects/${project.id}/index`,
-        );
-        const indexBody = await indexResponse.json();
-        if (indexResponse.ok) {
-          syncWorkspaceModels(monaco, project.id, indexBody.files);
-          setIndexTruncated(Boolean(indexBody.truncated));
-        }
-      }
     } catch (reason: any) {
       setError(String(reason?.message || reason));
     }
@@ -773,7 +1149,7 @@ export function DesktopLocalWorkspace({
 
   async function createWorkspaceEntry(parentPath: string, type: "file" | "directory") {
     const label = type === "file" ? "文件" : "文件夹";
-    const name = window.prompt(`请输入${label}名称`);
+    const name = await askPrompt({ title: `新增${label}`, message: `请输入${label}名称`, validate: value => value.trim() ? undefined : '名称不能为空' });
     if (!name?.trim()) return;
     const nextPath = [parentPath, name.trim()].filter(Boolean).join("/");
     try {
@@ -805,6 +1181,43 @@ export function DesktopLocalWorkspace({
     } catch (reason: any) { setError(String(reason?.message || reason)); }
   }
 
+  async function moveWorkspaceEntry(from: string, isDir: boolean) {
+    if (Object.values(fileStatesRef.current).some(file => file.content !== file.savedContent)) { setError('请先保存所有修改，再重命名或移动'); return; }
+    const to = await askPrompt({ title: isDir ? '重命名 / 移动文件夹' : '重命名 / 移动文件', message: `当前位置：${from}。请输入新的项目相对路径；目标父文件夹需要已存在。此操作只移动文件，不自动修改 Java 包名或引用。`, initialValue: from, validate: value => value.trim() ? undefined : '路径不能为空' });
+    if (!to?.trim() || to.trim() === from) return;
+    setMovingFile(true);
+    try {
+      const body = await javaRun.moveWorkspaceEntry(from, to.trim());
+      const remap = (path: string) => path === body.from ? body.to : path.startsWith(`${body.from}/`) ? body.to + path.slice(body.from.length) : path;
+      const previous = fileStatesRef.current;
+      const next: Record<string, OpenFileState> = {};
+      for (const [path, state] of Object.entries(previous)) next[remap(path)] = { ...state, path: remap(path) };
+      fileStatesRef.current = next; setFileStates(next);
+      setOpenFiles(current => current.map(remap));
+      const currentPath = activePathRef.current;
+      const destination = currentPath ? remap(currentPath) : undefined;
+      if (destination && destination !== currentPath) {
+        activePathRef.current = destination; setActivePath(destination);
+        if (monaco && next[destination]?.view.kind === 'text') {
+          const uri = monaco.Uri.parse(workspaceModelUri(project.id, destination));
+          const model = monaco.editor.getModel(uri) || monaco.editor.createModel(next[destination].content, monacoLang(destination), uri);
+          const position = editorRef.current?.getPosition();
+          editorRef.current?.setModel(model);
+          if (position) editorRef.current?.setPosition(position);
+        }
+      }
+      for (const model of monaco?.editor.getModels() || []) {
+        const path = workspacePathFromUri(model.uri);
+        if (model.uri.authority === project.id && path && remap(path) !== path) model.dispose();
+      }
+      navigationRef.current = navigationRef.current.map(entry => ({ ...entry, path: remap(entry.path) }));
+      setNavigation(navigationRef.current);
+      for (const [path, state] of [...viewStatesRef.current]) if (remap(path) !== path) { viewStatesRef.current.delete(path); viewStatesRef.current.set(remap(path), state); }
+      await reloadWorkspaceFiles(false); void loadGitStatus();
+    } catch (reason: any) { setError(String(reason?.message || reason)); }
+    finally { setMovingFile(false); }
+  }
+
   async function showGitDiff(path: string) {
     try {
       const response = await fetch(
@@ -822,6 +1235,7 @@ export function DesktopLocalWorkspace({
   async function commitSelected() {
     const message = commitMessage.trim();
     if (!message || !gitSelection.size) return;
+    if ([...gitSelection].some(path => { const file = fileStatesRef.current[path]; return file && !file.view.readOnly && file.content !== file.savedContent; })) { setError('所选文件包含未保存的修改，请先保存后再提交'); return; }
     setGitLoading(true);
     setError("");
     try {
@@ -849,6 +1263,7 @@ export function DesktopLocalWorkspace({
 
   async function checkoutBranch(branch: string, create = false) {
     if (!branch || branch === gitStatus?.branch) return;
+    if (Object.values(fileStatesRef.current).some(file => !file.view.readOnly && file.content !== file.savedContent)) { setError('请先保存编辑器中的修改，再切换分支'); return; }
     setGitLoading(true);
     setError("");
     try {
@@ -864,7 +1279,7 @@ export function DesktopLocalWorkspace({
       if (!response.ok)
         throw new Error(body.message || `HTTP ${response.status}`);
       setGitStatus(body.status);
-      await loadGitStatus();
+      await refreshAfterGitChange();
     } catch (reason: any) {
       setError(String(reason?.message || reason));
     } finally {
@@ -873,16 +1288,39 @@ export function DesktopLocalWorkspace({
   }
 
   async function createBranch() {
-    const branch = window.prompt("新分支名称");
+    const branch = await askPrompt({ title: '新建分支', message: '从当前版本创建并切换到新分支', placeholder: 'feature/my-change', confirmText: '创建分支', validate: value => value.trim() ? undefined : '分支名称不能为空' });
     if (branch?.trim()) await checkoutBranch(branch.trim(), true);
   }
 
+  async function refreshAfterGitChange() {
+    const previousPath = activePathRef.current;
+    ++openRequestRef.current;
+    fileStatesRef.current = {};
+    setFileStates({});
+    setActivePath(undefined);
+    activePathRef.current = undefined;
+    setContent(''); setSavedContent(''); setFileVersion('');
+    setExternalChanged(false); setTarget(undefined); setGitDiff(undefined);
+    setGitSelection(new Set());
+    viewStatesRef.current.clear();
+    commitHistory([], -1);
+    const response = await fetch(`/api/local/projects/${project.id}/files?refresh=true`);
+    const body = await response.json();
+    if (!response.ok) throw new Error(body.message || `HTTP ${response.status}`);
+    treeRevisionRef.current = body.revision;
+    setFiles(body.items);
+    const available = new Set<string>(body.items.filter((item: FileEntry) => item.type === 'file').map((item: FileEntry) => item.path));
+    setOpenFiles(current => current.filter(path => available.has(path)));
+    if (previousPath && available.has(previousPath)) await openFileRef.current(previousPath, undefined, undefined, false);
+    await loadGitStatus();
+  }
+  refreshGitFilesRef.current = refreshAfterGitChange;
+
   async function syncGit(operation: "fetch" | "pull" | "push") {
+    if (operation === 'pull' && Object.values(fileStatesRef.current).some(file => !file.view.readOnly && file.content !== file.savedContent)) { setError('请先保存编辑器中的修改，再拉取更新'); return; }
     if (
       operation === "push" &&
-      !window.confirm(
-        `确定将 ${gitStatus?.branch || "当前分支"} 推送到 ${gitRemote || "上游"} 吗？`,
-      )
+      !(await askConfirm(`确定将 ${gitStatus?.branch || "当前分支"} 推送到 ${gitRemote || "上游"} 吗？`))
     )
       return;
     setGitLoading(true);
@@ -900,7 +1338,8 @@ export function DesktopLocalWorkspace({
       if (!response.ok)
         throw new Error(body.message || `HTTP ${response.status}`);
       setGitStatus(body.status);
-      await loadGitStatus();
+      if (operation === 'pull') await refreshAfterGitChange();
+      else await loadGitStatus();
     } catch (reason: any) {
       setError(String(reason?.message || reason));
     } finally {
@@ -908,28 +1347,45 @@ export function DesktopLocalWorkspace({
     }
   }
 
+  const nativeBlameUnsupported = fileView.encoding?.startsWith('utf-16');
+  const blame = useGitBlame(project.id, nativeBlameUnsupported ? undefined : activePath, content, async (path, content, signal) => {
+    const response = await fetch(`/api/local/projects/${project.id}/git/blame`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path, content }), signal });
+    const body = await response.json();
+    if (!response.ok) throw new Error(body.message || '无法加载行注释');
+    return body;
+  });
   const title = useMemo(
     () => (activePath ? activePath.split("/").pop() : "选择文件"),
     [activePath],
   );
+  const treeActionsRef = useRef({ createWorkspaceEntry, deleteWorkspaceEntry, moveWorkspaceEntry });
+  treeActionsRef.current = { createWorkspaceEntry, deleteWorkspaceEntry, moveWorkspaceEntry };
+  const treeActions = useMemo(() => ({
+    onSelect: (path: string) => { void openFileRef.current(path); },
+    onCreate: (parentPath: string, type: 'file' | 'directory') => { void treeActionsRef.current.createWorkspaceEntry(parentPath, type); },
+    onDelete: (path: string, isDir: boolean) => { void treeActionsRef.current.deleteWorkspaceEntry(path, isDir); },
+    onMove: (path: string, isDir: boolean) => { void treeActionsRef.current.moveWorkspaceEntry(path, isDir); },
+  }), []);
   function mountEditor(instance: any, monacoInstance: any) {
+    blame.attach(instance);
+    editorRef.current = instance;
     setEditor(instance);
     setMonaco(monacoInstance);
-    instance.onDidChangeModel(() => {
-      const targetPath = workspacePathFromUri(instance.getModel()?.uri);
-      if (!targetPath || targetPath === activePathRef.current) return;
-      const position = instance.getPosition();
-      void openFileRef.current(
-        targetPath,
-        position?.lineNumber,
-        position?.column,
-      );
+    const cursorListener = instance.onDidChangeCursorPosition((event: any) => {
+      if (movingHistoryRef.current || !['mouse', 'keyboard'].includes(event.source)) return;
+      clearTimeout(cursorTimerRef.current);
+      cursorTimerRef.current = setTimeout(() => {
+        const destination = currentCursor();
+        if (destination) recordNavigation(cursorCheckpointRef.current, destination);
+      }, 350);
     });
+    instance.onDidDispose(() => { cursorListener.dispose(); clearTimeout(cursorTimerRef.current); });
     const navigateToDefinition = async (currentEditor: any, requestedPosition?: any) => {
       try {
         const model = currentEditor.getModel();
         const position = requestedPosition || currentEditor.getPosition();
         if (!model || !position) return;
+        const version = model.getVersionId();
         setError("");
         let definition: any;
         const sourcePath = workspacePathFromUri(model.uri);
@@ -944,15 +1400,18 @@ export function DesktopLocalWorkspace({
                 content: model.getValue(),
                 line: position.lineNumber,
                 column: position.column,
+                documents: dirtyDocuments(sourcePath),
               }),
             },
           );
           if (!response.ok) {
             const body = await response.json().catch(() => ({}));
-            setError(body.message || `代码跳转失败（HTTP ${response.status}）`);
+            if (!isLanguageStartupError(body)) setError(body.message || `代码跳转失败（HTTP ${response.status}）`);
             return;
           }
-          const results = (await response.json()).result || [];
+          const result = (await response.json()).result;
+          if (model.isDisposed() || model.getVersionId() !== version || currentEditor.getModel() !== model) return;
+          const results = Array.isArray(result) ? result : result ? [result] : [];
           const preferred = results.find((item: any) => item.path && item.path !== sourcePath) || results[0];
           const preferredRange = preferred?.range || preferred?.targetSelectionRange || preferred?.targetRange;
           if (preferred?.path && preferredRange)
@@ -966,10 +1425,6 @@ export function DesktopLocalWorkspace({
               ),
             };
         }
-        if (!definition)
-          definition = (await monacoInstance.languages.getDefinitionAtPosition(model, position))?.find(
-            (item: any) => workspacePathFromUri(item.uri) !== sourcePath,
-          ) || (await monacoInstance.languages.getDefinitionAtPosition(model, position))?.[0];
         if (!definition) {
           setError("未找到该符号的定义。请确认光标位于可跳转的符号上。");
           return;
@@ -980,12 +1435,6 @@ export function DesktopLocalWorkspace({
           return;
         }
         const targetPosition = { lineNumber: definition.range.startLineNumber, column: definition.range.startColumn };
-        if (targetPath === activePathRef.current) {
-          currentEditor.setPosition(targetPosition);
-          currentEditor.revealPositionInCenter(targetPosition);
-          currentEditor.focus();
-          return;
-        }
         await openFileRef.current(targetPath, targetPosition.lineNumber, targetPosition.column);
       } catch (reason: any) {
         setError(`代码跳转失败：${String(reason?.message || reason)}`);
@@ -994,7 +1443,10 @@ export function DesktopLocalWorkspace({
     instance.onMouseDown((event: any) => {
       if (event.target?.type === monacoInstance.editor.MouseTargetType.GUTTER_GLYPH_MARGIN && event.target.position) {
         const file = workspacePathFromUri(instance.getModel()?.uri);
-        if (file?.endsWith(".java") && !file.startsWith("@java-source/")) javaRun.toggleBreakpoint.current(file, event.target.position.lineNumber);
+        if (file?.endsWith(".java") && !file.startsWith("@java-source/")) {
+          if (event.event?.browserEvent?.button === 2) { event.event.browserEvent.preventDefault(); javaRun.editBreakpoint.current(file, event.target.position.lineNumber); }
+          else if (event.event?.browserEvent?.button === 0) javaRun.toggleBreakpoint.current(file, event.target.position.lineNumber);
+        }
         return;
       }
       const browserEvent = event.event?.browserEvent;
@@ -1007,9 +1459,12 @@ export function DesktopLocalWorkspace({
       id: "desktop-open-definition",
       label: "转到定义",
       keybindings: [monacoInstance.KeyCode.F12],
-      contextMenuGroupId: "navigation",
-      contextMenuOrder: 1,
       run: navigateToDefinition,
+    });
+    instance.addAction({
+      id: 'desktop-open-implementation', label: '转到实现',
+      keybindings: [monacoInstance.KeyMod.CtrlCmd | monacoInstance.KeyCode.F12],
+      run: (current: any) => current.trigger('desktop', 'editor.action.goToImplementation', null),
     });
   }
   return (
@@ -1046,7 +1501,8 @@ export function DesktopLocalWorkspace({
                   className="icon-btn"
                   disabled={navigationIndex <= 0}
                   onClick={() => void moveInHistory(-1)}
-                  title="后退"
+                  title={`返回上一处光标位置（${shortcuts[0]}）`}
+                  aria-label="返回上一处光标位置"
                 >
                   <ArrowLeft size={15} />
                 </button>
@@ -1058,11 +1514,15 @@ export function DesktopLocalWorkspace({
                     navigationIndex >= navigation.length - 1
                   }
                   onClick={() => void moveInHistory(1)}
-                  title="前进"
+                  title={`前进到下一处光标位置（${shortcuts[1]}）`}
+                  aria-label="前进到下一处光标位置"
                 >
                   <ArrowRight size={15} />
                 </button>
               </div>
+              <Select size="sm" ariaLabel="光标导航快捷键方案" title={`后退 ${shortcuts[0]} · 前进 ${shortcuts[1]}`} value={navigationKeymap}
+                options={[{ value: 'idea', label: 'IDEA 快捷键' }, { value: 'vscode', label: 'VS Code 快捷键' }, { value: 'eclipse', label: 'Eclipse 快捷键' }]}
+                onChange={(value) => setNavigationKeymap(value as 'idea' | 'vscode' | 'eclipse')} />
               <div className="min-w-0">
                 <div className="truncate text-xs font-bold">{project.name}</div>
                 <div className="max-w-48 truncate text-[9px] text-slate-400">
@@ -1096,7 +1556,10 @@ export function DesktopLocalWorkspace({
                 </WorkspaceTab>
               </div>
               <div className="ml-auto flex items-center gap-2">
-                {javaRun.toolbar}
+                {workspaceTab === 'code' && javaRun.toolbar}
+                <GitBlameDetails item={blame.selected} onClose={blame.close} load={async (hash, signal) => { const response = await fetch(`/api/local/projects/${project.id}/git/commits/${hash}/diff`, { signal }); const body = await response.json(); if (!response.ok) throw new Error(body.message || '无法加载提交改动'); return body; }} />
+                {workspaceTab === 'code' && <button className="btn btn-ghost btn-sm" disabled={nativeBlameUnsupported} title={nativeBlameUnsupported ? 'UTF-16 文件暂不支持 Git 行注释' : undefined} aria-pressed={blame.enabled} onClick={blame.toggle}>行注释</button>}
+                {workspaceTab === 'code' && blame.status && <span role="status" className="max-w-48 truncate text-[10px] text-muted" title={blame.status}>{blame.status}</span>}
                 <span className="max-w-24 truncate text-xs text-slate-400" title={title}>
                   {title}
                   {dirty ? " • 未保存" : ""}
@@ -1111,6 +1574,9 @@ export function DesktopLocalWorkspace({
                     <SquareTerminal size={16} />
                   </button>
                 )}
+                <button type="button" className="btn btn-sm" disabled={saving || !Object.values(fileStates).some((file) => !file.view.readOnly && file.content !== file.savedContent)} onClick={() => void saveAll()}>
+                  全部保存
+                </button>
                 <button
                   type="button"
                   className="btn btn-primary btn-sm"
@@ -1179,6 +1645,7 @@ export function DesktopLocalWorkspace({
                       <X size={14} />
                     </button>
                   </div>
+                  {everywhereNotice && <p role="status" className="border-b border-amber-100 bg-amber-50 px-4 py-2 text-[11px] text-amber-700 dark:border-amber-900 dark:bg-amber-950/30 dark:text-amber-300">{everywhereNotice}</p>}
                   <div className="min-h-0 overflow-auto py-1">
                     {everywhereLoading ? (
                       <div className="flex items-center justify-center gap-2 px-4 py-8 text-xs text-slate-400">
@@ -1299,7 +1766,7 @@ export function DesktopLocalWorkspace({
             )}
             <div
               className={
-                workspaceTab === "code" || workspaceTab === "history"
+                workspaceTab === "code"
                   ? "min-h-0 flex-1"
                   : "hidden min-h-0 flex-1"
               }
@@ -1313,9 +1780,8 @@ export function DesktopLocalWorkspace({
                   <div className="flex h-full min-w-0">
                     <aside className="flex h-full w-full min-w-0 flex-col border-r border-slate-200 bg-slate-50/70 dark:border-slate-800 dark:bg-slate-900/40">
                       <div className="flex h-10 shrink-0 items-center border-b border-slate-200 px-3 text-[11px] font-bold dark:border-slate-800">
-                        {sidebarMode === "files"
-                          ? "资源管理器"
-                          : `源代码管理${gitStatus?.files.length ? ` · ${gitStatus.files.length}` : ""}`}
+                        <button className={`mr-4 ${sidebarMode === 'files' ? 'text-indigo-500' : 'text-slate-400'}`} onClick={() => setSidebarMode('files')}>资源管理器</button>
+                        <button className={sidebarMode === 'git' ? 'text-indigo-500' : 'text-slate-400'} onClick={() => setSidebarMode('git')}>分支 / 变更{gitStatus?.files.length ? ` · ${gitStatus.files.length}` : ''}</button>
                       </div>
                       {sidebarMode === "files" ? (
                         <>
@@ -1412,16 +1878,14 @@ export function DesktopLocalWorkspace({
                                 projectName={project.name}
                                 entries={files}
                                 selected={activePath}
-                                onSelect={(path) => void openFile(path)}
-                                onCreate={(parentPath, type) => void createWorkspaceEntry(parentPath, type)}
-                                onDelete={(path, isDir) => void deleteWorkspaceEntry(path, isDir)}
+                                {...treeActions}
                               />
                             )}
                           </div>
                           <div className="flex shrink-0 items-center gap-2 border-t border-slate-200 px-3 py-2 dark:border-slate-800">
                             <GitBranch size={13} className="text-slate-400" />
                             {gitStatus?.repository ? <Select ariaLabel="当前分支" className="min-w-0 flex-1" buttonClassName="border-0 bg-transparent shadow-none" size="sm" value={gitStatus.branch || ""} disabled={gitLoading} onChange={(branch) => void checkoutBranch(branch)} options={gitRefs.branches.map((branch) => ({ value: branch, label: branch }))} /> : <span className="min-w-0 flex-1 truncate text-[11px] text-slate-400">非 Git 仓库</span>}
-                            {gitStatus?.files.length ? <button type="button" className="rounded-md bg-amber-100 px-1.5 py-0.5 text-[9px] font-bold text-amber-700 dark:bg-amber-500/15 dark:text-amber-300" onClick={() => { setWorkspaceTab("history"); setSidebarMode("git"); }}>{gitStatus.files.length} 项变更</button> : null}
+                            {gitStatus?.files.length ? <button type="button" className="rounded-md bg-amber-100 px-1.5 py-0.5 text-[9px] font-bold text-amber-700 dark:bg-amber-500/15 dark:text-amber-300" onClick={() => { setWorkspaceTab("code"); setSidebarMode("git"); }}>{gitStatus.files.length} 项变更</button> : null}
                           </div>
                         </>
                       ) : (
@@ -1447,6 +1911,7 @@ export function DesktopLocalWorkspace({
                               type="button"
                               className="icon-btn"
                               onClick={() => void loadGitStatus()}
+                              title="刷新 Git 状态"
                               disabled={gitLoading}
                             >
                               <RefreshCw
@@ -1520,6 +1985,7 @@ export function DesktopLocalWorkspace({
                                 </div>
                               </div>
                               <div className="min-h-0 flex-1 overflow-auto py-1">
+                                {!!gitStatus.files.length && <label className="flex items-center gap-2 px-3 py-2 text-[11px] text-slate-500"><input type="checkbox" aria-label="选择全部变更" checked={gitSelection.size === gitStatus.files.length} onChange={event => setGitSelection(event.target.checked ? new Set(gitStatus.files.map(file => file.path)) : new Set())} />选择全部变更</label>}
                                 {gitStatus.files.length ? (
                                   gitStatus.files.map((file) => (
                                     <div
@@ -1635,7 +2101,8 @@ export function DesktopLocalWorkspace({
                               )}
                               <span
                                 role="button"
-                                tabIndex={0}
+                                aria-disabled={saving || movingFile}
+                                tabIndex={saving || movingFile ? -1 : 0}
                                 onClick={(event) => {
                                   event.stopPropagation();
                                   void closeFile(path);
@@ -1659,11 +2126,17 @@ export function DesktopLocalWorkspace({
                           projectId={project.id}
                           path={activePath}
                           view={fileView}
+                          content={content}
+                          onMarkdownNavigate={navigateMarkdown}
+                          markdownAnchor={markdownTarget?.path === activePath ? markdownTarget.anchor : undefined}
+                          onMarkdownAnchorApplied={markdownAnchorApplied}
                         >
                           {fileView.kind === "text" ? (
                             <Editor
+                              keepCurrentModel
+                              saveViewState
                               path={workspaceModelUri(project.id, activePath)}
-                              language={monacoLang(activePath)}
+                              language={fileView.language || monacoLang(activePath)}
                               value={content}
                               theme={theme === "dark" ? "vs-dark" : "light"}
                               onMount={mountEditor}
@@ -1686,7 +2159,7 @@ export function DesktopLocalWorkspace({
                               }}
                               beforeMount={setupIntelliSense}
                               options={{
-                                readOnly: Boolean(fileView.readOnly),
+                                readOnly: Boolean(fileView.readOnly) || movingFile,
                                 glyphMargin: activePath.endsWith(".java") && !fileView.readOnly,
                                 automaticLayout: true,
                                 minimap: { enabled: true },
@@ -1725,6 +2198,8 @@ export function DesktopLocalWorkspace({
             >
               <DesktopLocalPreview projectId={project.id} />
             </div>
+            {workspaceTab === 'history' && <div className="min-h-0 flex-1"><HistoryPanel transport={historyTransport} /></div>}
+            <DesktopLanguageStatus projectId={project.id} active={active} includeFastIndex={!!activePath && monacoLang(activePath) === 'java'} />
           </section>
         </Panel>
       </PanelGroup>
@@ -1732,104 +2207,12 @@ export function DesktopLocalWorkspace({
   );
 }
 
-function LocalFileViewer({
-  projectId,
-  path,
-  view,
-  children,
-}: {
-  projectId: string;
-  path: string;
-  view: FileView;
-  children: React.ReactNode;
-}) {
-  const [sheetIndex, setSheetIndex] = useState(0);
-  useEffect(() => setSheetIndex(0), [path]);
-  if (view.kind === "text") return <>{children}</>;
-  const rawUrl = `/api/local/projects/${projectId}/file-preview?path=${encodeURIComponent(path)}`;
-  if (view.kind === "image")
-    return (
-      <div className="grid h-full overflow-auto bg-[linear-gradient(45deg,#e5e7eb_25%,transparent_25%),linear-gradient(-45deg,#e5e7eb_25%,transparent_25%),linear-gradient(45deg,transparent_75%,#e5e7eb_75%),linear-gradient(-45deg,transparent_75%,#e5e7eb_75%)] bg-[length:20px_20px] bg-[position:0_0,0_10px,10px_-10px,-10px_0px] p-6 dark:opacity-90">
-        <img
-          src={rawUrl}
-          alt={path}
-          className="m-auto max-h-full max-w-full object-contain shadow-xl"
-        />
-      </div>
-    );
-  if (view.kind === "pdf")
-    return (
-      <iframe
-        src={rawUrl}
-        title={path}
-        className="h-full w-full border-0 bg-white"
-      />
-    );
-  if (view.kind === "spreadsheet") {
-    const sheets = view.sheets || [];
-    const sheet = sheets[sheetIndex];
-    return (
-      <div className="flex h-full min-h-0 flex-col bg-white dark:bg-slate-950">
-        <div className="flex shrink-0 gap-1 overflow-x-auto border-b border-slate-200 p-2 dark:border-slate-800">
-          {sheets.map((item, index) => (
-            <button
-              key={`${item.name}:${index}`}
-              type="button"
-              onClick={() => setSheetIndex(index)}
-              className={`rounded-lg px-3 py-1.5 text-xs ${index === sheetIndex ? "bg-indigo-600 text-white" : "bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300"}`}
-            >
-              {item.name}
-            </button>
-          ))}
-          {view.truncated && (
-            <span className="ml-auto self-center text-[10px] text-amber-500">
-              大表格仅展示前 20 个工作表、500 行、100 列
-            </span>
-          )}
-        </div>
-        <div className="min-h-0 flex-1 overflow-auto">
-          {sheet ? (
-            <table className="min-w-full border-collapse font-mono text-[11px]">
-              <tbody>
-                {sheet.rows.map((row, rowIndex) => (
-                  <tr key={rowIndex}>
-                    <th className="sticky left-0 z-10 border border-slate-200 bg-slate-100 px-2 py-1 text-right font-normal text-slate-400 dark:border-slate-700 dark:bg-slate-900">
-                      {rowIndex + 1}
-                    </th>
-                    {row.map((cell, columnIndex) => (
-                      <td
-                        key={columnIndex}
-                        className="max-w-80 whitespace-pre-wrap border border-slate-200 px-2 py-1 align-top dark:border-slate-700"
-                      >
-                        {cell}
-                      </td>
-                    ))}
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          ) : (
-            <div className="grid h-full place-items-center text-sm text-slate-400">
-              表格中没有工作表
-            </div>
-          )}
-        </div>
-      </div>
-    );
-  }
-  return (
-    <div className="grid h-full place-items-center px-8 text-center text-sm text-slate-400">
-      <div>
-        <File size={28} className="mx-auto mb-3" />
-        <p className="font-semibold text-slate-600 dark:text-slate-300">
-          暂不支持预览此文件
-        </p>
-        <p className="mt-1 text-xs">
-          {view.reason || "该二进制格式暂时无法在工作区内打开"}
-        </p>
-      </div>
-    </div>
-  );
+function LocalFileViewer({ projectId, path, view, children, content, onMarkdownNavigate, markdownAnchor, onMarkdownAnchorApplied }: { projectId: string; path: string; view: FileView; children: React.ReactNode; content: string; onMarkdownNavigate: (target: MarkdownNavigation) => void; markdownAnchor?: string; onMarkdownAnchorApplied: () => void }) {
+  const loadMarkdownImage = useCallback(async (resource: string, signal: AbortSignal) => {
+    const response = await fetch(`/api/local/projects/${projectId}/file-preview?path=${encodeURIComponent(resource)}`, { signal });
+    if (!response.ok) throw new Error('图片不可用'); return response.blob();
+  }, [projectId]);
+  return <WorkspaceFileViewer path={path} view={view} content={content} loadMarkdownImage={loadMarkdownImage} onMarkdownNavigate={onMarkdownNavigate} markdownAnchor={markdownAnchor} onMarkdownAnchorApplied={onMarkdownAnchorApplied} rawUrl={`/api/local/projects/${projectId}/file-preview?path=${encodeURIComponent(path)}`}>{children}</WorkspaceFileViewer>;
 }
 
 function WorkspaceTab({
@@ -1853,36 +2236,10 @@ function WorkspaceTab({
 }
 
 function buildLocalTree(entries: FileEntry[]): LocalTreeNode[] {
-  const root: LocalTreeNode = { name: "", path: "", isDir: true, children: [] };
-  for (const entry of entries.filter((item) => item.type === "file")) {
-    const parts = entry.path.split("/");
-    let current = root;
-    parts.forEach((name, index) => {
-      const nodePath = parts.slice(0, index + 1).join("/");
-      let child = current.children.find((item) => item.name === name);
-      if (!child) {
-        child = {
-          name,
-          path: nodePath,
-          isDir: index < parts.length - 1,
-          children: [],
-        };
-        current.children.push(child);
-      }
-      current = child;
-    });
-  }
-  const sort = (node: LocalTreeNode) => {
-    node.children.sort((a, b) =>
-      a.isDir === b.isDir ? a.name.localeCompare(b.name) : a.isDir ? -1 : 1,
-    );
-    node.children.forEach(sort);
-  };
-  sort(root);
-  return root.children;
+  return buildWorkspaceFileTree(entries);
 }
 
-function LocalFileTree({
+const LocalFileTree = memo(function LocalFileTree({
   active,
   projectName,
   entries,
@@ -1890,6 +2247,7 @@ function LocalFileTree({
   onSelect,
   onCreate,
   onDelete,
+  onMove,
 }: {
   active: boolean;
   projectName: string;
@@ -1898,6 +2256,7 @@ function LocalFileTree({
   onSelect: (path: string) => void;
   onCreate: (parentPath: string, type: "file" | "directory") => void;
   onDelete: (path: string, isDir: boolean) => void;
+  onMove: (path: string, isDir: boolean) => void;
 }) {
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; node: LocalTreeNode }>();
   useEffect(() => { if (!active) setContextMenu(undefined); }, [active]);
@@ -1924,13 +2283,13 @@ function LocalFileTree({
       <ul className="py-2">
         <LocalTreeItem node={root} depth={0} selected={selected} onSelect={onSelect} onContextMenu={(event, node) => { event.preventDefault(); const row = event.currentTarget.getBoundingClientRect(); setContextMenu({ x: Math.min(event.clientX, row.right), y: row.top, node }); }} />
       </ul>
-      {contextMenu && createPortal(<div role="menu" className="fixed z-[1000] min-w-40 overflow-hidden rounded-xl border border-slate-200 bg-white py-1 text-[11px] shadow-2xl dark:border-slate-700 dark:bg-slate-900" style={{ left: Math.max(8, Math.min(contextMenu.x, window.innerWidth - 180)), top: Math.max(8, Math.min(contextMenu.y, window.innerHeight - (contextMenu.node.isDir ? 126 : 54))) }} onPointerDown={(event) => event.stopPropagation()}>
+      {contextMenu && createPortal(<div role="menu" className="fixed z-[1000] min-w-40 overflow-hidden rounded-xl border border-slate-200 bg-white py-1 text-[11px] shadow-2xl dark:border-slate-700 dark:bg-slate-900" style={{ left: Math.max(8, Math.min(contextMenu.x, window.innerWidth - 180)), top: Math.max(8, Math.min(contextMenu.y, window.innerHeight - (contextMenu.node.isDir ? 158 : 86))) }} onPointerDown={(event) => event.stopPropagation()}>
         {contextMenu.node.isDir && <><ContextAction icon={<FilePlus2 size={13}/>} label="新建文件" onClick={() => { onCreate(contextMenu.node.path, "file"); setContextMenu(undefined); }}/><ContextAction icon={<FolderPlus size={13}/>} label="新建文件夹" onClick={() => { onCreate(contextMenu.node.path, "directory"); setContextMenu(undefined); }}/></>}
-        {contextMenu.node.path && <><div className="my-1 border-t border-slate-200 dark:border-slate-700"/><ContextAction danger icon={<Trash2 size={13}/>} label={contextMenu.node.isDir ? "删除文件夹" : "删除文件"} onClick={() => { onDelete(contextMenu.node.path, contextMenu.node.isDir); setContextMenu(undefined); }}/></>}
+        {contextMenu.node.path && <><ContextAction icon={<Pencil size={13}/>} label="重命名 / 移动" onClick={() => { onMove(contextMenu.node.path, contextMenu.node.isDir); setContextMenu(undefined); }}/><div className="my-1 border-t border-slate-200 dark:border-slate-700"/><ContextAction danger icon={<Trash2 size={13}/>} label={contextMenu.node.isDir ? "删除文件夹" : "删除文件"} onClick={() => { onDelete(contextMenu.node.path, contextMenu.node.isDir); setContextMenu(undefined); }}/></>}
       </div>, document.body)}
     </>
   );
-}
+});
 
 function LocalTreeItem({
   node,
@@ -1953,6 +2312,7 @@ function LocalTreeItem({
         <button
           type="button"
           onClick={() => setOpen((value) => !value)}
+          aria-expanded={open}
           onContextMenu={(event) => onContextMenu(event, node)}
           style={padding}
           className="group flex min-h-6 w-full items-center gap-1 pr-1.5 text-left text-[11px] text-slate-600 transition hover:bg-slate-200/60 dark:text-slate-300 dark:hover:bg-slate-800/70"
@@ -1973,7 +2333,7 @@ function LocalTreeItem({
           style={{ gridTemplateRows: open ? "1fr" : "0fr" }}
         >
           <ul className="min-h-0 overflow-hidden">
-            {node.children.map((child) => (
+            {open && node.children.map((child) => (
               <LocalTreeItem
                 key={child.path}
                 node={child}
@@ -1999,7 +2359,7 @@ function LocalTreeItem({
         className={`group flex min-h-6 w-full items-center gap-1 pr-1.5 text-left text-[11px] transition ${active ? "bg-gradient-to-r from-indigo-50 to-transparent font-semibold text-indigo-700 dark:from-indigo-500/15 dark:text-indigo-300" : "text-slate-600 hover:bg-slate-200/60 dark:text-slate-400 dark:hover:bg-slate-800/70"}`}
       >
         <span className="w-[13px] shrink-0" />
-        <FileCode2
+        <WorkspaceFileIcon path={node.path}
           size={13}
           className={active ? "text-indigo-500" : "text-slate-400"}
         />

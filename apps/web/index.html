@@ -7,6 +7,9 @@
   </head>
   <body>
     <div id="root"></div>
+    <!-- Monaco 0.56 language packs are plain scripts, not AMD modules. Load
+         messages before the editor bundle without an AMD language dependency. -->
+    <script src="/monaco/vs/nls/lang/zh-cn.js"></script>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

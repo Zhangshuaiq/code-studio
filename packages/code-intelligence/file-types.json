@@ -1,0 +1,16 @@
+{
+  "ignoredDirectories": [".git", "node_modules", "dist", "build", "target", ".vite", ".cache", ".next", ".gradle", "__pycache__", ".venv", "venv"],
+  "languages": {
+    "javascript": ["js", "jsx", "mjs", "cjs"], "typescript": ["ts", "tsx", "mts", "cts"],
+    "java": ["java"], "json": ["json", "jsonc", "json5", "ipynb"], "xml": ["xml", "xsd", "xsl", "xslt", "wsdl", "svg.xml", "pom"],
+    "sql": ["sql", "ddl", "dml"], "shell": ["sh", "bash", "zsh", "ksh", "fish"], "powershell": ["ps1", "psm1", "psd1"], "bat": ["bat", "cmd"],
+    "markdown": ["md", "markdown", "mdown", "mkd", "mkdn", "mdwn"], "yaml": ["yaml", "yml"], "ini": ["ini", "properties", "conf", "cfg", "env"], "toml": ["toml"],
+    "html": ["html", "htm", "xhtml"], "css": ["css"], "scss": ["scss"], "less": ["less"], "vue": ["vue"],
+    "python": ["py", "pyw", "pyi"], "go": ["go"], "rust": ["rs"], "c": ["c", "h"], "cpp": ["cc", "cpp", "cxx", "hh", "hpp", "hxx"],
+    "csharp": ["cs", "csx"], "kotlin": ["kt", "kts"], "groovy": ["groovy", "gradle"], "ruby": ["rb", "rake", "gemspec"], "php": ["php"], "swift": ["swift"], "dart": ["dart"], "lua": ["lua"], "r": ["r"], "perl": ["pl", "pm"], "scala": ["scala", "sc"], "dockerfile": ["dockerfile"], "plaintext": ["txt", "log", "lock", "gitignore", "gitattributes", "editorconfig"]
+  },
+  "names": { "dockerfile": "dockerfile", "containerfile": "dockerfile", "makefile": "makefile", "gnumakefile": "makefile", "jenkinsfile": "groovy", "gemfile": "ruby", "rakefile": "ruby", "mvnw": "shell", "gradlew": "shell", ".bashrc": "shell", ".bash_profile": "shell", ".zshrc": "shell", ".zprofile": "shell", ".profile": "shell", ".env": "ini", ".gitignore": "plaintext", ".gitattributes": "plaintext", ".editorconfig": "ini", "license": "plaintext", "readme": "plaintext" },
+  "images": { "png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg", "gif": "image/gif", "webp": "image/webp", "svg": "image/svg+xml", "bmp": "image/bmp", "ico": "image/x-icon", "avif": "image/avif" },
+  "mime": { "json": "application/json", "xml": "application/xml", "html": "text/html", "css": "text/css", "markdown": "text/markdown", "sql": "text/plain", "shell": "text/plain", "yaml": "text/yaml" },
+  "binary": { "jar": "Java 归档", "class": "Java 字节码", "zip": "ZIP 归档", "gz": "Gzip 压缩文件", "tar": "Tar 归档", "7z": "7-Zip 归档", "rar": "RAR 归档", "exe": "可执行文件", "dll": "动态链接库", "so": "共享库", "dylib": "动态链接库", "doc": "Word 文档", "docx": "Word 文档", "ppt": "PowerPoint 文档", "pptx": "PowerPoint 文档", "mp3": "音频", "mp4": "视频", "woff": "字体", "woff2": "字体", "ttf": "字体" }
+}

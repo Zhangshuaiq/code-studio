@@ -1,6 +1,6 @@
 {
   "name": "@codegen/desktop",
-  "version": "0.1.0",
+  "version": "0.1.2",
   "private": true,
   "author": "Code Studio Team",
   "description": "Code Studio desktop client",
@@ -16,6 +16,7 @@
     "dist:win": "npm run prepare-language-servers && npm run prepare-renderer && electron-builder --win nsis portable"
   },
   "dependencies": {
+    "@codegen/code-intelligence": "0.1.0",
     "@kubernetes/client-node": "^2.0.0",
     "@vscode/ripgrep": "^1.15.14",
     "@vue/language-server": "^2.2.12",

@@ -1,4 +1,4 @@
-import { IsString, MaxLength } from 'class-validator';
+import { IsString, IsOptional, Matches, MaxLength } from 'class-validator';
 
 export class WriteFileDto {
   @IsString()
@@ -7,4 +7,9 @@ export class WriteFileDto {
 
   @IsString()
   content!: string;
+
+  @IsOptional()
+  @IsString()
+  @Matches(/^[a-f0-9]{64}$/)
+  expectedVersion?: string;
 }
