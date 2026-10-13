@@ -796,6 +796,16 @@ Redis 连接建立后以及类型读取后、真正写命令前，重新核对�
 
 验证：桌面/API Redis 全套 26 项通过，无跳过；真实列表测试覆盖重复值精确删除、左右两侧移动、二进制/空值、TTL 保留、单项删除、旧长度/值拒绝、提交期间列表变化、提交前撤权与超大移动拒绝后列表不变。测试只创建并清理随机键。隔离桌面界面覆盖后续页索引编辑、精确删除及头部新增，数据存储为模拟服务；网页列表预览及写按钮隐藏回归通过，远程仍只读。网页/桌面 renderer 构建及 diff 检查通过。本批不代表全部 roadmap 完成：类型化新建集合、跨详情草稿恢复、企业策略/TLS/受限 ACL 联调和安装包发布仍待继续；未安装或提交本开发分支。
 
+### 8.38 Push 自动构建桌面安装包（2026-10-13）
+
+新增 `.github/workflows/desktop-build.yml`：所有分支/tag 的 push 与手动 workflow_dispatch 触发，不使用路径过滤，不因后续 push 取消前一次构建。并行原生 runner 构建 macOS x64/arm64 DMG+ZIP、Windows x64 NSIS Setup EXE+Portable EXE；Windows 两种输出设置不同文件名，避免互相覆盖。Windows renderer 通过 cmd.exe 运行固定 npm 命令，避免直接 spawn npm.cmd 的平台错误。Action 固定提交哈希，仓库只读权限、不保留 checkout 凭据，不传入签名密钥；`--publish never` 不自动创建 Release。
+
+安装依赖使用 npm ci 与锁文件；语言工具缓存按操作系统、架构及安装脚本哈希隔离。每个构建校验两种预期包存在且非空，生成 SHA256SUMS.txt/build-info.json，再上传 Actions Artifacts（名称含完整提交 SHA，保留 14 天）。到仓库 Actions → Desktop packages → 对应运行下载平台产物；包内含 JDT LS、Lombok、Java debug 工具，Java 项目仍需要用户本机 JDK。CI 包没有 Developer ID 公证或 Windows 可信证书签名，系统安全提示仍可能出现；不是正式签名发布/自动更新验收。
+
+本机测试只能验证当前 macOS 平台；Windows/Intel macOS 实际构建与运行结果须以首次 Actions 运行及目标系统安装验证为准，不以 YAML 校验代替。该流程从包含 workflow 的提交 push 开始生效；旧提交不会追溯触发。收费/分钟数依仓库 GitHub Actions 配额，默认未增加公开 Release 发布。
+
+本批本机 macOS arm64 使用 workflow 同一打包命令成功生成 DMG/ZIP，3 项配置/产物校验测试与 electron-builder JSON schema 校验通过；未替换已安装客户端。Windows 与 Intel 构建等待首次云端结果。
+
 ## 9. 数据源管理与 Git 版本管理补齐（2026-10-10）
 
 ### 9.1 数据源：同一详情组件，本机执行

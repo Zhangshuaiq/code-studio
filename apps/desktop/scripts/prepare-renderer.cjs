@@ -9,6 +9,8 @@ const result = spawnSync(
     cwd: repoRoot,
     env: { ...process.env, VITE_RUNTIME_MODE: 'desktop-local' },
     stdio: 'inherit',
+    // npm.cmd needs cmd.exe on Windows; command and arguments are fixed here.
+    shell: process.platform === 'win32',
   },
 );
 
