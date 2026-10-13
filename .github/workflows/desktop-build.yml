@@ -53,7 +53,7 @@ jobs:
       - name: Install locked dependencies
         run: npm ci
       - name: Packaging configuration tests
-        run: node --test apps/desktop/test/desktop-release.test.cjs
+        run: node --test apps/desktop/test/desktop-release.test.cjs apps/desktop/test/java-tools-download.test.cjs
       - name: Build desktop packages
         run: npm run ${{ matrix.script }} --workspace apps/desktop -- --${{ matrix.arch }} --publish never
       - name: Verify package outputs and write checksums

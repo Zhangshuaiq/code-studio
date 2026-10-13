@@ -806,6 +806,8 @@ Redis 连接建立后以及类型读取后、真正写命令前，重新核对�
 
 本批本机 macOS arm64 使用 workflow 同一打包命令成功生成 DMG/ZIP，3 项配置/产物校验测试与 electron-builder JSON schema 校验通过；未替换已安装客户端。Windows 与 Intel 构建等待首次云端结果。
 
+首次云端构建在 Java 调试插件冷下载时暴露 HTTP 编码问题：Marketplace 即使收到 Accept-Encoding: identity 仍返回 Content-Encoding: gzip，旧脚本将压缩响应直接交给 ZIP 解压器，导致 central directory 错误。已改为按 HTTP 编码流式解码 gzip/deflate/br，对传输和解码后的数据分别限制 100 MiB，处理截断/异常响应；VSIX 格式检查及提取后固定 JAR SHA-256 校验保持启用。桌面包装脚本与共享模块入口同步调整，CI 加入下载解码回归。5 项下载/打包配置测试通过，禁用本机 Maven/VS Code 缓存的真实网络安装及两个 JAR 哈希校验通过；这证明下载故障修复，不代替新的 Windows 完整打包结果。
+
 ## 9. 数据源管理与 Git 版本管理补齐（2026-10-10）
 
 ### 9.1 数据源：同一详情组件，本机执行
