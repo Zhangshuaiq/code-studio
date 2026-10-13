@@ -2,17 +2,20 @@ import { useMemo } from 'react';
 import CodeMirror from '@uiw/react-codemirror';
 import { autocompletion, CompletionContext } from '@codemirror/autocomplete';
 import { EditorView } from '@codemirror/view';
+import registry from '../../../../../packages/code-intelligence/redis-commands.json';
 
 interface RedisEditorProps {
   value: string;
   onChange: (value: string) => void;
   placeholder?: string;
+  allowWrites?: boolean;
 }
 
 export function RedisEditor({
   value,
   onChange,
   placeholder = 'GET mykey',
+  allowWrites = false,
 }: RedisEditorProps) {
   // 工作台只暴露只读命令；写命令必须通过受控审批能力实现后才能开放。
   const redisCommands = [
@@ -65,6 +68,7 @@ export function RedisEditor({
 
     // 键操作
     { cmd: 'KEYS', args: 'pattern', desc: '查找匹配的键' },
+    { cmd: 'SCAN', args: 'cursor [MATCH pattern] [COUNT count]', desc: '分页扫描键，不使用全量 KEYS' },
     { cmd: 'EXISTS', args: 'key [key ...]', desc: '判断键是否存在' },
     { cmd: 'DEL', args: 'key [key ...]', desc: '删除键' },
     { cmd: 'EXPIRE', args: 'key seconds', desc: '设置键过期时间' },
@@ -79,7 +83,7 @@ export function RedisEditor({
     { cmd: 'SELECT', args: 'index', desc: '切换数据库' },
     { cmd: 'FLUSHDB', args: '', desc: '清空当前数据库' },
     { cmd: 'FLUSHALL', args: '', desc: '清空所有数据库' },
-  ].filter(({ cmd }) => new Set([
+  ].filter(({ cmd }) => allowWrites ? registry.read.includes(cmd) || registry.write.includes(cmd) : new Set([
     'GET', 'MGET', 'EXISTS', 'TYPE', 'TTL', 'PTTL', 'STRLEN',
     'SCAN', 'HSCAN', 'SSCAN', 'ZSCAN',
     'HGET', 'HMGET', 'HGETALL', 'HLEN', 'HEXISTS', 'HKEYS', 'HVALS',

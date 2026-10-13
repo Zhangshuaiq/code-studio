@@ -3,6 +3,7 @@ const os = require('node:os');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const { decodeText } = require('./file-text.cjs');
+const { supportsBashLanguage } = require('./shell-language.cjs');
 const { pathToFileURL, fileURLToPath } = require('node:url');
 const { createMessageConnection, StreamMessageReader, StreamMessageWriter } = require('vscode-jsonrpc/node');
 const { spawnGuarded } = require('./guarded-process.cjs');
@@ -12,6 +13,9 @@ const LANGUAGE_PROVIDERS = new Map([
   ['.c', 'clangd'], ['.h', 'clangd'], ['.cc', 'clangd'], ['.cpp', 'clangd'], ['.cxx', 'clangd'], ['.hh', 'clangd'], ['.hpp', 'clangd'], ['.hxx', 'clangd'],
   ['.go', 'gopls'], ['.rs', 'rust-analyzer'], ['.vue', 'vue'],
 ]);
+function fileProvider(file) {
+  return supportsBashLanguage(file) ? 'bash' : LANGUAGE_PROVIDERS.get(path.extname(file).toLowerCase());
+}
 
 class LocalLspManager {
   constructor(options = {}) {
@@ -245,7 +249,7 @@ class LocalLspManager {
   }
 
   async saved(project, relativePath) {
-    const provider = LANGUAGE_PROVIDERS.get(path.extname(relativePath).toLowerCase());
+    const provider = fileProvider(relativePath);
     const existing = this.sessions.get(`${project.id}:${provider}`);
     if (!existing) return;
     try {
@@ -298,7 +302,7 @@ class LocalLspManager {
 
   async refreshNavigation(project, queries) {
     for (const input of queries) {
-      const provider = LANGUAGE_PROVIDERS.get(path.extname(input.path).toLowerCase());
+      const provider = fileProvider(input.path);
       if (this.shuttingDown || !this.sessions.has(`${project.id}:${provider}`)) continue;
       await this.request(project, input.operation, { ...input, __skipCache: true }).catch(() => {});
     }
@@ -310,7 +314,7 @@ class LocalLspManager {
     if (!relativePath || typeof relativePath !== 'string' || path.isAbsolute(relativePath) || relativePath.includes('\0')) throw Object.assign(new Error('文件路径无效'), { code: 'WORKSPACE_PATH_INVALID' });
     const root = fs.realpathSync(project.path); const candidate = path.resolve(root, relativePath);
     const file = fs.realpathSync(candidate);
-    const provider = LANGUAGE_PROVIDERS.get(path.extname(file).toLowerCase());
+    const provider = fileProvider(file);
     if (!file.startsWith(`${root}${path.sep}`) || !fs.statSync(file).isFile() || !provider) throw Object.assign(new Error('该文件暂不支持代码导航'), { code: 'WORKSPACE_PATH_INVALID' });
     return { file, provider };
   }
@@ -335,11 +339,15 @@ class LocalLspManager {
     session.javaAutobuildEnabled = this.javaAutobuild && !this.deferJavaAutobuild;
     this.#lifecycle(session, 'spawn');
     const invocation = languageServerInvocation(session, this.dataRoot, this.commands);
-    const child = spawnGuarded(invocation.command, invocation.args, { cwd: session.root, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
+    // Keep the guardian's environment isolation: only forward executable lookup
+    // variables, not API tokens or database credentials from the API process.
+    const env = { PATH: process.env.PATH || process.env.Path || (process.platform === 'win32' ? '' : '/usr/bin:/bin') };
+    if (process.platform === 'win32' && process.env.SystemRoot) env.SystemRoot = process.env.SystemRoot;
+    const child = spawnGuarded(invocation.command, invocation.args, { cwd: session.root, env, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
     session.child = child;
     child.stderr.on('data', (chunk) => { if (process.env.CODE_STUDIO_LSP_DEBUG === '1') process.stderr.write(chunk); });
     session.connection = createMessageConnection(new StreamMessageReader(child.stdout), new StreamMessageWriter(child.stdin));
-    session.connection.onRequest('workspace/configuration', (params) => (params?.items || []).map((item) => session.provider === 'java' && item?.section === 'java' ? javaSettings(session.javaAutobuildEnabled).java : {}));
+    session.connection.onRequest('workspace/configuration', (params) => (params?.items || []).map((item) => session.provider === 'java' && item?.section === 'java' ? javaSettings(session.javaAutobuildEnabled).java : session.provider === 'bash' && item?.section === 'bashIde' ? bashSettings() : {}));
     session.connection.onRequest('client/registerCapability', () => null);
     session.connection.onRequest('window/workDoneProgress/create', () => null);
     session.connection.onNotification('language/progress', (progress) => {
@@ -375,6 +383,10 @@ class LocalLspManager {
       session.diagnostics.set(params.uri, params.diagnostics || []);
       session.diagnosticVersions.set(params.uri, (session.diagnosticVersions.get(params.uri) || 0) + 1);
       const waiter = session.diagnosticWaiters.get(params.uri); session.diagnosticWaiters.delete(params.uri); waiter?.();
+      const bashWaiter = session.bashDocumentWaiters?.get(params.uri);
+      if (bashWaiter && params.version >= bashWaiter.version) {
+        session.bashDocumentWaiters.delete(params.uri); bashWaiter.resolve();
+      }
     });
     session.connection.listen();
     child.once('close', () => {
@@ -395,7 +407,9 @@ class LocalLspManager {
         ? { settings: javaSettings(session.javaAutobuildEnabled), bundles: [resolveJavaTool('java-debug.jar', session.resources)], extendedClientCapabilities: { classFileContentsSupport: true, progressReportProvider: true, shouldLanguageServerExitOnShutdown: true } }
         : session.provider === 'vue'
           ? { typescript: { tsdk: path.dirname(require.resolve('typescript/lib/typescript.js')), disableAutoImportCache: false }, vue: { hybridMode: false } }
-          : undefined,
+          : session.provider === 'bash'
+            ? bashSettings()
+            : undefined,
     }), child, session.provider, session.provider === 'java' ? this.javaInitializationMs : this.initializationMs);
     if (session.stopping || this.shuttingDown) throw Object.assign(new Error('语言服务正在关闭'), { code: 'LOCAL_LSP_UNAVAILABLE' });
     this.#lifecycle(session, 'initialize-complete');
@@ -421,10 +435,27 @@ class LocalLspManager {
     }
     const content = typeof suppliedContent === 'string' ? suppliedContent : session.diskContents.get(uri);
     const current = session.documents.get(uri);
+    let bashReady;
+    let bashWaiter;
+    if (session.provider === 'bash' && current !== content) {
+      session.bashDocumentWaiters ||= new Map();
+      bashReady = new Promise(resolve => { bashWaiter = { version: session.version + 1, resolve }; session.bashDocumentWaiters.set(uri, bashWaiter); });
+      bashWaiter.promise = bashReady;
+    } else if (session.provider === 'bash') {
+      bashWaiter = session.bashDocumentWaiters?.get(uri);
+      bashReady = bashWaiter?.promise;
+    }
     if (current === undefined) {
       session.documents.set(uri, content); session.connection.sendNotification('textDocument/didOpen', { textDocument: { uri, languageId: languageId(file), version: ++session.version, text: content } });
     } else if (current !== content) {
       session.documents.set(uri, content); session.connection.sendNotification('textDocument/didChange', { textDocument: { uri, version: ++session.version }, contentChanges: [{ text: content }] });
+    }
+    // Bash initializes its analyzer asynchronously after `initialized`. Wait for
+    // this document version, not a fixed delay or a stale result from disk.
+    if (bashReady) {
+      try { await boundedWait(bashReady, 5000); }
+      catch { throw Object.assign(new Error('Shell 文件正在分析，请稍后重试'), { code: 'LOCAL_LSP_TIMEOUT' }); }
+      finally { if (session.bashDocumentWaiters.get(uri) === bashWaiter) session.bashDocumentWaiters.delete(uri); }
     }
   }
 
@@ -489,6 +520,7 @@ class LocalLspManager {
     const closed = exited ? Promise.resolve() : new Promise((resolve) => session.child.once('close', () => { exited = true; resolve(); }));
     if (session.provider === 'java') for (const key of this.javaSources.keys()) if (key.startsWith(`${session.projectId}:`)) this.javaSources.delete(key);
     session.diagnosticWaiters.forEach((resolve) => resolve()); session.diagnosticWaiters.clear();
+    session.bashDocumentWaiters?.forEach(waiter => waiter.resolve()); session.bashDocumentWaiters?.clear();
     try {
       await boundedWait(session.connection?.sendRequest('shutdown'), session.provider === 'java' ? 20_000 : 5_000);
       this.#lifecycle(session, 'shutdown-reply');
@@ -510,7 +542,7 @@ class LocalLspManager {
   }
 }
 
-function languageId(file) { const extension = path.extname(file).toLowerCase(); if (extension === '.py') return 'python'; if (extension === '.java') return 'java'; if (extension === '.go') return 'go'; if (extension === '.rs') return 'rust'; if (extension === '.vue') return 'vue'; if (['.c', '.h'].includes(extension)) return 'c'; if (['.cc', '.cpp', '.cxx', '.hh', '.hpp', '.hxx'].includes(extension)) return 'cpp'; return extension === '.ts' || extension === '.tsx' ? 'typescript' : 'javascript'; }
+function languageId(file) { if (supportsBashLanguage(file)) return 'shellscript'; const extension = path.extname(file).toLowerCase(); if (extension === '.py') return 'python'; if (extension === '.java') return 'java'; if (extension === '.go') return 'go'; if (extension === '.rs') return 'rust'; if (extension === '.vue') return 'vue'; if (['.c', '.h'].includes(extension)) return 'c'; if (['.cc', '.cpp', '.cxx', '.hh', '.hpp', '.hxx'].includes(extension)) return 'cpp'; return extension === '.ts' || extension === '.tsx' ? 'typescript' : 'javascript'; }
 function languageRequest(session, method, params, timeoutMs = 15_000) {
   let timer;
   return Promise.race([
@@ -536,7 +568,16 @@ function identifierAt(content, line, column) {
 }
 function restoreLspItem(root, item) { if (!item?.path) throw Object.assign(new Error('调用层级项目无效'), { code: 'LOCAL_LSP_REQUEST_INVALID' }); const file = path.resolve(root, item.path); if (!file.startsWith(`${root}${path.sep}`)) throw Object.assign(new Error('调用层级项目无效'), { code: 'LOCAL_LSP_REQUEST_INVALID' }); const { path: _path, ...rest } = item; return { ...rest, uri: pathToFileURL(file).href }; }
 
+function bashSettings() {
+  return { explainshellEndpoint: '', shellcheckExternalSources: false, backgroundAnalysisMaxFiles: 2000, globPattern: '**/{*.sh,*.bash,mvnw,gradlew,.bashrc,.bash_profile,.profile}' };
+}
 function languageServerInvocation(session, dataRoot, commands = {}) {
+  if (session.provider === 'bash') {
+    const configured = commands.bash || process.env.CODE_STUDIO_BASH_LANGUAGE_SERVER_COMMAND;
+    if (configured) return { command: configured, args: ['start'] };
+    const cli = path.join(path.dirname(require.resolve('bash-language-server/package.json')), 'out', 'cli.js');
+    return { command: process.execPath, args: [cli, 'start'] };
+  }
   if (session.provider === 'java') {
     const home = resolveJdtlsHome(session.resources); const plugins = path.join(home, 'plugins');
     const launcher = fs.readdirSync(plugins).find((name) => /^org\.eclipse\.equinox\.launcher_.*\.jar$/.test(name));
@@ -604,7 +645,7 @@ function detectProviders(root) {
     for (const entry of entries) {
       if (++visited > 2_000) break;
       if (entry.isDirectory() && !['.git', 'node_modules', '.venv', 'venv', 'dist', 'build', 'target'].includes(entry.name)) pending.push(path.join(directory, entry.name));
-      else if (entry.isFile()) { const provider = LANGUAGE_PROVIDERS.get(path.extname(entry.name).toLowerCase()); if (provider) found.add(provider); }
+      else if (entry.isFile()) { const provider = fileProvider(entry.name); if (provider) found.add(provider); }
     }
   }
   return found.size ? [...found] : ['typescript'];

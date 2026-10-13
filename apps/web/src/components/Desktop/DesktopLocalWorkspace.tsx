@@ -1,10 +1,13 @@
 import Editor from "@monaco-editor/react";
+import { WorkspaceSqlBinding } from '../CodeEditor/WorkspaceSqlBinding';
+import { workspaceSqlScope, readWorkspaceSqlContext } from '../../lib/workspace-sql-context';
 import { memo, useCallback, useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
 import { WorkspaceFileViewer } from '../CodeEditor/WorkspaceFileViewer';
 import { WorkspaceFileIcon } from '../CodeEditor/WorkspaceFileIcon';
 import type { MarkdownNavigation } from '../../lib/markdown-resource';
+import { supportsWorkspaceLanguage } from '../../lib/workspace-language';
 import {
   ArrowLeft,
   ArrowRight,
@@ -470,6 +473,7 @@ export function DesktopLocalWorkspace({
       if (!response.ok) { const body = await response.json(); throw Object.assign(new Error(body.message || '代码智能请求失败'), { code: body.code }); }
       return response.json();
     }, {
+      sqlContext: () => readWorkspaceSqlContext(workspaceSqlScope('local', project.id)),
       onError: (reason: any) => { if (!isLanguageStartupError(reason)) setError(reason?.message || '代码智能请求失败，请重试'); },
       prepareEdits: async (edit) => {
         const paths = [...new Set<string>(edit.edits.map((file: any) => file.path))];
@@ -746,7 +750,7 @@ export function DesktopLocalWorkspace({
   function dirtyDocuments(exclude: string) {
     let bytes = 0;
     return Object.values(fileStatesRef.current).filter((file) => {
-      if (file.path === exclude || file.view.readOnly || file.content === file.savedContent || !/\.(?:[cm]?[jt]sx?|py|java|c|h|cc|cpp|cxx|hh|hpp|hxx|go|rs|vue)$/i.test(file.path)) return false;
+      if (file.path === exclude || file.view.readOnly || file.content === file.savedContent || !supportsWorkspaceLanguage(file.path)) return false;
       bytes += file.content.length * 2;
       return bytes <= 1024 * 1024;
     }).slice(0, 20).map((file) => ({ path: file.path, content: file.content }));
@@ -2117,6 +2121,7 @@ export function DesktopLocalWorkspace({
                       </div>
                     )}
                     <div className="min-h-0 flex-1">
+                      {activePath && monacoLang(activePath) === 'sql' && <WorkspaceSqlBinding key={project.id} scope={workspaceSqlScope('local', project.id)} projectId={project.id} content={content} local active={active} />}
                       {loadingFile ? (
                         <div className="grid h-full place-items-center text-sm text-slate-400">
                           <LoaderCircle size={20} className="animate-spin" />

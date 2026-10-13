@@ -1,6 +1,7 @@
 const { Client } = require('pg');
 const { isIP } = require('node:net');
 const mysql = require('mysql2/promise');
+const { testRedis, executeRedis } = require('./local-redis-runtime.cjs');
 const { Kafka, logLevel } = require('kafkajs');
 
 class LocalConnectorRuntime {
@@ -30,6 +31,7 @@ class LocalConnectorRuntime {
     const started = Date.now();
     if (config.type === 'postgres') await testPostgres(config.settings, secret);
     else if (config.type === 'mysql') await testMysql(config.settings, secret);
+    else if (config.type === 'redis') await testRedis(config.settings, secret);
     else if (config.type === 'kafka') await testKafka(config.settings, secret);
     else if (config.type === 'kubernetes') await testKubernetes(config.settings, secret);
     else throw invalid('不支持的连接类型');
@@ -37,6 +39,7 @@ class LocalConnectorRuntime {
   }
 
   async explore(config, secret = '', input = {}) {
+    if (config.type === 'redis') return executeRedis(config.settings, secret, input);
     if (config.type === 'postgres' || config.type === 'mysql') return queryDatabase(input.database === undefined ? config : { ...config, settings: { ...config.settings, database: identifier(input.database, '数据库') } }, secret, input.sql, input.readOnly !== false);
     if (config.type === 'kafka') return listKafkaTopics(config.settings, secret);
     if (config.type === 'kubernetes') return listKubernetesPods(config.settings, secret);
@@ -105,11 +108,15 @@ async function testKubernetes(settings, token) {
 
 function validateConnector(input, id) {
   const type = typeof input.type === 'string' ? input.type : ''; const name = typeof input.name === 'string' ? input.name.trim() : '';
-  if (!name || name.length > 100 || !['postgres', 'mysql', 'kafka', 'kubernetes'].includes(type)) throw invalid('连接名称或类型无效');
+  if (!name || name.length > 100 || !['postgres', 'mysql', 'redis', 'kafka', 'kubernetes'].includes(type)) throw invalid('连接名称或类型无效');
   const source = input.settings && typeof input.settings === 'object' ? input.settings : {};
   let settings;
   if (type === 'postgres' || type === 'mysql') settings = { host: hostname(source.host), port: port(source.port, type === 'postgres' ? 5432 : 3306), database: text(source.database, 200), username: text(source.username, 200), ssl: Boolean(source.ssl) };
-  else if (type === 'kafka') {
+  else if (type === 'redis') {
+    const db = Number(source.db ?? 0);
+    if (!Number.isInteger(db) || db < 0 || db > 65535) throw invalid('Redis 数据库编号无效');
+    settings = { host: hostname(source.host), port: port(source.port, 6379), db, username: text(source.username, 200), ssl: Boolean(source.ssl) };
+  } else if (type === 'kafka') {
     const brokers = Array.isArray(source.brokers) ? source.brokers : String(source.brokers || '').split(',');
     settings = { brokers: brokers.map((item) => String(item).trim()).filter(Boolean).map(broker).slice(0, 20), clientId: text(source.clientId, 100) || 'code-studio', username: text(source.username, 200), ssl: Boolean(source.ssl) };
     if (!settings.brokers.length) throw invalid('请填写至少一个 Kafka Broker');

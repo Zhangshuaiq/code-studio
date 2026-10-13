@@ -3,7 +3,7 @@ import type { DbQueryTransport } from '../../hooks/useDbQuery';
 import type { Datasource } from '../../hooks/useDatasources';
 const DbQueryPage = lazy(() => import('../DbQuery/DbQueryPage').then((module) => ({ default: module.DbQueryPage })));
 
-export function DesktopDatabaseDetail({ connector, onBack, onEdit }: { connector: { id: string; name: string; type: 'postgres' | 'mysql'; settings: Record<string, any>; updatedAt?: string }; onBack: () => void; onEdit: () => void }) {
+export function DesktopDatabaseDetail({ connector, onBack, onEdit }: { connector: { id: string; name: string; type: 'postgres' | 'mysql' | 'redis'; settings: Record<string, any>; updatedAt?: string }; onBack: () => void; onEdit: () => void }) {
   const [notice, setNotice] = useState('');
   const transport = useMemo<DbQueryTransport>(() => {
     const tablesByDatabase = new Map<string, Map<string, { schema: string; name: string }>>();
@@ -34,14 +34,14 @@ export function DesktopDatabaseDetail({ connector, onBack, onEdit }: { connector
         return (await metadata({ action: 'columns', database, schema: target.schema, table: target.name }, signal)).map((column: any) => ({ column_name: column.name, data_type: column.type, is_nullable: column.nullable, column_default: column.default }));
       },
       selectSql(table) { return `SELECT * FROM ${connector.type === 'postgres' ? table : quote(table)} LIMIT 10;`; },
-      async execute(_id, payload) {
-        const response = await fetch(`/api/local/connectors/${connector.id}/explore`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
-        const body = await response.json(); if (!response.ok) throw new Error(body.message || '执行失败');
+      async execute(_id, payload, signal) {
+        const response = await fetch(`/api/local/connectors/${connector.id}/explore`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload), signal });
+        const body = await response.json(); if (!response.ok) throw Object.assign(new Error(body.message || '执行失败'), { status: response.status, code: body.code });
         if (body.truncated) setNotice('查询结果较大，目前仅显示前 500 行。');
-        return body.kind === 'table' ? body.rows : body;
+        return body?.kind === 'table' ? body.rows : body;
       },
     };
   }, [connector.id, connector.type, connector.updatedAt, connector.settings]);
-  const datasource: Datasource = { id: connector.id, name: connector.name, type: connector.type === 'postgres' ? 'postgresql' : 'mysql', category: 'relational', teamId: '', config: connector.settings as Datasource['config'], createdAt: '', updatedAt: connector.updatedAt || '' };
+  const datasource: Datasource = { id: connector.id, name: connector.name, type: connector.type === 'postgres' ? 'postgresql' : connector.type, category: connector.type === 'redis' ? 'nosql' : 'relational', teamId: '', config: connector.settings as Datasource['config'], createdAt: '', updatedAt: connector.updatedAt || '' };
   return <Suspense fallback={<div className="grid h-full place-items-center text-xs text-slate-400">正在打开连接详情…</div>}><DbQueryPage local={{ datasource, transport, onBack, onEdit, notice }} /></Suspense>;
 }

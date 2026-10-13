@@ -3,7 +3,7 @@ import { api } from "../lib/api";
 
 export interface DbQueryTransport {
   scope: string;
-  execute(id: string, payload: any): Promise<any>;
+  execute(id: string, payload: any, signal?: AbortSignal): Promise<any>;
   databases(id: string, signal?: AbortSignal): Promise<string[]>;
   tables(id: string, database?: string, signal?: AbortSignal): Promise<string[]>;
   describe(id: string, table: string, database?: string, signal?: AbortSignal): Promise<any>;

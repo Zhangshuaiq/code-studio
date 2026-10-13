@@ -1,0 +1,46 @@
+const test = require('node:test'); const assert = require('node:assert/strict'); const crypto = require('node:crypto');
+const Redis = require('ioredis');
+const { LocalConnectorRuntime, validateConnector } = require('../src/local-connector-runtime.cjs');
+const { validateRedisCommand } = require('../src/local-redis-runtime.cjs');
+test('Redis connector validates database, defaults, host/port and safe settings', () => {
+  const config = validateConnector({ name: 'Redis', type: 'redis', settings: { host: '127.0.0.1', db: '3', username: 'account', ssl: true, password: 'do-not-store' } }, 'id');
+  assert.equal(config.settings.port, 6379); assert.equal(config.settings.db, 3); assert.equal(config.settings.username, 'account'); assert.equal(config.settings.ssl, true); assert.ok(!Object.hasOwn(config.settings, 'password'));
+  for (const db of [-1, 1.5, 'wrong', 65536]) assert.throws(() => validateConnector({ name: 'Redis', type: 'redis', settings: { host: 'localhost', db } }), /数据库编号/);
+  assert.throws(() => validateConnector({ name: 'Redis', type: 'redis', settings: { host: 'localhost:6379' } }), /主机/);
+});
+test('Redis command validation rejects unsafe server operations and enforces readonly scope', () => {
+  for (const name of ['EVAL', 'CONFIG', 'ACL', 'FLUSHALL', 'FLUSHDB', 'KEYS', 'SHUTDOWN']) assert.throws(() => validateRedisCommand([name, '*'], false));
+  assert.throws(() => validateRedisCommand(['SET', 'key', 'value'], true), /只读/);
+  assert.equal(validateRedisCommand(['SET', 'key', 'value'], false).command, 'SET');
+  assert.equal(validateRedisCommand(['DEL', 'key'], false).destructive, true);
+  assert.throws(() => validateRedisCommand(['GET', { invalid: true }]));
+});
+test('real local Redis connector tests, CRUD, SCAN, TTL and bounded reads without approval', { skip: process.env.RUN_REDIS_TESTS !== '1', timeout: 30000 }, async t => {
+  const host = process.env.REDIS_HOST || '127.0.0.1'; const port = Number(process.env.REDIS_PORT || 6379); const secret = process.env.REDIS_PASSWORD || '';
+  const config = validateConnector({ name: 'test', type: 'redis', settings: { host, port } }, 'redis-test');
+  const client = new Redis({ host, port, password: secret || undefined, lazyConnect: true, maxRetriesPerRequest: 0, retryStrategy: () => null }); client.on('error', () => {});
+  const prefix = 'code-studio-test:' + crypto.randomUUID(); const keys = [prefix + ':value', prefix + ':large'];
+  t.after(async () => { try { if (client.status === 'ready') { await client.select(0); await client.del(...keys); await client.select(1); await client.del(...keys); } } finally { client.disconnect(); } });
+  await client.connect(); const runtime = new LocalConnectorRuntime();
+  assert.equal((await runtime.test(config, secret)).ok, true);
+  const execute = (command, extra = {}) => runtime.explore(config, secret, { command, readOnly: false, ...extra });
+  assert.equal(await execute(['SET', keys[0], 'a value with spaces']), 'OK');
+  assert.deepEqual(await execute(['GET', keys[0]]), { value: 'a value with spaces', totalBytes: 19, truncated: false });
+  assert.equal(await execute(['TYPE', keys[0]]), 'string');
+  await assert.rejects(execute(['DEL', keys[0]]), /确认/);
+  await assert.rejects(execute(['SET', keys[0], 'blocked'], { readOnly: true }), /只读/);
+  await assert.rejects(execute(['GETRANGE', keys[0], '0', '-1']), /64 KiB/);
+  await assert.rejects(execute(['SCAN', '0', 'COUNT', '1000']), /1–100/);
+  const page = await execute(['SCAN', '0', 'MATCH', prefix + ':*', 'COUNT', '100']); assert.ok(Array.isArray(page[1]));
+  assert.equal(await execute(['EXPIRE', keys[0], '60'], { confirmDestructive: true }), 1);
+  assert.ok(await execute(['TTL', keys[0]]) > 0);
+  await client.set(keys[1], 'x'.repeat(100000));
+  const large = await execute(['GET', keys[1]]); assert.equal(large.value.length, 65536); assert.equal(large.totalBytes, 100000); assert.equal(large.truncated, true);
+  const otherDatabase = { ...config, settings: { ...config.settings, db: 1 } };
+  assert.equal(await runtime.explore(otherDatabase, secret, { command: ['GET', keys[1]], readOnly: false }), null);
+  assert.equal(await runtime.explore(otherDatabase, secret, { command: ['SET', keys[1], 'separate database'], readOnly: false }), 'OK');
+  assert.equal((await runtime.explore(otherDatabase, secret, { command: ['GET', keys[1]], readOnly: false })).value, 'separate database');
+  assert.equal((await execute(['GET', keys[1]])).totalBytes, 100000, 'selected DB must not change another DB');
+  assert.equal(await execute(['DEL', keys[0]], { confirmDestructive: true }), 1);
+  assert.equal(await execute(['GET', keys[0]]), null);
+});

@@ -8,6 +8,7 @@
   },
   "dependencies": {
     "@vue/language-server": "^2.2.12",
+    "bash-language-server": "^5.8.1",
     "pyright": "^1.1.414",
     "tar": "^7.5.22",
     "tree-sitter-java": "0.23.5",

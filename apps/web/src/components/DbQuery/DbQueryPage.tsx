@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import { Database, Play, Table, ArrowLeft, Loader2, ChevronDown, Archive, ArrowRightLeft, X, Upload, Download, Pencil } from "lucide-react";
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
@@ -14,6 +14,8 @@ import {
 import { useDatasource, type Datasource } from "../../hooks/useDatasources";
 import { SqlEditor } from "./SqlEditor";
 import { RedisEditor } from "./RedisEditor";
+import { RedisBrowser } from './RedisBrowser';
+import { parseRedisCommand, isDestructiveRedisCommand } from '../../lib/redis-command';
 
 export function DbQueryPage({ local }: { local?: { datasource: Datasource; transport: DbQueryTransport; onBack: () => void; onEdit: () => void; notice?: string } } = {}) {
   const { datasourceId: routeId } = useParams<{ datasourceId: string }>();
@@ -30,12 +32,21 @@ export function DbQueryPage({ local }: { local?: { datasource: Datasource; trans
   const [dataDialog, setDataDialog] = useState<'import' | 'export' | null>(null);
   const [restoreTask, setRestoreTask] = useState<any>(null);
   const [result, setResult] = useState<any>(null);
-  const [tableStructures, setTableStructures] = useState<Record<string, any[]>>(
-    {},
-  );
+  const schemaScope = JSON.stringify([local ? 'local' : 'remote', datasourceId, selectedDatabase, datasource?.updatedAt]);
+  const [structureCache, setStructureCache] = useState<{ scope: string; tables: Record<string, any[]> }>({ scope: '', tables: {} });
+  const tableStructures = structureCache.scope === schemaScope ? structureCache.tables : {};
 
   const isRelational = datasource?.category === "relational";
   const isRedis = datasource?.type === "redis";
+  const browseRedis = useCallback(async (input: Record<string, unknown>, signal: AbortSignal) => {
+    if (!datasourceId) throw new Error('连接引用已失效');
+    const payload = { redisBrowse: input };
+    return transport ? transport.execute(datasourceId, payload, signal) : (await api.post(`/db-query/${datasourceId}/execute`, payload, { signal })).data;
+  }, [datasourceId, transport]);
+  const mutateRedis = useCallback(async (input: Record<string, unknown>, signal: AbortSignal) => {
+    if (!transport || !datasourceId) throw new Error('该连接不支持直接修改');
+    return transport.execute(datasourceId, { redisMutation: input }, signal);
+  }, [datasourceId, transport]);
   const isMongo = datasource?.type === "mongodb";
   const hasSchemaBrowser = isRelational || isMongo;
 
@@ -72,12 +83,9 @@ export function DbQueryPage({ local }: { local?: { datasource: Datasource; trans
   // 缓存表结构用于自动补全
   useEffect(() => {
     if (selectedTable && tableStructure && Array.isArray(tableStructure)) {
-      setTableStructures((prev) => ({
-        ...prev,
-        [selectedTable]: tableStructure,
-      }));
+      setStructureCache(prev => ({ scope: schemaScope, tables: { ...(prev.scope === schemaScope ? prev.tables : {}), [selectedTable]: tableStructure } }));
     }
-  }, [selectedTable, tableStructure]);
+  }, [selectedTable, tableStructure, schemaScope]);
 
   const handleExecute = async () => {
     if (!query.trim()) return;
@@ -98,8 +106,10 @@ export function DbQueryPage({ local }: { local?: { datasource: Datasource; trans
         };
       } else if (isRedis) {
         // Redis 命令格式: GET key
-        const command = query.trim().split(/\s+/);
-        payload = { command };
+        const command = parseRedisCommand(query.trim());
+        const destructive = !!local && isDestructiveRedisCommand(command[0]);
+        if (destructive && !window.confirm(`确认执行 ${command[0]}？该操作会删除数据或修改过期时间。`)) return;
+        payload = { command, ...(destructive ? { confirmDestructive: true } : {}) };
       } else if (isMongo) {
         // MongoDB 查询格式示例: db.collection.find({})
         // 这里简化为 JSON 格式
@@ -110,7 +120,7 @@ export function DbQueryPage({ local }: { local?: { datasource: Datasource; trans
         datasourceId: datasourceId!,
         payload,
       });
-      setResult(data);
+      setResult(isRedis && (data === null || typeof data !== 'object') ? { value: data } : data);
     } catch (err: any) {
       setResult({
         error: err?.response?.data?.message || err?.message || String(err),
@@ -262,7 +272,7 @@ export function DbQueryPage({ local }: { local?: { datasource: Datasource; trans
                   </label>
                   <p className="mt-0.5 text-[11px] text-muted">
                     {isRedis
-                      ? "仅支持只读命令，例如 GET session:user:1"
+                      ? local ? "支持 GET、SET 等命令；删除和过期时间修改需确认" : "仅支持只读命令，例如 GET session:user:1"
                       : isMongo
                         ? "使用 JSON 描述只读操作：find、findOne 或 countDocuments"
                         : selectedDatabase
@@ -294,6 +304,7 @@ export function DbQueryPage({ local }: { local?: { datasource: Datasource; trans
                 />
               ) : isRedis ? (
                 <RedisEditor
+                  allowWrites={!!local}
                   value={query}
                   onChange={setQuery}
                   placeholder="GET mykey"
@@ -404,7 +415,8 @@ export function DbQueryPage({ local }: { local?: { datasource: Datasource; trans
 
               {!!transfers.data?.length && <div className="card mt-4 overflow-hidden"><div className="border-b px-4 py-3 text-sm font-semibold dark:border-slate-800">备份与迁移任务</div><div className="divide-y dark:divide-slate-800">{transfers.data.slice(0, 10).map((item) => <div key={item.id} className="flex flex-wrap items-center gap-3 px-4 py-3 text-xs"><span className="font-semibold">{item.kind === 'backup' ? 'JSONL 逻辑备份' : item.kind === 'native_backup' ? '原生备份' : item.kind === 'native_restore' ? '原生恢复' : '迁移'}</span><span>{item.sourceDatabase}{item.targetDatabase ? ` → ${item.targetDatabase}` : ''}</span><span className="rounded-full bg-slate-100 px-2 py-0.5 dark:bg-slate-800">{transferStatus(item.status)}</span><span className="text-muted">表 {item.completedTables}/{item.totalTables}</span>{!['native_backup', 'native_restore'].includes(item.kind) && <span className="text-muted">行 {item.migratedRows}</span>}{item.currentTable && <span className="font-mono text-muted">{item.currentTable}</span>}{item.kind === 'migration' && <span className="text-muted">策略 {item.conflictStrategy}</span>}<span className="ml-auto flex gap-2">{item.kind === 'native_backup' && item.status === 'succeeded' && <><button className="text-emerald-600" onClick={() => void downloadBackup(item.id)}>下载</button><button className="text-amber-600" onClick={() => setRestoreTask(item)}>恢复</button></>}{['pending_approval', 'queued', 'running'].includes(item.status) && <button className="text-red-500" onClick={() => transferAction.mutate({ id: item.id, action: 'cancel' })}>取消</button>}{['failed', 'cancelled'].includes(item.status) && <button className="text-indigo-500" onClick={() => transferAction.mutate({ id: item.id, action: 'retry', conflictStrategy: item.kind === 'migration' && item.migratedRows > 0 ? 'replace' : item.conflictStrategy })}>重试</button>}</span>{item.error && <span className="w-full text-red-500">{item.error}</span>}</div>)}</div></div>}
 
-              {!result && !(isRelational && selectedTable) && (
+              {isRedis && <RedisBrowser key={schemaScope} request={browseRedis} mutate={local ? mutateRedis : undefined} />}
+              {!result && !isRedis && !(isRelational && selectedTable) && (
                 <div className="flex min-h-[220px] items-center justify-center text-muted">
                   <div className="text-center">
                     <div className="mx-auto mb-3 grid h-14 w-14 place-items-center rounded-2xl bg-indigo-50 text-indigo-500 dark:bg-indigo-500/10 dark:text-indigo-300">

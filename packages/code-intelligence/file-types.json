@@ -1,4 +1,5 @@
 {
+  "bashLanguage": { "extensions": ["sh", "bash"], "names": ["mvnw", "gradlew", ".bashrc", ".bash_profile", ".profile"] },
   "ignoredDirectories": [".git", "node_modules", "dist", "build", "target", ".vite", ".cache", ".next", ".gradle", "__pycache__", ".venv", "venv"],
   "languages": {
     "javascript": ["js", "jsx", "mjs", "cjs"], "typescript": ["ts", "tsx", "mts", "cts"],

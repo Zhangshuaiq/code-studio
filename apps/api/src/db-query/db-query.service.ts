@@ -18,6 +18,7 @@ import { parse as parseCsv } from 'csv-parse/sync';
 import { ApprovalListQueryDto } from './dto/db-query.dto';
 import { PageQueryDto, pageArgs, pageResult } from '../common/dto/page-query.dto';
 import { diagnosticMessage, redactDiagnosticText } from '../common/redact-diagnostic';
+const { browseRedis, validateRedisBrowse } = require('@codegen/code-intelligence/redis-browser.cjs');
 
 interface DatasourceConfig {
   host: string;
@@ -27,11 +28,13 @@ interface DatasourceConfig {
   database?: string;
   db?: number;
   authSource?: string;
+  ssl?: boolean;
 }
 
 interface TransferColumn { name: string; type: string; nullable: boolean }
 interface NativeBackupManifest { version: 1; engine: 'mysql' | 'postgresql'; format: 'mysql-sql' | 'postgresql-custom'; database: string; tables: string[]; filename: string; size: number; sha256: string; createdAt: string }
 interface QueryPayload {
+  redisBrowse?: { action: string; cursor?: string; match?: string; count?: number; key?: string; keyEncoding?: string; offset?: number; scanOffset?: number };
   sql?: string;
   command?: string[];
   database?: string;
@@ -133,22 +136,34 @@ export class DbQueryService {
   }
 
   // Redis 命令
-  private async queryRedis(config: DatasourceConfig, command: string[]) {
-    if (!Array.isArray(command) || !command.length) throw new BadRequestException('Redis 命令不能为空');
+  private async queryRedis(config: DatasourceConfig, command: string[], browser?: QueryPayload['redisBrowse']) {
+    if (browser) {
+      try { validateRedisBrowse(browser); } catch (error) { throw new BadRequestException((error as Error).message); }
+    }
+    if (!browser && (!Array.isArray(command) || !command.length)) throw new BadRequestException('Redis 命令不能为空');
     const commandName = String(command[0]).toUpperCase();
-    if (!READ_ONLY_REDIS_COMMANDS.has(commandName)) {
+    if (!browser && !READ_ONLY_REDIS_COMMANDS.has(commandName)) {
       throw new ForbiddenException(`Redis 工作台仅允许只读命令，已拒绝 ${commandName}`);
     }
     const redis = new Redis({
       host: config.host,
       port: config.port,
       db: config.db || 0,
+      username: config.username,
+      password: config.password,
+      tls: config.ssl ? { rejectUnauthorized: true } : undefined,
+      lazyConnect: true,
+      enableOfflineQueue: false,
+      retryStrategy: () => null,
       connectTimeout: this.queryTimeoutMs,
       commandTimeout: this.queryTimeoutMs,
       maxRetriesPerRequest: 1,
     });
 
     try {
+      redis.on('error', () => {});
+      await redis.connect();
+      if (browser) return this.enforceQueryResult(await browseRedis(redis, browser));
       const [cmd, ...args] = command;
       const result = await redis.call(cmd, ...args);
       return this.enforceQueryResult(result);
@@ -245,8 +260,14 @@ export class DbQueryService {
             ? this.queryMySQL(config, payload.sql!, true)
             : this.queryPostgreSQL(config, payload.sql!, payload.database, true);
         }
-        case 'redis':
-          return await this.queryRedis(config, payload.command ?? []);
+        case 'redis': {
+          const result = await this.queryRedis(config, payload.command ?? [], payload.redisBrowse);
+          if (payload.redisBrowse) {
+            const current = await this.getDatasourceConfig(datasourceId, userId);
+            if (current.type !== type || JSON.stringify(current.config) !== JSON.stringify(config)) throw new ConflictException('连接配置已更新，请重新打开连接');
+          }
+          return result;
+        }
         case 'mongodb':
           return await this.queryMongoDB(
             config,
@@ -901,6 +922,19 @@ export class DbQueryService {
   }
 
   // 获取数据库列表（MySQL/PostgreSQL）
+  async sqlMetadata(datasourceId: string, userId: string, input: { action: 'databases' | 'tables' | 'columns'; database?: string; table?: string }) {
+    const before = await this.getDatasourceConfig(datasourceId, userId);
+    if (!['mysql', 'postgresql'].includes(before.type)) throw new BadRequestException('仅关系型数据库支持 SQL 提示');
+    let items: unknown[];
+    if (input.action === 'databases') items = await this.listDatabases(datasourceId, userId);
+    else if (input.action === 'tables') items = await this.listTables(datasourceId, userId, input.database);
+    else if (input.action === 'columns' && input.table) items = records(await this.describeTable(datasourceId, userId, input.table, input.database));
+    else throw new BadRequestException('SQL 元数据操作无效');
+    const after = await this.getDatasourceConfig(datasourceId, userId);
+    if (after.type !== before.type || JSON.stringify(after.config) !== JSON.stringify(before.config)) throw new ConflictException('连接配置已更新，请重新选择连接');
+    return { items: items.slice(0, 500), truncated: items.length > 500 };
+  }
+
   async listDatabases(datasourceId: string, userId: string) {
     const { type, config } = await this.getDatasourceConfig(datasourceId, userId);
 

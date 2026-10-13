@@ -1,0 +1,5 @@
+{
+  "read": ["PING", "GET", "MGET", "GETRANGE", "STRLEN", "EXISTS", "TYPE", "TTL", "PTTL", "SCAN", "HGET", "HLEN", "HEXISTS", "LLEN", "SCARD", "ZCARD", "ZSCORE", "DBSIZE"],
+  "write": ["SET", "DEL", "UNLINK", "EXPIRE", "PEXPIRE", "PERSIST", "HSET", "HDEL", "LPUSH", "RPUSH", "SADD", "SREM", "ZADD", "ZREM", "INCR", "DECR", "APPEND"],
+  "destructive": ["DEL", "UNLINK", "EXPIRE", "PEXPIRE", "PERSIST", "HDEL", "SREM", "ZREM"]
+}

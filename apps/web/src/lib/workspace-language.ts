@@ -1,9 +1,10 @@
 import { api } from './api';
 import { useEditorTabs } from '../store/editorTabs';
 import { monacoLang } from './monaco';
+import { supportsBashLanguage } from './workspace-file-type';
 
 const languages = new Set(['typescript', 'javascript', 'java', 'python', 'c', 'cpp', 'go', 'rust', 'vue']);
-export function supportsWorkspaceLanguage(path: string) { return languages.has(monacoLang(path)); }
+export function supportsWorkspaceLanguage(path: string) { return languages.has(monacoLang(path)) || supportsBashLanguage(path); }
 
 export async function requestWorkspaceLanguage(sessionId: string, operation: string, input: Record<string, unknown> = {}) {
   const documents = Object.entries(useEditorTabs.getState().drafts)

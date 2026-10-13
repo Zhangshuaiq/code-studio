@@ -306,15 +306,40 @@ function createLocalApi(options = {}) {
         const blockedHost = firstBlockedNetworkHost(activePolicy, connectorHosts(row)); if (blockedHost) { json(response, 403, policyDenied(`当前企业策略不允许访问网络主机 ${blockedHost}`)); return; }
         const body = await readJsonBody(request, 128 * 1024); let secret = '';
         const personalDatabaseAccess = ['community', 'personal-pro'].includes(licenseStatus().edition) && !activePolicy.enforcementRequired;
-        try { if (row.credentialCiphertext) secret = credentialCodec?.decrypt(row.credentialCiphertext) || ''; json(response, 200, await connectorRuntime.explore(row, secret, { ...body, readOnly: !personalDatabaseAccess })); }
-        catch (error) { json(response, 422, { code: 'LOCAL_CONNECTOR_EXPLORE_FAILED', message: safeConnectorError(error, secret) }); } return;
+        try {
+          if (row.credentialCiphertext) secret = credentialCodec?.decrypt(row.credentialCiphertext) || '';
+          const authorizeRedisMutation = () => {
+            if (response.destroyed) throw Object.assign(new Error('请求已断开，未执行修改'), { code: 'LOCAL_CONNECTOR_CHANGED' });
+            const latest = store?.getConnector(row.id); const policy = policyStatus();
+            if (!latest || latest.updatedAt !== row.updatedAt || latest.credentialCiphertext !== row.credentialCiphertext || JSON.stringify(latest.settings) !== JSON.stringify(row.settings)) throw Object.assign(new Error('连接配置已更新，请重新打开连接'), { code: 'LOCAL_CONNECTOR_CHANGED' });
+            if (!['community', 'personal-pro'].includes(licenseStatus().edition) || policy.enforcementRequired || !policyAllows(policy, 'connector', latest.type) || firstBlockedNetworkHost(policy, connectorHosts(latest))) throw Object.assign(new Error('当前权限不允许修改该连接'), { code: 'LOCAL_ENTERPRISE_POLICY_DENIED' });
+          };
+          const result = await connectorRuntime.explore(row, secret, { ...body, readOnly: !personalDatabaseAccess, authorizeRedisMutation });
+          if (body.redisBrowse !== undefined) {
+            const latest = store?.getConnector(row.id); const latestPolicy = policyStatus();
+            if (!latest || latest.updatedAt !== row.updatedAt || latest.credentialCiphertext !== row.credentialCiphertext || JSON.stringify(latest.settings) !== JSON.stringify(row.settings)) { json(response, 409, { code: 'LOCAL_CONNECTOR_CHANGED', message: '连接配置已更新，请重新打开连接' }); return; }
+            if (!policyAllows(latestPolicy, 'connector', latest.type) || firstBlockedNetworkHost(latestPolicy, connectorHosts(latest))) { json(response, 403, policyDenied('当前企业策略不允许访问该连接')); return; }
+          }
+          if (body.redisBrowse !== undefined && row.type === 'redis') {
+            const policy = policyStatus(); const canWriteRedis = ['community', 'personal-pro'].includes(licenseStatus().edition) && !policy.enforcementRequired;
+            json(response, 200, { ...result, canWriteRedis });
+          } else json(response, 200, result);
+        }
+        catch (error) { const status = error.code === 'LOCAL_CONNECTOR_CHANGED' ? 409 : error.code === 'LOCAL_ENTERPRISE_POLICY_DENIED' ? 403 : 422; json(response, status, { code: status === 422 ? 'LOCAL_CONNECTOR_EXPLORE_FAILED' : error.code, message: safeConnectorError(error, secret) }); } return;
       }
       if (connectorMatch && request.method === 'POST' && connectorMatch[2] === 'metadata') {
         const row = store?.getConnector(connectorMatch[1]); if (!row) { json(response, 404, { code: 'LOCAL_CONNECTOR_NOT_FOUND', message: '连接配置不存在' }); return; }
         const activePolicy = policyStatus(); if (!policyAllows(activePolicy, 'connector', row.type)) { json(response, 403, policyDenied('当前企业策略不允许使用该连接器')); return; }
         const blockedHost = firstBlockedNetworkHost(activePolicy, connectorHosts(row)); if (blockedHost) { json(response, 403, policyDenied(`当前企业策略不允许访问网络主机 ${blockedHost}`)); return; }
         const body = await readJsonBody(request, 16 * 1024); let secret = '';
-        try { if (row.credentialCiphertext) secret = credentialCodec?.decrypt(row.credentialCiphertext) || ''; json(response, 200, await connectorRuntime.metadata(row, secret, body)); }
+        try {
+          if (row.credentialCiphertext) secret = credentialCodec?.decrypt(row.credentialCiphertext) || '';
+          const result = await connectorRuntime.metadata(row, secret, body);
+          const latest = store?.getConnector(row.id); const policy = policyStatus();
+          if (!latest || latest.updatedAt !== row.updatedAt || latest.credentialCiphertext !== row.credentialCiphertext || JSON.stringify(latest.settings) !== JSON.stringify(row.settings)) { json(response, 409, { code: 'LOCAL_CONNECTOR_CHANGED', message: '连接配置已更新，请重新选择连接' }); return; }
+          if (!policyAllows(policy, 'connector', latest.type) || firstBlockedNetworkHost(policy, connectorHosts(latest))) { json(response, 403, policyDenied('当前企业策略不允许访问该连接')); return; }
+          json(response, 200, result);
+        }
         catch (error) { json(response, 422, { code: 'LOCAL_CONNECTOR_METADATA_FAILED', message: safeConnectorError(error, secret) }); } return;
       }
       if (connectorMatch && request.method === 'DELETE' && !connectorMatch[2]) {
@@ -559,6 +584,20 @@ function createLocalApi(options = {}) {
         if (!task) { json(response, 404, { code: 'LOCAL_AGENT_TASK_NOT_FOUND', message: '本地 Agent 任务不存在' }); return; }
         if (!agentRuntime?.cancel(task.id)) { json(response, 409, { code: 'LOCAL_AGENT_NOT_RUNNING', message: '任务当前未运行' }); return; }
         json(response, 202, store.getAgentTask(task.id));
+        return;
+      }
+      const sqlBindingMatch = url.pathname.match(/^\/api\/local\/projects\/([a-f0-9]{24})\/sql-binding$/);
+      if (sqlBindingMatch && ['GET', 'PUT'].includes(request.method)) {
+        if (!projects.has(sqlBindingMatch[1])) { json(response, 404, { code: 'LOCAL_PROJECT_NOT_FOUND', message: '本地项目不存在' }); return; }
+        const key = `sql.binding:${sqlBindingMatch[1]}`;
+        if (request.method === 'GET') { json(response, 200, { preference: store?.getSetting(key) || null }); return; }
+        if (!store) { json(response, 503, { code: 'LOCAL_STORE_UNAVAILABLE', message: '本地设置存储不可用' }); return; }
+        try {
+          const preference = require('@codegen/code-intelligence/sql-binding-preference.cjs').sqlBindingPreference(await readJsonBody(request, 4096));
+          const connection = preference.connectionId ? store.getConnector(preference.connectionId) : null;
+          if (preference.connectionId && (!connection || !['postgres', 'mysql'].includes(connection.type))) throw new Error('SQL 连接不存在或类型无效');
+          store.setSetting(key, preference); json(response, 200, { preference });
+        } catch (error) { json(response, 400, { code: 'LOCAL_SQL_BINDING_INVALID', message: error.message }); }
         return;
       }
       if (request.method === 'GET' && filesMatch) {
@@ -992,7 +1031,7 @@ function firstBlockedNetworkHost(status, hosts) {
 }
 function modelHosts(config) { if (!config.baseUrl) return []; try { return [new URL(config.baseUrl).hostname.toLowerCase()]; } catch { return []; } }
 function connectorHosts(config) {
-  if (config.type === 'postgres' || config.type === 'mysql') return [String(config.settings.host).toLowerCase()];
+  if (config.type === 'postgres' || config.type === 'mysql' || config.type === 'redis') return [String(config.settings.host).toLowerCase()];
   if (config.type === 'kafka') return config.settings.brokers.map((broker) => broker.startsWith('[') ? broker.slice(1, broker.indexOf(']')).toLowerCase() : broker.split(':')[0].toLowerCase());
   if (config.type === 'kubernetes') { try { return [new URL(config.settings.server).hostname.toLowerCase()]; } catch { return []; } }
   return [];

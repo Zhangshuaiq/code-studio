@@ -1,4 +1,8 @@
 import registry from '../../../../packages/code-intelligence/file-types.json';
+export function supportsBashLanguage(path = '') {
+  const name = path.replace(/\\/g, '/').split('/').pop()!.toLowerCase();
+  return registry.bashLanguage.extensions.some(extension => name.endsWith('.' + extension)) || registry.bashLanguage.names.includes(name);
+}
 export function workspaceFileLanguage(path = ''): string {
   const name = path.replace(/\\/g, '/').split('/').pop()!.toLowerCase();
   const special = Object.prototype.hasOwnProperty.call(registry.names, name) ? (registry.names as Record<string, string>)[name] : undefined;

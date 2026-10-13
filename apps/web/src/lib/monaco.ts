@@ -1,6 +1,8 @@
 // 自托管 Monaco：从 public/monaco/vs 加载（0.56 min 自带 loader 与各语言 worker），
 // 不走 CDN、也不用打包器处理 worker，规避国内网络与 ESM worker 打包问题。
 import { loader } from '@monaco-editor/react';
+import { installSqlWorkspaceCompletions } from './sql-workspace-provider';
+import type { WorkspaceSqlContext } from './workspace-sql-context';
 
 loader.config({ paths: { vs: '/monaco/vs' } });
 
@@ -36,7 +38,7 @@ export function setupIntelliSense(monaco: any) {
 
 // 根据文件扩展名映射 Monaco 语言 id
 export { workspaceFileLanguage as monacoLang } from './workspace-file-type';
-import { workspaceFileLanguage as monacoLang } from './workspace-file-type';
+import { workspaceFileLanguage as monacoLang, supportsBashLanguage } from './workspace-file-type';
 
 export function workspaceModelUri(sessionId: string, path: string): string {
   return `codegen://${sessionId}/${path.split('/').map(encodeURIComponent).join('/')}`;
@@ -58,6 +60,7 @@ export function syncWorkspaceModels(monaco: any, sessionId: string, files: Array
 
 export type LanguageTransport = (operation: string, input: Record<string, unknown>) => Promise<any>;
 export interface LanguageProviderOptions {
+  sqlContext?: () => WorkspaceSqlContext | undefined;
   prepareLocations?: (locations: any[]) => Promise<void>;
   prepareEdits?: (edit: any) => Promise<boolean>;
   onError?: (error: unknown) => void;
@@ -68,12 +71,13 @@ export interface LanguageProviderOptions {
 const renameDispatchers = new WeakMap<object, { handlers: Map<string, any>; registrations: any[] }>();
 
 export function installWorkspaceLanguageProviders(monaco: any, projectId: string, transport?: LanguageTransport, options: LanguageProviderOptions = {}) {
-  const languages = ['typescript', 'javascript', 'python', 'java', 'c', 'cpp', 'go', 'rust', 'vue'];
+  const languages = ['typescript', 'javascript', 'python', 'java', 'c', 'cpp', 'go', 'rust', 'vue', 'shell'];
   let disposed = false;
   const request = async (operation: string, model: any, position?: any, extra: Record<string, unknown> = {}) => {
     if (disposed || model.isDisposed()) return null;
     const filePath = workspacePathFromUri(model.uri);
     if (!filePath || model.uri.authority !== projectId) return null;
+    if (monacoLang(filePath) === 'shell' && !supportsBashLanguage(filePath)) return null;
     const version = model.getVersionId();
     const input = { path: filePath, content: model.getValue(), line: position?.lineNumber, column: position?.column, ...extra };
     try {
@@ -105,7 +109,7 @@ export function installWorkspaceLanguageProviders(monaco: any, projectId: string
     const response = await fetch(`/api/local/projects/${projectId}/language/call-hierarchy-${operation}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ item: item.data }) });
     return response.ok ? (await response.json()).result || [] : [];
   };
-  const disposables: any[] = [];
+  const disposables: any[] = [installSqlWorkspaceCompletions(monaco, projectId, options.sqlContext)];
   let renameDispatcher = renameDispatchers.get(monaco);
   if (!renameDispatcher) {
     const handlers = new Map<string, any>();
@@ -165,16 +169,18 @@ export function installWorkspaceLanguageProviders(monaco: any, projectId: string
       const convert = (item: any): any => ({ name: item.name, detail: item.detail || '', kind: symbolKind(item.kind), range: range(item.range || item.location?.range), selectionRange: range(item.selectionRange || item.range || item.location?.range), tags: item.tags, children: (item.children || []).map(convert) });
       return result.filter((item: any) => item.range || item.location?.range).map(convert);
     } }));
-    disposables.push(monaco.languages.registerCompletionItemProvider(language, { triggerCharacters: ['.', '"', "'", '/'], provideCompletionItems: async (model: any, position: any) => {
+    disposables.push(monaco.languages.registerCompletionItemProvider(language, { triggerCharacters: language === 'shell' ? ['$', '{', '-', '/'] : ['.', '"', "'", '/'], provideCompletionItems: async (model: any, position: any) => {
       const result = await request('completion', model, position); const items = Array.isArray(result) ? result : result?.items || [];
       return { suggestions: items.slice(0, 500).map((item: any) => ({
         label: typeof item.label === 'string' ? item.label : item.label?.label || '',
-        kind: item.kind || monaco.languages.CompletionItemKind.Text,
+        kind: lspCompletionKind(monaco, item.kind),
         detail: item.detail, documentation: typeof item.documentation === 'string' ? item.documentation : item.documentation?.value,
         insertText: item.insertText || item.textEdit?.newText || (typeof item.label === 'string' ? item.label : item.label?.label || ''),
-        range: item.textEdit?.range ? range(item.textEdit.range) : undefined,
+        range: item.textEdit?.range ? range(item.textEdit.range) : item.textEdit?.insert && item.textEdit?.replace ? { insert: range(item.textEdit.insert), replace: range(item.textEdit.replace) } : undefined,
+        insertTextRules: item.insertTextFormat === 2 ? monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet : undefined,
+        additionalTextEdits: (item.additionalTextEdits || []).map((edit: any) => ({ range: range(edit.range), text: edit.newText })),
         sortText: item.sortText, filterText: item.filterText,
-      })) };
+      })), incomplete: Boolean(result?.isIncomplete) };
     } }));
     disposables.push(monaco.languages.registerCodeActionProvider(language, { providedCodeActionKinds: ['quickfix'], provideCodeActions: async (model: any, targetRange: any, context: any) => {
       // Dependency sources are read-only virtual documents, not workspace files.
@@ -250,3 +256,10 @@ export function fastJavaDocumentSymbols(monaco: any, items: any[]) {
 }
 
 export const installDesktopLanguageProviders = installWorkspaceLanguageProviders;
+
+// LSP kinds are 1-based and differ from Monaco's ordering (Variable is 6
+// in LSP but 4 in Monaco). Passing the server enum through mislabels items.
+export function lspCompletionKind(monaco: any, kind: number) {
+  const names = ['Text', 'Method', 'Function', 'Constructor', 'Field', 'Variable', 'Class', 'Interface', 'Module', 'Property', 'Unit', 'Value', 'Enum', 'Keyword', 'Snippet', 'Color', 'File', 'Reference', 'Folder', 'EnumMember', 'Constant', 'Struct', 'Event', 'Operator', 'TypeParameter'];
+  return monaco.languages.CompletionItemKind[names[kind - 1]] ?? monaco.languages.CompletionItemKind.Text;
+}

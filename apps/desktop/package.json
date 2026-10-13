@@ -21,6 +21,7 @@
     "@vscode/ripgrep": "^1.15.14",
     "@vue/language-server": "^2.2.12",
     "exceljs": "^4.4.0",
+    "ioredis": "^6.0.0",
     "kafkajs": "^2.2.4",
     "mysql2": "^3.24.4",
     "node-pty": "^1.1.0",

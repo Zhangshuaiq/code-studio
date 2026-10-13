@@ -8,10 +8,27 @@ import {
   IsString,
   Matches,
   MaxLength,
+  IsInt,
+  Min,
+  Max,
+  ValidateNested,
 } from 'class-validator';
+import { Type } from 'class-transformer';
 import { PageQueryDto } from '../../common/dto/page-query.dto';
 
+export class RedisBrowseDto {
+  @IsIn(['scan', 'inspect', 'value']) action!: string;
+  @IsOptional() @IsString() @Matches(/^\d{1,20}$/) cursor?: string;
+  @IsOptional() @IsString() @MaxLength(1000) match?: string;
+  @IsOptional() @IsInt() @Min(1) @Max(100) count?: number;
+  @IsOptional() @IsString() @MaxLength(12000) key?: string;
+  @IsOptional() @IsIn(['utf8', 'base64']) keyEncoding?: string;
+  @IsOptional() @IsInt() @Min(0) @Max(536870912) offset?: number;
+  @IsOptional() @IsInt() @Min(0) @Max(1000000) scanOffset?: number;
+}
+
 export class ExecuteQueryDto {
+  @IsOptional() @ValidateNested() @Type(() => RedisBrowseDto) redisBrowse?: RedisBrowseDto;
   @IsOptional() @IsString() @MaxLength(1_000_000) sql?: string;
   @IsOptional() @IsArray() @ArrayMinSize(1) @ArrayMaxSize(100)
   @IsString({ each: true }) command?: string[];

@@ -1,0 +1,38 @@
+const test = require('node:test'); const assert = require('node:assert/strict'); const fs = require('node:fs'); const path = require('node:path'); const os = require('node:os');
+const { createLocalApi } = require('../src/local-api.cjs');
+test('in-flight Redis browsing cannot return data from an edited connection', { timeout: 10000 }, async t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'code-studio-redis-race-'));
+  let release; let notify; const gate = new Promise(resolve => { release = resolve; }); const started = new Promise(resolve => { notify = resolve; });
+  const api = await createLocalApi({ token: 'redis-race-fixture', storePath: path.join(directory, 'store.sqlite3'), connectorRuntime: { async explore() { notify(); await gate; return { value: 'stale-private-value' }; } } });
+  t.after(async () => { release(); await api.close(); fs.rmSync(directory, { recursive: true, force: true }); });
+  const headers = { Authorization: 'Bearer redis-race-fixture', 'Content-Type': 'application/json' };
+  const created = await fetch(api.origin + '/api/local/connectors', { method: 'POST', headers, body: JSON.stringify({ name: 'Redis', type: 'redis', settings: { host: 'localhost', db: 0 } }) });
+  const row = await created.json(); assert.equal(created.status, 201);
+  const pending = fetch(api.origin + '/api/local/connectors/' + row.id + '/explore', { method: 'POST', headers, body: JSON.stringify({ redisBrowse: { action: 'value', key: 'fixture' } }) });
+  await started;
+  const updated = await fetch(api.origin + '/api/local/connectors/' + row.id, { method: 'PUT', headers, body: JSON.stringify({ settings: { db: 1 } }) }); assert.equal(updated.status, 200);
+  release(); const response = await pending; const body = await response.json(); assert.equal(response.status, 409); assert.equal(JSON.stringify(body).includes('stale-private-value'), false);
+});
+test('Redis Local API persists editable credentials, rejects anonymous requests and uses authoritative personal access', async t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'code-studio-redis-api-'));
+  const secret = 'fixture-private-redis-password'; const calls = [];
+  const codec = { available: () => true, encrypt: value => Buffer.from('protected:' + value).toString('base64'), decrypt: value => Buffer.from(value, 'base64').toString().slice(10) };
+  const options = { token: 'redis-api-fixture', storePath: path.join(directory, 'store.sqlite3'), credentialCodec: codec, connectorRuntime: { async explore(config, credential, input) { assert.equal(credential, secret); calls.push({ config, input }); if (input.command?.[0] === 'ERROR') throw new Error('failure ' + credential); return { value: 'fixture' }; } } };
+  let api = await createLocalApi(options); t.after(async () => { await api.close(); fs.rmSync(directory, { recursive: true, force: true }); });
+  const headers = { Authorization: 'Bearer redis-api-fixture', 'Content-Type': 'application/json' };
+  const post = async (url, body, method = 'POST') => { const response = await fetch(api.origin + '/api/local/connectors' + url, { method, headers, body: JSON.stringify(body) }); return { status: response.status, body: await response.json() }; };
+  const created = await post('', { name: 'Redis fixture', type: 'redis', settings: { host: 'localhost', db: 2, username: 'acl-user', ssl: true }, secret });
+  assert.equal(created.status, 201); assert.equal(created.body.settings.port, 6379); assert.equal(created.body.hasCredential, true);
+  assert.equal(JSON.stringify(created.body).includes(secret), false);
+  const id = created.body.id;
+  const edited = await post('/' + id, { settings: { db: 4, ssl: false } }, 'PUT');
+  assert.equal(edited.status, 200); assert.equal(edited.body.id, id); assert.equal(edited.body.settings.db, 4); assert.equal(edited.body.hasCredential, true);
+  await api.close(); api = await createLocalApi(options);
+  const result = await post('/' + id + '/explore', { command: ['SET', 'fixture', 'value'], readOnly: true });
+  assert.equal(result.status, 200); assert.equal(calls[0].input.readOnly, false, 'personal authority is decided by Local API, not payload'); assert.equal(calls[0].config.settings.db, 4);
+  const capability = await post('/' + id + '/explore', { redisBrowse: { action: 'value', key: 'fixture' } }); assert.equal(capability.body.canWriteRedis, true);
+  const anonymous = await fetch(api.origin + '/api/local/connectors/' + id + '/explore', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ command: ['GET', 'fixture'] }) });
+  assert.ok([401, 403].includes(anonymous.status)); assert.equal(calls.length, 2);
+  const failed = await post('/' + id + '/explore', { command: ['ERROR'] });
+  assert.equal(failed.status, 422); assert.equal(JSON.stringify(failed.body).includes(secret), false);
+});

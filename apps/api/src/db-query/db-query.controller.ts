@@ -11,12 +11,17 @@ import { PERMISSIONS } from '../auth/permissions';
 import { Audit } from '../audit/audit.decorator';
 import { ApprovalListQueryDto, ExecuteQueryDto, ExportDataDto, ImportDataDto, ReasonDto, RestoreDto, RetryTransferDto, TransferDto } from './dto/db-query.dto';
 import { PageQueryDto } from '../common/dto/page-query.dto';
+import { SqlMetadataDto } from './dto/sql-metadata.dto';
 
 @UseGuards(JwtAuthGuard, PermissionsGuard)
 @RequirePermissions(PERMISSIONS.PROJECT_READ)
 @Controller('db-query')
 export class DbQueryController {
   constructor(private readonly dbQueryService: DbQueryService) {}
+  @Get(':datasourceId/metadata')
+  sqlMetadata(@Param('datasourceId') datasourceId: string, @CurrentUser() user: AuthUser, @Query() input: SqlMetadataDto) {
+    return this.dbQueryService.sqlMetadata(datasourceId, user.id, input);
+  }
 
   // 执行查询
   @Post(':datasourceId/execute')

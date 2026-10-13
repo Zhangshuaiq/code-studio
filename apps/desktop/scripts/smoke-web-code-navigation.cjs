@@ -14,6 +14,7 @@ const usage = 'public class Usage {\n  public void use() {\n    Greeting.message
 const implementation = 'public class Implementation {\n  public String message() { return "implementation"; }\n}\n';
 const virtual = '@java-source/aaaaaaaaaaaaaaaaaaaaaaaa/String.java';
 const files = { 'Main.java': main, 'Greeting.java': greeting, 'Usage.java': usage, 'Implementation.java': implementation };
+Object.assign(files, { 'schema.sql': 'CREATE TABLE web_users (original_column TEXT);', 'query.sql': 'SELECT u. FROM web_users AS u;' });
 Object.assign(files, { 'mvnw': '#!/bin/sh\necho build', 'schema.svg.xml': '<schema/>', 'notes.custom': 'Unknown extension text', 'Guide.MDWN': '# Alternate Markdown' });
 Object.assign(files, { 'settings.json': '{"mixed":true}', 'pom.xml': '<project/>', 'migration.sql': 'SELECT 1;', 'run.sh': '#!/bin/sh\necho ok', 'README.md': '# Mixed Workspace\n\n| Name | Value |\n| --- | --- |\n| Test | 1 |\n\n![local](图片.png)\n![tracking](https://tracker.invalid/x.png)\n<script>window.__markdownExecuted=true</script>\n[unsafe](javascript:alert(1))\n' });
 files['migration.sql'] = 'SELECT 1;\nSELECT 2;\n'; files['README.md'] += '\n[Source](migration.sql#L2C3)\n[Guide](guide.md#target-section)\n[Missing](#missing-section)\n[Escape](../outside.md)\n';
@@ -55,6 +56,8 @@ app.whenReady().then(async () => {
         assert.equal(request.headers.authorization, 'Bearer web-fixture');
         assert.ok(!url.pathname.startsWith('/api/local/'), 'web must never call desktop local endpoints');
         if (url.pathname === '/api/auth/me') return json({ id: 'owner', username: 'WebOwner', roles: [], permissions: ['project:read'] });
+        if (url.pathname === '/api/admin/datasources') return json({items:[{id:'sql-source',name:'Web SQL DB',type:'postgresql',updatedAt:'fixture'}]});
+        if (url.pathname === '/api/db-query/sql-source/metadata') { const action=url.searchParams.get('action'); if(action==='columns'){assert.equal(url.searchParams.get('database'),'fixture_db');assert.equal(url.searchParams.get('table'),'web_users');}return json({items:action==='databases'?['fixture_db']:action==='tables'?['web_users']:[{column_name:'bound_web_column',data_type:'text'}],truncated:false}); }
         if (url.pathname === '/api/projects/project') return json({ id: 'project', name: 'Web Java', userId: 'owner', accessRole: 'owner', status: 'active' });
         if (url.pathname === '/api/sessions') return json([{ id: 'session', projectId: 'project' }]);
         if (url.pathname === '/api/sessions/session/files') return json([...Object.keys(files), ...Object.keys(previewFiles)]);
@@ -363,6 +366,31 @@ app.whenReady().then(async () => {
     for (let i = 0; i < 100 && writes !== 1; i++) await new Promise(resolve => setTimeout(resolve, 100));
     assert.deepEqual(nativeBytes, encodeText('SELECT 修改😀;\r\n', { encoding: 'utf-16be', bom: true })); assert.equal(writes, 1);
     console.log('Web UTF-16 UI passed: native encoding indicator, Unicode editing and explicit save preserves BOM/BE/CRLF bytes.');
+    await openPreview('schema.sql');
+    await waitFor(`document.querySelector('.monaco-editor .view-lines')?.textContent.includes('original_column')`);
+    await monaco(`editor.getModel().setValue('CREATE TABLE web_users (draft_column TEXT);')`);
+    await openPreview('query.sql');
+    await waitFor(`new Promise(resolve => window.require(['vs/editor/editor.main'], module => { const monaco = window.monaco || module; const editor = monaco.editor.getEditors().find(editor => editor.getModel()?.uri.path.endsWith('/query.sql')); resolve(editor?.getValue().includes('FROM web_users')); }))`);
+    await monaco(`(() => { editor.setPosition({ lineNumber: 1, column: 10 }); editor.focus(); editor.trigger('test', 'editor.action.triggerSuggest', {}); return true; })()`);
+    await waitFor(`document.querySelector('.suggest-widget')?.textContent.includes('draft_column')`);
+    assert.equal(await window.webContents.executeJavaScript(`document.querySelector('.suggest-widget')?.textContent.includes('original_column')`), false);
+    assert.equal(files['schema.sql'], 'CREATE TABLE web_users (original_column TEXT);'); assert.equal(writes, 1);
+    console.log('Web SQL UI passed: lazy shared parser, cross-file DDL drafts, alias column suggestions and no implicit writes.');
+    await monaco(`editor.trigger('test','hideSuggestWidget',{})`);
+    const selectSql = async(label,option)=>{await window.webContents.executeJavaScript(`[...document.querySelectorAll('[data-workspace-sql-binding] button')].find(node=>node.textContent.trim()===${JSON.stringify(label)}).click()`);await waitFor(`[...document.querySelectorAll('[role="option"]')].some(node=>node.textContent.trim()===${JSON.stringify(option)})`);await window.webContents.executeJavaScript(`[...document.querySelectorAll('[role="option"]')].find(node=>node.textContent.trim()===${JSON.stringify(option)}).click()`);};
+    await selectSql('未绑定连接','Web SQL DB');await selectSql('选择数据库','fixture_db');
+    await waitFor(`document.querySelector('[data-workspace-sql-binding]').textContent.includes('表/列提示就绪')`);
+    await monaco(`(() => { editor.focus();editor.trigger('test','editor.action.triggerSuggest',{});return true; })()`);
+    await waitFor(`document.querySelector('.suggest-widget')?.textContent.includes('bound_web_column')`);assert.equal(writes,1);
+    assert.ok(await window.webContents.executeJavaScript(`document.querySelector('[data-workspace-sql-binding]').textContent.includes('提示表（可选）')`));
+    await monaco(`editor.trigger('test','hideSuggestWidget',{})`);
+    await selectSql('提示表（可选）','"public"."web_users"');
+    await openPreview('README.md');
+    await waitFor(`!document.querySelector('[data-workspace-sql-binding]')`);
+    await openPreview('query.sql');
+    await waitFor(`document.querySelector('[data-workspace-sql-binding]')?.textContent.includes('表/列提示就绪') && document.querySelector('[data-workspace-sql-binding]').textContent.includes('"public"."web_users"')`);
+    assert.equal(writes,1);
+    console.log('Web SQL binding passed: automatic referenced-table columns and connection/database/table restoration across non-SQL tabs.');
     console.log('Web navigation and fast-index UI passed: history, sources, peek, implementations, progress, drafts, verified symbol opening, stale-hash rejection and refreshed retry.');
   } catch (error) {
     console.error(error);

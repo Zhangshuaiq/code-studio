@@ -12,7 +12,7 @@ import {
 import { Select } from "../common/Select";
 import { DesktopDatabaseDetail } from './DesktopDatabaseDetail';
 
-export type ConnectorType = "postgres" | "mysql" | "kafka" | "kubernetes";
+export type ConnectorType = "postgres" | "mysql" | "redis" | "kafka" | "kubernetes";
 interface Connector {
   id: string;
   name: string;
@@ -24,6 +24,7 @@ interface Connector {
 const TYPES: Array<{ value: ConnectorType; label: string }> = [
   { value: "postgres", label: "PostgreSQL" },
   { value: "mysql", label: "MySQL" },
+  { value: "redis", label: "Redis" },
   { value: "kafka", label: "Apache Kafka" },
   { value: "kubernetes", label: "Kubernetes" },
 ];
@@ -84,13 +85,13 @@ export function DesktopConnectors({
       ...current,
       type,
       port:
-        type === "postgres" ? "5432" : type === "mysql" ? "3306" : current.port,
+        type === "postgres" ? "5432" : type === "mysql" ? "3306" : type === 'redis' ? '6379' : current.port,
     }));
   }
   function edit(item: Connector) {
     const settings = item.settings;
     setEditingId(item.id); setError(''); setShowForm(true);
-    setForm({ name: item.name, type: item.type, host: settings.host || '127.0.0.1', port: String(settings.port || (item.type === 'mysql' ? 3306 : 5432)), database: settings.database || '', username: settings.username || '', secret: '', brokers: (settings.brokers || []).join(','), clientId: settings.clientId || 'code-studio', server: settings.server || 'https://127.0.0.1:6443', namespace: settings.namespace || 'default', ssl: Boolean(settings.ssl) });
+    setForm({ name: item.name, type: item.type, host: settings.host || '127.0.0.1', port: String(settings.port || (item.type === 'mysql' ? 3306 : item.type === 'redis' ? 6379 : 5432)), database: item.type === 'redis' ? String(settings.db ?? 0) : settings.database || '', username: settings.username || '', secret: '', brokers: (settings.brokers || []).join(','), clientId: settings.clientId || 'code-studio', server: settings.server || 'https://127.0.0.1:6443', namespace: settings.namespace || 'default', ssl: Boolean(settings.ssl) });
   }
   async function save() {
     setBusy("save");
@@ -108,7 +109,7 @@ export function DesktopConnectors({
           : {
               host: form.host,
               port: Number(form.port),
-              database: form.database,
+              ...(form.type === 'redis' ? { db: Number(form.database || 0) } : { database: form.database }),
               username: form.username,
               ssl: form.ssl,
             };
@@ -180,7 +181,7 @@ export function DesktopConnectors({
     }
   }
   const detail = items.find((item) => item.id === detailId);
-  if (detail && !showForm && (detail.type === 'postgres' || detail.type === 'mysql')) return <DesktopDatabaseDetail key={`${detail.id}:${detail.updatedAt}`} connector={{ ...detail, type: detail.type }} onBack={() => setDetailId(undefined)} onEdit={() => edit(detail)} />;
+  if (detail && !showForm && (detail.type === 'postgres' || detail.type === 'mysql' || detail.type === 'redis')) return <DesktopDatabaseDetail key={`${detail.id}:${detail.updatedAt}`} connector={{ ...detail, type: detail.type }} onBack={() => setDetailId(undefined)} onEdit={() => edit(detail)} />;
   const content = (
     <div
       className={
@@ -316,7 +317,7 @@ export function DesktopConnectors({
                     }
                   />
                   <Field
-                    label="数据库"
+                    label={form.type === 'redis' ? '数据库编号（默认 0）' : '数据库'}
                     value={form.database}
                     onChange={(value) =>
                       setForm((current) => ({ ...current, database: value }))
@@ -382,7 +383,7 @@ export function DesktopConnectors({
                     <Database size={16} className="text-indigo-500" />
                   )}
                   <div className="min-w-0 flex-1">
-                    <button className="text-left text-sm font-medium hover:text-indigo-500" onClick={() => { if (item.type === 'postgres' || item.type === 'mysql') setDetailId(item.id); else void explore(item); }}>{item.name}</button>
+                    <button className="text-left text-sm font-medium hover:text-indigo-500" onClick={() => { if (item.type === 'postgres' || item.type === 'mysql' || item.type === 'redis') setDetailId(item.id); else void explore(item); }}>{item.name}</button>
                     <div className="truncate text-[10px] text-slate-400">
                       {TYPES.find((type) => type.value === item.type)?.label}
                       {item.hasCredential ? " · 凭据已保护" : ""}
@@ -412,7 +413,7 @@ export function DesktopConnectors({
                     className="btn btn-ghost btn-sm"
                     disabled={Boolean(busy)}
                     onClick={() => {
-                      if (item.type === 'postgres' || item.type === 'mysql') { setDetailId(item.id); return; }
+                      if (item.type === 'postgres' || item.type === 'mysql' || item.type === 'redis') { setDetailId(item.id); return; }
                       if (active === item.id) {
                         setActive(undefined);
                         return;

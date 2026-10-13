@@ -20,6 +20,11 @@ import { useGitBlame } from '../../hooks/useGitBlame';
 import { GitBlameDetails } from './GitBlameDetails';
 import { RemoteFilePreview } from './RemoteFilePreview';
 import { DesktopLanguageStatus } from '../Desktop/DesktopLanguageStatus';
+import { WorkspaceSqlBinding } from './WorkspaceSqlBinding';
+import { workspaceSqlScope, readWorkspaceSqlContext } from '../../lib/workspace-sql-context';
+import { useMe } from '../../hooks/useMe';
+import { useAuth } from '../../store/auth';
+let sqlAuthScopeSerial = 0;
 
 export function CodeEditor({
   sessionId,
@@ -33,6 +38,12 @@ export function CodeEditor({
   readOnly?: boolean;
 }) {
   readOnly = readOnly || !!path?.startsWith('@java-source/');
+  const me = useMe();
+  const authToken = useAuth(state => state.token);
+  const authScope = useRef<{ token: string | null; id: number }>();
+  if (!authScope.current || authScope.current.token !== authToken) authScope.current = { token: authToken, id: ++sqlAuthScopeSerial };
+  const sqlScope = sessionId && me.data?.id ? JSON.stringify([workspaceSqlScope('remote', sessionId, me.data.id), authScope.current.id]) : undefined;
+  const sqlScopeRef = useRef(sqlScope); sqlScopeRef.current = sqlScope;
   const monaco = useMonaco();
   const { navigationKeymap, setNavigationKeymap } = useEditorPreferences();
   const shortcuts = navigationShortcuts(navigationKeymap, navigator.platform);
@@ -142,6 +153,7 @@ export function CodeEditor({
     if (!monaco || !sessionId) return;
     let active = true;
     const providers = installWorkspaceLanguageProviders(monaco, sessionId, (operation, input) => requestWorkspaceLanguage(sessionId, operation, input), {
+      sqlContext: () => sqlScopeRef.current ? readWorkspaceSqlContext(sqlScopeRef.current) : undefined,
       onError: (error) => setLanguageError(workspaceLanguageError(error)),
       prepareEdits: async (edit) => {
         const paths = [...new Set<string>(edit.edits.map((file: any) => file.path))];
@@ -611,6 +623,7 @@ export function CodeEditor({
       </div>
 
       {/* Monaco 编辑区 / 改动对比 */}
+      {sqlScope && path && monacoLang(path) === 'sql' && mode === 'edit' && !nonText && <WorkspaceSqlBinding key={sqlScope} scope={sqlScope} preferenceKey={workspaceSqlScope('remote', sessionId!, me.data!.id)} content={draft} local={false} />}
       <div className="min-h-0 flex-1">
         {isLoading ? (
           <Center>加载中…</Center>

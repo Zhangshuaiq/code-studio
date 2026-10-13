@@ -4,9 +4,9 @@ const fs = require('node:fs'); const path = require('node:path'); const Module =
 // parallel implementation of the history state machine.
 function loadSource(relative, overrides = {}) {
   const filename = path.resolve(__dirname, '../../web/src', relative);
-  const compiled = new Module(filename, module); compiled.paths = Module._nodeModulePaths(path.dirname(filename));
+  const compiled = new Module(filename, module); compiled.filename = filename; compiled.paths = Module._nodeModulePaths(path.dirname(filename));
   const requireOriginal = compiled.require.bind(compiled); compiled.require = (id) => Object.hasOwn(overrides, id) ? overrides[id] : requireOriginal(id);
-  compiled._compile(ts.transpileModule(fs.readFileSync(filename, 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 } }).outputText, filename);
+  compiled._compile(ts.transpileModule(fs.readFileSync(filename, 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020, esModuleInterop: true } }).outputText, filename);
   return compiled.exports;
 }
 const helpers = loadSource('lib/editor-navigation.ts');
@@ -70,7 +70,7 @@ test('history is bounded to 100 points and resets when closing the workspace or 
 
 function providerFixture(transport, prepareLocations, options = {}) {
   const providers = new Map(); const disposable = { dispose() {} };
-  const languages = {};
+  const languages = { CompletionItemKind: { Text: 18, Variable: 4, Function: 1, Method: 0, Keyword: 17 }, CompletionItemInsertTextRule: { InsertAsSnippet: 4 } };
   for (const kind of ['Definition', 'Declaration', 'TypeDefinition', 'Implementation', 'Reference', 'Hover', 'DocumentSymbol', 'CompletionItem', 'Rename', 'CodeAction', 'CallHierarchy']) {
     languages[`register${kind}Provider`] = (language, provider) => { providers.set(`${typeof language === 'string' ? language : language.language}:${kind}`, provider); return disposable; };
   }
@@ -79,12 +79,40 @@ function providerFixture(transport, prepareLocations, options = {}) {
     Uri: { parse: (uri) => { const value = new URL(uri); return { scheme: value.protocol.slice(0, -1), authority: value.host, path: value.pathname }; } },
     editor: { getModels: () => [], getEditors: () => [], onDidCreateModel: () => disposable },
   };
-  const source = loadSource('lib/monaco.ts', { '@monaco-editor/react': { loader: { config() {} } } });
+  const source = loadSource('lib/monaco.ts', { '@monaco-editor/react': { loader: { config() {} } }, './workspace-file-type': loadSource('lib/workspace-file-type.ts'), './sql-workspace-provider': loadSource('lib/sql-workspace-provider.ts') });
   const installed = source.installWorkspaceLanguageProviders(monaco, 'session', transport, { prepareLocations, ...options });
   let version = 1; let disposed = false;
   const model = { uri: monaco.Uri.parse('codegen://session/Main.java'), getVersionId: () => version, getValue: () => 'class Main {}', isDisposed: () => disposed };
   return { providers, installed, model, edit: () => version++, disposeModel: () => { disposed = true; } };
 }
+test('shared shell completion preserves kinds, snippets, replacement edits and incompleteness', async () => {
+  const editRange = { start: { line: 2, character: 7 }, end: { line: 2, character: 10 } };
+  const calls = [];
+  const fixture = providerFixture(async (operation, input) => {
+    calls.push({ operation, input });
+    return { result: { isIncomplete: true, items: [{ label: 'DRAFT_VALUE', kind: 6, textEdit: { range: editRange, newText: 'DRAFT_VALUE' }, additionalTextEdits: [{ range: editRange, newText: 'replacement' }] }, { label: 'if', kind: 14, insertTextFormat: 2, insertText: 'if ${1:test}; then\n$0\nfi' }] } };
+  });
+  fixture.model.uri.path = '/run.sh';
+  try {
+    const provider = fixture.providers.get('shell:CompletionItem');
+    assert.ok(provider.triggerCharacters.includes('$'));
+    const result = await provider.provideCompletionItems(fixture.model, { lineNumber: 3, column: 11 });
+    assert.equal(result.suggestions[0].kind, 4);
+    assert.equal(result.suggestions[0].range.startLineNumber, 3);
+    assert.equal(result.suggestions[0].additionalTextEdits[0].text, 'replacement');
+    assert.equal(result.suggestions[1].kind, 17);
+    assert.equal(result.suggestions[1].insertTextRules, 4);
+    assert.equal(result.incomplete, true);
+    assert.equal(calls[0].operation, 'completion');
+    fixture.model.uri.path = '/run.zsh';
+    assert.deepEqual((await provider.provideCompletionItems(fixture.model, { lineNumber: 3, column: 11 })).suggestions, []);
+    assert.equal(calls.length, 1, 'unsupported shell dialects must not hit Bash');
+    fixture.model.uri.path = '/run.sh'; fixture.model.uri.authority = 'another-project';
+    assert.deepEqual((await provider.provideCompletionItems(fixture.model, { lineNumber: 3, column: 11 })).suggestions, []);
+    assert.equal(calls.length, 1);
+  } finally { fixture.installed.dispose(); }
+});
+
 test('Java document outline uses current-buffer fast syntax without waiting for semantic initialization', async () => {
   const calls = [];
   const fixture = providerFixture(async (operation, input) => {
