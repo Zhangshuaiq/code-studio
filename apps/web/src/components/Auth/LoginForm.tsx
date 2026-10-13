@@ -138,7 +138,7 @@ export function LoginForm() {
             <span className="mb-5 grid h-12 w-12 place-items-center rounded-2xl bg-gradient-to-br from-indigo-500 to-violet-700 text-white shadow-lg">
               <Code2 size={22} />
             </span>
-            <h1 className="text-xl font-bold">AI 代码生成平台</h1>
+            <h1 className="text-xl font-bold">code studio</h1>
           </div>
 
           <div className="eyebrow">Welcome to Code Studio</div>

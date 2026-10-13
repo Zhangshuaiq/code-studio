@@ -73,10 +73,11 @@ function openExternalUrl(target) {
 function createMainWindow(serverUrl) {
   const window = new BrowserWindow({
     width: 1440, height: 920, minWidth: 1024, minHeight: 700, show: false,
-    title: 'Code Studio', backgroundColor: '#0f172a',
+    title: 'code studio', backgroundColor: '#0f172a',
     webPreferences: { preload: path.join(__dirname, 'preload.cjs'), contextIsolation: true, nodeIntegration: false, sandbox: true },
   });
   mainWindow = window;
+  window.on('page-title-updated', event => { event.preventDefault(); window.setTitle('code studio'); });
   window.once('ready-to-show', () => { lifecycle({ component: 'desktop', event: 'window-ready', elapsedMs: Math.round(performance.now() - bootStarted) }); window.show(); });
   window.webContents.setWindowOpenHandler(({ url }) => {
     if (isAllowedNavigation(url, serverUrl)) return { action: 'allow' };

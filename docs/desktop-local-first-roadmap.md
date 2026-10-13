@@ -810,11 +810,17 @@ Redis 连接建立后以及类型读取后、真正写命令前，重新核对�
 
 ### 8.39 macOS 本机调试签名与下载分发边界
 
-此前 Actions 使用 CSC_IDENTITY_AUTO_DISCOVERY=false 完全跳过签名，本机按相同配置生成的应用 codesign 校验报“code has no resources but signature indicates they must be present”；构建成功不等于有效应用签名。mac.identity 改为显式 `-`，自动 ad-hoc 签名，配置 Electron JIT/本机原生模块所需 entitlements，保留 hardened runtime。只忽略 JDT 的 `org.eclipse.equinox.app` 数据目录（名称像应用但不是应用 bundle），不会跳过真实 Electron helpers；共享语言包 files 白名单不打包本机缓存，JDT/Java tools 仍由 extraResources 供给。
+此前 Actions 使用 CSC_IDENTITY_AUTO_DISCOVERY=false 完全跳过签名，本机按相同配置生成的应用 codesign 校验报“code has no resources but signature indicates they must be present”；构建成功不等于有效应用签名。mac.identity 改为显式 `-`，自动 ad-hoc 签名，配置 Electron JIT/本机原生模块所需 entitlements，保留 hardened runtime。只忽略 JDT 的 `org.eclipse.equinox.app` 数据目录（名称像应用但不是应用 bundle），不会跳过真实 Electron helpers。共享语言包新增 npm files 白名单，但本机实际 ASAR 检查仍发现 electron-builder 依赖收集夹带缓存；不能将白名单视为彻底消除缓存夹带的验证结论，后续需完善依赖文件过滤。JDT/Java tools 的正式资源入口仍为 extraResources。
 
 本机无需付费证书、Apple 登录或网络公证即可运行开发模式/构建调试包。`npm run desktop:dev` 启动源码客户端；`npm run dist:mac --workspace apps/desktop -- --arm64 --publish never` 构建 Apple Silicon 包（Intel 使用 --x64）。自动构建解开实际 ZIP，再做 codesign --verify --deep --strict，通过才上传；build-info 标识 ad-hoc/non-notarized，不冒充 Developer ID 正式签名。
 
 ad-hoc 保证签名完整性，不代表通过浏览器下载后的 Gatekeeper 信任。正式分发还需 Apple Developer Program 的 Developer ID Application 证书和 Apple 公证，参见 [Apple Developer ID](https://developer.apple.com/developer-id/)；相关私钥/密码应放受保护的 CI secrets，不写入仓库或聊天。本批不自动配置/使用开发者账户，不关闭 Gatekeeper 或删除下载隔离标记。本机成功启动不能代替隔离下载场景验收。
+
+### 8.40 本机安装与统一标题（2026-10-13）
+
+网页 index.html 标题、登录页旧平台标题及侧栏 tooltip 改为 `code studio`；桌面窗口标题固定同一名称，防止页面 title 更新重新覆盖。品牌回归测试、网页生产构建、macOS arm64 DMG/ZIP 构建通过。
+
+已安装并打开 `/Applications/Code Studio.app`，未改用户数据；本次目标路径原本不存在，没有移除旧应用或备份。安装应用的 ad-hoc 深度/严格签名校验通过，安装 ASAR 与构建产物相同，SHA-256 为 `dd28115f76ff226bf962d332582cd5d6104e1e00df185277837153046bc51c1a`。实际已安装进程的本地 HTTP 页面标题为 code studio，健康接口返回 ready / desktop-local / community / remoteApiRequired=false。该验收是本机安装与启动，不代表浏览器隔离下载或 Developer ID 公证验收；未部署远程网页服务。
 
 ## 9. 数据源管理与 Git 版本管理补齐（2026-10-10）
 

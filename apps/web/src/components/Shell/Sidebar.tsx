@@ -180,7 +180,7 @@ export function Sidebar() {
       <button
         onClick={() => navigate("/")}
         className={`flex items-center gap-3 border-b border-slate-200/70 py-4 dark:border-slate-800/70 ${collapsed ? "justify-center px-2" : "px-4"}`}
-        title="AI 代码生成平台"
+        title="code studio"
       >
         <span className="relative grid h-10 w-10 shrink-0 place-items-center rounded-[14px] bg-gradient-to-br from-indigo-500 via-indigo-600 to-violet-700 text-white shadow-[0_10px_24px_-10px_rgba(79,70,229,0.9)] ring-1 ring-white/30">
           <Code2 size={19} strokeWidth={2.25} />
