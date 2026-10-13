@@ -33,7 +33,7 @@ jobs:
       run:
         shell: bash
     env:
-      # Push builds are test packages: no signing credentials or auto-publish.
+      # macOS uses explicit ad-hoc signing, not a trusted Developer ID identity.
       CSC_IDENTITY_AUTO_DISCOVERY: 'false'
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -58,6 +58,14 @@ jobs:
         run: npm run ${{ matrix.script }} --workspace apps/desktop -- --${{ matrix.arch }} --publish never
       - name: Verify package outputs and write checksums
         run: node apps/desktop/scripts/verify-release.cjs ${{ matrix.platform }} ${{ matrix.arch }}
+      - name: Verify macOS ZIP application signature
+        if: matrix.platform == 'macos'
+        env:
+          PACKAGE_ARCH: ${{ matrix.arch }}
+        run: |
+          package_version=$(node -p "require('./apps/desktop/package.json').version")
+          ditto -x -k "apps/desktop/release/Code Studio-${package_version}-mac-${PACKAGE_ARCH}.zip" "$RUNNER_TEMP/desktop-signature-check"
+          codesign --verify --deep --strict --verbose=2 "$RUNNER_TEMP/desktop-signature-check/Code Studio.app"
       - name: Upload desktop packages
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:

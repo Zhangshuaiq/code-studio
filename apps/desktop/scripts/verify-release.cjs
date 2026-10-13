@@ -17,7 +17,7 @@ async function verifyRelease(platform, arch, directory = path.resolve(__dirname,
     sums.push(`${hash.digest('hex')}  ${name}`);
   }
   fs.writeFileSync(path.join(directory, 'SHA256SUMS.txt'), sums.join('\n') + '\n');
-  fs.writeFileSync(path.join(directory, 'build-info.json'), JSON.stringify({ version, platform, arch, commit: process.env.GITHUB_SHA || null, runId: process.env.GITHUB_RUN_ID || null, signed: false }, null, 2) + '\n');
+  fs.writeFileSync(path.join(directory, 'build-info.json'), JSON.stringify({ version, platform, arch, commit: process.env.GITHUB_SHA || null, runId: process.env.GITHUB_RUN_ID || null, signed: platform === 'macos', signing: platform === 'macos' ? 'ad-hoc' : 'unsigned', notarized: false }, null, 2) + '\n');
   console.log(`Verified ${names.length} desktop packages (${platform}/${arch})`);
 }
 module.exports = { verifyRelease };

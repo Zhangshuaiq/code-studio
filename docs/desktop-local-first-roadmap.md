@@ -808,6 +808,14 @@ Redis 连接建立后以及类型读取后、真正写命令前，重新核对�
 
 首次云端构建在 Java 调试插件冷下载时暴露 HTTP 编码问题：Marketplace 即使收到 Accept-Encoding: identity 仍返回 Content-Encoding: gzip，旧脚本将压缩响应直接交给 ZIP 解压器，导致 central directory 错误。已改为按 HTTP 编码流式解码 gzip/deflate/br，对传输和解码后的数据分别限制 100 MiB，处理截断/异常响应；VSIX 格式检查及提取后固定 JAR SHA-256 校验保持启用。桌面包装脚本与共享模块入口同步调整，CI 加入下载解码回归。5 项下载/打包配置测试通过，禁用本机 Maven/VS Code 缓存的真实网络安装及两个 JAR 哈希校验通过；这证明下载故障修复，不代替新的 Windows 完整打包结果。
 
+### 8.39 macOS 本机调试签名与下载分发边界
+
+此前 Actions 使用 CSC_IDENTITY_AUTO_DISCOVERY=false 完全跳过签名，本机按相同配置生成的应用 codesign 校验报“code has no resources but signature indicates they must be present”；构建成功不等于有效应用签名。mac.identity 改为显式 `-`，自动 ad-hoc 签名，配置 Electron JIT/本机原生模块所需 entitlements，保留 hardened runtime。只忽略 JDT 的 `org.eclipse.equinox.app` 数据目录（名称像应用但不是应用 bundle），不会跳过真实 Electron helpers；共享语言包 files 白名单不打包本机缓存，JDT/Java tools 仍由 extraResources 供给。
+
+本机无需付费证书、Apple 登录或网络公证即可运行开发模式/构建调试包。`npm run desktop:dev` 启动源码客户端；`npm run dist:mac --workspace apps/desktop -- --arm64 --publish never` 构建 Apple Silicon 包（Intel 使用 --x64）。自动构建解开实际 ZIP，再做 codesign --verify --deep --strict，通过才上传；build-info 标识 ad-hoc/non-notarized，不冒充 Developer ID 正式签名。
+
+ad-hoc 保证签名完整性，不代表通过浏览器下载后的 Gatekeeper 信任。正式分发还需 Apple Developer Program 的 Developer ID Application 证书和 Apple 公证，参见 [Apple Developer ID](https://developer.apple.com/developer-id/)；相关私钥/密码应放受保护的 CI secrets，不写入仓库或聊天。本批不自动配置/使用开发者账户，不关闭 Gatekeeper 或删除下载隔离标记。本机成功启动不能代替隔离下载场景验收。
+
 ## 9. 数据源管理与 Git 版本管理补齐（2026-10-10）
 
 ### 9.1 数据源：同一详情组件，本机执行

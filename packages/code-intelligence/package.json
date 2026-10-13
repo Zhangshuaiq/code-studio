@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "main": "local-lsp-manager.cjs",
+  "files": ["*.cjs", "*.json", "scripts/*.cjs"],
   "scripts": {
     "prepare-language-servers": "node scripts/install-jdtls.cjs && node scripts/install-java-tools.cjs"
   },

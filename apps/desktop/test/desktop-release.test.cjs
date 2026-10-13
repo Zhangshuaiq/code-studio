@@ -28,6 +28,9 @@ test('push packaging covers native macOS architectures and Windows with distinct
   assert.deepEqual(workflow.jobs.package.strategy.matrix.include.map(item => [item.platform, item.arch]), [['macos','x64'],['macos','arm64'],['windows','x64']]);
   for (const step of workflow.jobs.package.steps.filter(step => step.uses)) assert.match(step.uses, /@[a-f0-9]{40}$/);
   assert.notEqual(build.nsis.artifactName, build.portable.artifactName);
+  assert.equal(build.mac.identity, '-');
+  assert.ok(fs.readFileSync(path.resolve(__dirname, '../', build.mac.entitlements), 'utf8').includes('com.apple.security.cs.disable-library-validation'));
+  assert.ok(workflow.jobs.package.steps.some(step => step.name === 'Verify macOS ZIP application signature' && step.run.includes('codesign --verify --deep --strict')));
   const command = workflow.jobs.package.steps.find(step => step.name === 'Build desktop packages').run;
   assert.ok(command.includes('--publish never')); assert.ok(command.includes('--${{ matrix.arch }}'));
 });
