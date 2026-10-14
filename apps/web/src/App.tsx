@@ -19,6 +19,9 @@ import {
 } from "lucide-react";
 import { AppShell } from "./components/Shell/AppShell";
 import { ChatPanel } from "./components/ChatPanel/ChatPanel";
+import { WorkspaceChatPanel } from './components/CodeEditor/WorkspaceChatPanel';
+import { ChatVisibilityButton } from './components/CodeEditor/ChatVisibilityButton';
+import { EditorAppearanceSettings } from './components/CodeEditor/EditorAppearanceSettings';
 import { FileTree } from "./components/FileTree/FileTree";
 import { PreviewPanel } from "./components/PreviewPanel/PreviewPanel";
 import { HistoryPanel } from "./components/HistoryPanel/HistoryPanel";
@@ -228,7 +231,7 @@ function WorkspacePage() {
       autoSaveId="ws-h"
     >
       {/* 左：对话（可拖拽宽度） */}
-      <Panel defaultSize={28} minSize={18} maxSize={50}>
+      <WorkspaceChatPanel>
         <div className="h-full">
           <ChatPanel
             sessionId={sessionId}
@@ -238,8 +241,7 @@ function WorkspacePage() {
             readOnly={workspaceReadOnly}
           />
         </div>
-      </Panel>
-      <PanelResizeHandle className="resize-handle-x" />
+      </WorkspaceChatPanel>
 
       {/* 右：代码/预览 + 底部日志 */}
       <Panel minSize={30}>
@@ -254,6 +256,8 @@ function WorkspacePage() {
                 >
                   <ChevronLeft size={18} />
                 </button>
+                <ChatVisibilityButton />
+                <EditorAppearanceSettings />
                 <div className="mr-2 min-w-0">
                   <div className="flex items-center gap-1.5">
                     <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${migrating ? "bg-amber-500" : "bg-emerald-500 shadow-[0_0_0_3px_rgba(16,185,129,0.12)]"}`} />

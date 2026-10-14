@@ -8,6 +8,7 @@ RUN npm ci
 COPY apps/web apps/web
 COPY packages/code-intelligence/file-types.json packages/code-intelligence/file-types.json
 COPY packages/code-intelligence/redis-commands.json packages/code-intelligence/redis-commands.json
+COPY packages/code-intelligence/editor-appearance.cjs packages/code-intelligence/editor-appearance.cjs
 ARG VITE_API_BASE_URL=/api
 ENV VITE_API_BASE_URL=$VITE_API_BASE_URL
 RUN npm run build --workspace apps/web

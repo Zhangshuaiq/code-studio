@@ -219,6 +219,13 @@ function createLocalApi(options = {}) {
       if (request.method === 'DELETE' && url.pathname === `${LOCAL_API_PREFIX}/license`) {
         store?.deleteSetting(LICENSE_SETTING); response.writeHead(204); response.end(); return;
       }
+      if (url.pathname === `${LOCAL_API_PREFIX}/editor-preferences` && ['GET', 'PUT'].includes(request.method)) {
+        if (!store) { json(response, 503, { message: '本机设置存储不可用' }); return; }
+        if (request.method === 'GET') { json(response, 200, { preferences: store.getSetting('editor.preferences') || null }); return; }
+        try { const preferences = require('@codegen/code-intelligence/editor-appearance.cjs').validatePreferences(await readJsonBody(request, 128 * 1024)); store.setSetting('editor.preferences', preferences); json(response, 200, { preferences }); }
+        catch (error) { json(response, 400, { message: error.message }); }
+        return;
+      }
       if (request.method === 'GET' && url.pathname === `${LOCAL_API_PREFIX}/privacy`) {
         const license = licenseStatus();
         json(response, 200, privacySettings(store, license)); return;

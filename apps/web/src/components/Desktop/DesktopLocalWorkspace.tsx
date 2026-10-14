@@ -1,4 +1,8 @@
-import Editor from "@monaco-editor/react";
+import Editor, { useMonaco } from "@monaco-editor/react";
+import { useEditorAppearance } from '../../hooks/useEditorAppearance';
+import { EditorAppearanceSettings } from '../CodeEditor/EditorAppearanceSettings';
+import { WorkspaceChatPanel } from '../CodeEditor/WorkspaceChatPanel';
+import { ChatVisibilityButton } from '../CodeEditor/ChatVisibilityButton';
 import { WorkspaceSqlBinding } from '../CodeEditor/WorkspaceSqlBinding';
 import { workspaceSqlScope, readWorkspaceSqlContext } from '../../lib/workspace-sql-context';
 import { memo, useCallback, useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
@@ -166,6 +170,7 @@ export function DesktopLocalWorkspace({
   active?: boolean;
 }) {
   const theme = useTheme((state) => state.theme);
+  const { editorTheme, appearanceOptions, baseAppearanceOptions } = useEditorAppearance(useMonaco(), theme);
   const { prompt: askPrompt, confirm: askConfirm } = useFeedback();
   const [files, setFiles] = useState<FileEntry[]>([]);
   const [activePath, setActivePath] = useState<string>();
@@ -1357,7 +1362,7 @@ export function DesktopLocalWorkspace({
     const body = await response.json();
     if (!response.ok) throw new Error(body.message || '无法加载行注释');
     return body;
-  });
+  }, appearanceOptions.lineNumbers === 'on');
   const title = useMemo(
     () => (activePath ? activePath.split("/").pop() : "选择文件"),
     [activePath],
@@ -1478,7 +1483,7 @@ export function DesktopLocalWorkspace({
         className="workspace-frame h-full"
         autoSaveId="desktop-ws-h"
       >
-        <Panel defaultSize={28} minSize={18} maxSize={50}>
+        <WorkspaceChatPanel>
           <div className="flex h-full min-h-0 flex-col bg-slate-50/70 dark:bg-slate-900/40">
             <div className="flex h-10 shrink-0 items-center gap-2 border-b border-slate-200 px-3 text-[11px] font-semibold dark:border-slate-800">
               <Bot size={13} className="text-indigo-500" />
@@ -1486,8 +1491,7 @@ export function DesktopLocalWorkspace({
             </div>
             <DesktopLocalAgentPanel projectId={project.id} onFilesChanged={() => { void reloadWorkspaceFiles(); void loadGitStatus(); }} />
           </div>
-        </Panel>
-        <PanelResizeHandle className="resize-handle-x" />
+        </WorkspaceChatPanel>
         <Panel minSize={30}>
           <section className="flex h-full min-w-0 flex-col bg-white dark:bg-slate-900">
             <header className="flex min-h-14 shrink-0 flex-wrap items-center gap-x-2 gap-y-1 border-b border-slate-200 px-3 py-2 dark:border-slate-800">
@@ -1499,6 +1503,8 @@ export function DesktopLocalWorkspace({
               >
                 <ArrowLeft size={17} />
               </button>
+              <ChatVisibilityButton />
+              <EditorAppearanceSettings />
               <div className="flex items-center">
                 <button
                   type="button"
@@ -2143,7 +2149,7 @@ export function DesktopLocalWorkspace({
                               path={workspaceModelUri(project.id, activePath)}
                               language={fileView.language || monacoLang(activePath)}
                               value={content}
-                              theme={theme === "dark" ? "vs-dark" : "light"}
+                              theme={editorTheme}
                               onMount={mountEditor}
                               onChange={(value) => {
                                 const next = value ?? "";
@@ -2167,9 +2173,7 @@ export function DesktopLocalWorkspace({
                                 readOnly: Boolean(fileView.readOnly) || movingFile,
                                 glyphMargin: activePath.endsWith(".java") && !fileView.readOnly,
                                 automaticLayout: true,
-                                minimap: { enabled: true },
-                                fontSize: 12,
-                                lineHeight: 19,
+                                ...(blame.enabled ? baseAppearanceOptions : appearanceOptions),
                                 scrollBeyondLastLine: false,
                               }}
                             />

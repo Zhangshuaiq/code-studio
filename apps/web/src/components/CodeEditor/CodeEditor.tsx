@@ -13,6 +13,7 @@ import { useTheme } from "../../store/theme";
 import { useEditorTabs } from "../../store/editorTabs";
 import type { FileChange } from "../../hooks/useSessionChanges";
 import { useEditorPreferences } from '../../store/editorPreferences';
+import { useEditorAppearance } from '../../hooks/useEditorAppearance';
 import { navigationDirection, navigationShortcuts } from '../../lib/editor-keymap';
 import { Select } from '../common/Select';
 import { api } from '../../lib/api';
@@ -66,6 +67,7 @@ export function CodeEditor({
   const save = useSaveFile(sessionId);
   const sourceIndex = useWorkspaceSourceIndex(sessionId, languageFallback);
   const theme = useTheme((s) => s.theme);
+  const { editorTheme, appearanceOptions, baseAppearanceOptions } = useEditorAppearance(monaco, theme);
 
   const draftState = useEditorTabs((state) =>
     path ? state.drafts[path] : undefined,
@@ -80,7 +82,7 @@ export function CodeEditor({
   const draft = draftState?.content ?? data?.content ?? "";
   const baseline = draftState?.baseline ?? data?.content ?? "";
   const nativeBlameUnsupported = data?.encoding?.startsWith('utf-16');
-  const blame = useGitBlame(sessionId, nonText || nativeBlameUnsupported ? undefined : path, draft, async (file, content, signal) => (await api.post(`/sessions/${sessionId}/git/blame`, { path: file, content }, { signal })).data);
+  const blame = useGitBlame(sessionId, nonText || nativeBlameUnsupported ? undefined : path, draft, async (file, content, signal) => (await api.post(`/sessions/${sessionId}/git/blame`, { path: file, content }, { signal })).data, appearanceOptions.lineNumbers === 'on');
   const [formatting, setFormatting] = useState(false);
   const [formatErr, setFormatErr] = useState("");
   const [saveErr, setSaveErr] = useState("");
@@ -637,12 +639,11 @@ export function CodeEditor({
             language={monacoLang(path)}
             original={change.before}
             modified={draft}
-            theme={theme === "dark" ? "vs-dark" : "light"}
+            theme={editorTheme}
             options={{
-              fontSize: 13,
+              ...appearanceOptions,
               readOnly: true,
               renderSideBySide: true,
-              minimap: { enabled: false },
               automaticLayout: true,
               scrollBeyondLastLine: false,
             }}
@@ -658,11 +659,10 @@ export function CodeEditor({
             value={draft}
             onChange={(v) => { const current = pathRef.current; if (current && !current.startsWith('@java-source/')) setDraftContent(current, v ?? ""); }}
             onMount={handleMount}
-            theme={theme === "dark" ? "vs-dark" : "light"}
+            theme={editorTheme}
             options={{
-              fontSize: 13,
+              ...(blame.enabled ? baseAppearanceOptions : appearanceOptions),
               readOnly,
-              minimap: { enabled: false },
               scrollBeyondLastLine: false,
               tabSize: 2,
               automaticLayout: true,

@@ -171,6 +171,12 @@ app.whenReady().then(async () => {
     await waitFor(`!document.querySelector('.quick-input-widget')?.offsetHeight`);
     await window.webContents.executeJavaScript(`[...document.querySelectorAll('button')].find(button => button.textContent.trim() === '行注释').click()`);
     await waitFor(`[...document.querySelectorAll('.line-numbers')].some(node => node.textContent.includes('WebBlameAuth'))`);
+    await window.webContents.executeJavaScript(`document.querySelector('[aria-label="编辑器外观"]').click()`);
+    await waitFor(`!!document.querySelector('[aria-label="编辑器字号"]')`);
+    await window.webContents.executeJavaScript(`(()=>{const node=document.querySelector('[aria-label="编辑器字号"]');Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(node,'17');node.dispatchEvent(new Event('input',{bubbles:true}));})()`);
+    await waitFor(`[...document.querySelectorAll('.line-numbers')].some(node => node.textContent.includes('WebBlameAuth'))`);
+    assert.equal(await monaco('editor.getOption(monaco.editor.EditorOption.fontSize)'),17);
+    await window.webContents.executeJavaScript(`(()=>{const node=document.querySelector('[aria-label="编辑器字号"]');Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(node,'13');node.dispatchEvent(new Event('input',{bubbles:true}));document.querySelector('[aria-label="关闭编辑器外观"]').click();})()`);
     await window.webContents.executeJavaScript(`document.querySelector('.line-numbers').dispatchEvent(new MouseEvent('mousedown', { bubbles: true, clientX: document.querySelector('.line-numbers').getBoundingClientRect().x + 10, clientY: document.querySelector('.line-numbers').getBoundingClientRect().y + 5 }))`);
     await waitFor(`!!document.querySelector('[aria-label="行注释提交详情"]')`);
     await waitFor(`document.querySelector('[aria-label="行注释提交详情"]').textContent.includes('Main.java')`);
@@ -391,6 +397,16 @@ app.whenReady().then(async () => {
     await waitFor(`document.querySelector('[data-workspace-sql-binding]')?.textContent.includes('表/列提示就绪') && document.querySelector('[data-workspace-sql-binding]').textContent.includes('"public"."web_users"')`);
     assert.equal(writes,1);
     console.log('Web SQL binding passed: automatic referenced-table columns and connection/database/table restoration across non-SQL tabs.');
+    await window.webContents.executeJavaScript(`window.__webChatNode=document.querySelector('[data-workspace-chat]');window.__webEditorWidth=document.querySelector('.monaco-editor').getBoundingClientRect().width;document.querySelector('[aria-label="关闭对话区域"]').click()`);
+    await waitFor(`document.querySelector('[aria-label="打开对话区域"]') && document.querySelector('.monaco-editor').getBoundingClientRect().width > window.__webEditorWidth+100`);
+    assert.ok(await window.webContents.executeJavaScript(`document.querySelector('[data-workspace-chat]')===window.__webChatNode`));
+    await window.webContents.executeJavaScript(`document.querySelector('[aria-label="打开对话区域"]').click();document.querySelector('[aria-label="编辑器外观"]').click()`);
+    await waitFor(`!!document.querySelector('[data-editor-appearance]')`);
+    await window.webContents.executeJavaScript(`(()=>{const node=document.querySelector('[aria-label="编辑器字号"]');Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(node,'18');node.dispatchEvent(new Event('input',{bubbles:true}));})()`);
+    await waitFor(`new Promise(resolve=>window.require(['vs/editor/editor.main'],module=>{const monaco=window.monaco||module;const editor=monaco.editor.getEditors().find(editor=>editor.getModel()?.uri.path.endsWith('/query.sql')&&editor.getDomNode()?.isConnected);resolve(editor?.getOption(monaco.editor.EditorOption.fontSize)===18);} ))`);
+    assert.equal(await window.webContents.executeJavaScript(`JSON.parse(localStorage.getItem('code-studio-editor-preferences')).state.appearance.fontSize`),18);
+    await window.webContents.executeJavaScript(`document.querySelector('[aria-label="关闭编辑器外观"]').click()`);
+    console.log('Web editor preferences passed: live font size, browser persistence, chat width expansion and preserved chat component.');
     console.log('Web navigation and fast-index UI passed: history, sources, peek, implementations, progress, drafts, verified symbol opening, stale-hash rejection and refreshed retry.');
   } catch (error) {
     console.error(error);
