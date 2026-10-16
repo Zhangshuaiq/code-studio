@@ -32,6 +32,7 @@ import { ResolveConflictDto } from "./dto/resolve-conflict.dto";
 import { BranchNameDto, PushDto } from "./dto/git-operation.dto";
 import { WorkspaceLockInterceptor } from "../workspace/workspace-lock.interceptor";
 const { gitBlame } = require('@codegen/code-intelligence/git-blame.cjs');
+const { compareBranches, branchFile, workingFile } = require('@codegen/code-intelligence/git-comparison.cjs');
 import { GitBlameDto } from './dto/git-blame.dto';
 
 @UseGuards(JwtAuthGuard, PermissionsGuard)
@@ -46,6 +47,19 @@ export class GitController {
     private readonly settings: GitSettingsService,
     private readonly access: ProjectAccessService,
   ) {}
+
+  @Get('compare')
+  async compare(@CurrentUser() user: AuthUser, @Param('id') sessionId: string, @Query('left') left: string, @Query('right') right: string, @Query('path') path?: string, @Query('oldPath') oldPath?: string, @Query('offset') offset?: string) {
+    const { root } = await this.files.projectVolume(user.id, sessionId); await this.git.assertRepositoryRoot(root);
+    try { return path ? await branchFile(root, left, right, path, oldPath) : await compareBranches(root, left, right, Number(offset || 0)); }
+    catch (error) { throw new BadRequestException(error.message); }
+  }
+
+  @Get('working-diff')
+  async workingDiff(@CurrentUser() user: AuthUser, @Param('id') sessionId: string, @Query('path') path: string, @Query('stage') stage?: string) {
+    const { root } = await this.files.projectVolume(user.id, sessionId); await this.git.assertRepositoryRoot(root);
+    try { return await workingFile(root, path, stage || 'working'); } catch (error) { throw new BadRequestException(error.message); }
+  }
 
   @Post('blame')
   async blame(@CurrentUser() user: AuthUser, @Param('id') sessionId: string, @Body() body: GitBlameDto) {

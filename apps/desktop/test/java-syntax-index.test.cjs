@@ -2,6 +2,20 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { JavaSyntaxIndex } = require('@codegen/code-intelligence/java-syntax-index.cjs');
 async function parser(t) { const value = await JavaSyntaxIndex.create(); t.after(() => value.close()); return value; }
+test('native extraction matches legacy source order, scopes and incomplete syntax metadata', async t => {
+  const value = await parser(t);
+  const sources = [
+    'class Outer { void run() { class Local { int field; void nested() {} } Runnable r = new Runnable() { public void run() {} }; } class Member {} }',
+    'record Pair<T>(T left, T right) { public Pair {} } enum E { ONE { void run() {} }, TWO; int n; } @interface Mark { String value(); }',
+    'class Broken { void bad(',
+    'package 示例;\r\nclass 中文 { String 提示="😀"; void 方法() {} }',
+  ];
+  for (const source of sources) {
+    const { visitedNodes: a, ...native } = value.parse(source, 'Scope.java');
+    const { visitedNodes: b, ...legacy } = value.parse(source, 'Scope.java', { legacyTraversal: true });
+    assert.deepEqual(native, legacy);
+  }
+});
 
 test('Java syntax index covers declarations, overloads, records, imports and unresolved inheritance', async t => {
   const value = await parser(t);

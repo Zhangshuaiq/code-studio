@@ -842,6 +842,46 @@ ad-hoc 保证签名完整性，不代表通过浏览器下载后的 Gatekeeper �
 
 字体选择版安装验收（2026-10-14）：macOS arm64 DMG/ZIP 重新构建并通过产物校验，签名严格校验通过；正常退出旧客户端后备份至 `/Applications/Code Studio.backup-2026-10-14T02-32-47-283Z.app`，替换并启动 `/Applications/Code Studio.app`，用户数据保留。构建与安装 app.asar SHA-256 均为 `9a99ffa5224db090fde372b941d5982700f92eaae05a8787dcd2ed03841389f4`，打包 renderer 已确认包含系统字体选择。启动健康接口 ready，偏好接口 200。提交前设置/样式/打包配置回归 8 项全部通过；仍为本机 ad-hoc 调试包，未进行 Apple 公证。
 
+### 8.42 Java 启动入口与配置弹窗（2026-10-14）
+
+桌面 Java 工具栏的启动入口显示短类名与模块名；悬停可查看完整类路径。展开菜单至少按 560px 目标宽度展示并受窗口边界约束，选项分别展示类名/模块和可换行的完整限定类名，不再依赖省略的包路径辨别入口。两端共用 Select 新增可选 description/menuMinWidth，不设置这些参数的菜单保留原行为。
+
+点击启动配置按钮打开独立居中弹窗，不自动显示控制台或占用底部日志空间。弹窗集中展示已保存配置、名称、启动入口和完整类路径、程序参数、JVM 参数及新建/保存/清除操作；沿用既有加密项目配置存储和运行/调试请求。关闭后保留当前参数草稿，保存后可重载恢复。支持关闭按钮、Escape、焦点恢复和 Tab 边界限制；下拉框打开时 Escape 先关闭下拉框，不直接关闭配置弹窗，弹窗内 Cmd/Ctrl+S 不触发后台代码保存。
+
+验证：运行配置 API/加密存储回归 6 项通过；新增 `smoke-java-run-config-ui.cjs` 隔离界面测试通过，覆盖同名不同模块长路径、菜单宽度/换行、弹窗不打开控制台、参数保存与重载、焦点恢复和嵌套 Escape。该测试模拟入口、不启动 JVM；既有真实 Java 调试界面脚本已适配弹窗关闭操作，本批未重新运行完整 JVM 调试回归。桌面 SQL 绑定/字体偏好和网页完整导航/混合文件/SQL/聊天面板界面回归通过；网页及桌面 renderer 构建通过。本批尚未提交推送。
+
+本机安装验收（2026-10-14）：macOS arm64 DMG/ZIP 构建及产物校验通过，安装前通过深度严格签名校验并确认 renderer 含配置弹窗；正常退出旧客户端后替换并打开 `/Applications/Code Studio.app`，用户数据保留。旧版改存独立归档目录 `/Users/zhangshuaiqiang/Library/Application Support/Code Studio Backups/2026-10-14T03-12-38-099Z/Code Studio.app`，本次不在“应用程序”目录新增备份；之前已存在的备份未删除。构建与安装 app.asar SHA-256 均为 `9081a7b1b124c40b17828e315246d16d62ff217db6c3d64966a2f5b175de1f4b`；启动健康接口 ready、偏好接口 200，标题 `code studio`。仍为 ad-hoc 本机调试构建，未进行 Apple 公证。
+
+### 8.43 按项目配置匹配本机 JDK（2026-10-14）
+
+桌面运行配置弹窗增加“Java 编译与运行环境”：展示当前启动入口所属模块的 source、target、release 与编译方式，默认“自动匹配项目”；本机 JDK 选择仅指定兼容的安装，不改写项目语言级别。通过 JDT LS `java.project.getSettings` 查询入口源码对应的已导入项目配置，避免多模块项目误用根目录或宿主 Java 的默认版本；读取失败明确提示等待/刷新，不猜测版本。自动优先相同主版本，其次使用兼容的项目 JDK 或本机安装；低于项目 source/target 要求的 JDK 禁用，启动前重新校验已保存的路径，移除或不兼容的 JDK 不静默回退。选择按既有加密运行配置保存，旧配置默认自动模式。
+
+JDK 检测只读 release 元数据并验证 java/javac，不在列表加载时执行候选程序、不递归扫描整块磁盘；覆盖 JAVA_HOME/JDK_HOME、PATH、macOS 系统/用户 JavaVirtualMachines 与 Homebrew、Windows 常见厂商安装目录、Linux JVM 目录，以及用户 .jdks/SDKMAN/asdf 目录。按真实安装路径去重，展示版本/厂商/架构/完整路径；非标准且不在这些位置的安装暂不保证发现。本机实际识别 Java 8、11、17、21、22、25，Windows/Linux 的真实安装环境尚未验收。
+
+Maven 根项目启动前优先 mvnw，缺失时查找本机 Maven，使用所选 JAVA_HOME 执行 `-B -Dstyle.color=never -Dmaven.test.skip=true compile`；保留 pom/继承配置、.mvn/maven.config、导入模块的 Maven profiles 与构建工具自身 toolchain，不执行 clean/install，不强行传 source/target/release。显式 toolchain 决定实际编译器，所选 JDK 是构建进程/程序启动的 JDK；因此不会宣称任意 JDK 选择能覆盖 toolchain。Maven 错误解析为工作区内文件/行/列及本地化详情，失败阻止启动。非 Maven 项目继续既有 Eclipse 项目编译，其编译器实现不是所选 JDK 的 javac。DAP launch 的 javaExec 使用最终匹配 JDK；语言服务自身的运行 JDK 独立，不因 Java 17 项目而降级。
+
+构建使用守护子进程与受限环境变量集合，不继承客户端 API/数据库/模型令牌；日志/错误缓冲受限，编译超时 10 分钟。启动阶段支持状态/日志轮询与停止，取消/退出终止构建进程，避免长构建阻塞且无法停止。Gradle 原生构建、手动添加非标准 JDK、Maven 自定义仓库/toolchains/profiles 的复杂真实项目联调仍待完善，本批不宣称实现完整 Gradle 支持，也未过滤或掩盖 Eclipse 与 javac 的诊断差异。
+
+验证：新增项目环境/JDK 检测、兼容性、构建参数/环境、错误解析与取消 5 项测试通过；配置存储/API 6 项通过。真实 Maven/Lombok/Debug 回归通过，验证自动 Java 17、显式 Java 21、运行 JVM 的 java.home、Java 17 classfile major 61、编译失败阻止运行、断点/变量/单步/停止；未修改用户业务项目。隔离弹窗回归覆盖项目版本展示、自动模式、低版本禁用、JDK 选择保存与刷新恢复。网页/桌面 renderer 构建通过。已与 8.44 一起安装到本机，尚未提交推送。
+
+### 8.44 桌面数据源详情独立页签（2026-10-14）
+
+PostgreSQL、MySQL、Redis 的连接名称/详情入口通过主页页签容器打开独立 `connector:<id>` 页签；重复打开激活已有页签，多个连接独立展示。与项目工作区一致，切换只隐藏、不卸载详情，保留当前 SQL 草稿、选中数据库/表、结构展开及查询结果；返回列表不关闭详情，显式关闭页签才卸载。数据源/Kafka/Kubernetes 列表也在打开后保留组件，避免资源菜单切换导致列表内编辑状态丢失。
+
+详情仍复用网页版 DbQueryPage，未增加远程请求；详情里的编辑连接按钮返回列表编辑现有 ID，保存后同步页签名称与最新连接信息。连接配置变化后详情按更新时间重建以清除旧连接上下文，不能宣称编辑连接后仍保留全部查询草稿。删除连接后刷新列表会移除对应详情页签；普通切换不会重新读取元数据。未实现跨客户端重启恢复这些页签或 SQL 草稿，也未将 Kafka/Kubernetes 浏览器改造成连接详情页签。
+
+验收：隔离数据源界面回归通过，覆盖编辑/密码保留与替换、同一详情组件、表结构、个人版 SQL 执行，以及独立详情页签、组件/编辑器身份、SQL 草稿/结果保留、不重复建页签、不因切换增加元数据请求、多连接切换/关闭、详情编辑后名称同步。仅使用模拟数据库与临时配置，未操作用户业务数据库。项目 SQL/系统字体界面和 Java 配置/JDK 弹窗回归通过，桌面 renderer 构建通过。本批尚未提交推送。
+
+本机安装验收（2026-10-14）：8.43 与 8.44 功能共同重新构建 macOS arm64 DMG/ZIP，产物验证通过；安装前校验包内 JDK/构建模块及数据源页签 renderer，深度严格签名检查通过。正常退出旧客户端后替换并启动 `/Applications/Code Studio.app`，用户数据保留，旧版位于 `/Users/zhangshuaiqiang/Library/Application Support/Code Studio Backups/2026-10-14T07-09-40-223Z/Code Studio.app`。构建与安装 app.asar SHA-256 均为 `a8653bf2aaac20a0d92f6e85d28a544f6a608d3714c67791862fa303df35ea6e`；启动健康接口 ready、偏好接口 200，标题为 `code studio`。本次未在“应用程序”目录新增备份，也未删除原有备份。仍是 ad-hoc 本机调试包，未进行 Apple 公证。
+
+### 8.45 运行 / Debug 面板上下拖拽（2026-10-14）
+
+代码编辑区、Java 运行/Debug 输出和终端使用工作区内纵向 PanelGroup；运行面板不再固定 h-56，高度随分隔条上下拖拽调整，日志/调用栈/变量区域随之扩展并保持独立滚动。复用既有分隔条样式及鼠标/触摸/键盘交互，提供“调整运行面板高度”“调整终端面板高度”的无障碍名称；编辑区及每个底部面板最少保留 15%，底部单面板最多 80%，同时打开时由其余面板最小空间共同限制。
+
+运行面板比例保存在当前项目工作区的内存引用，关闭后重新打开恢复比例，项目页签切换也保留；未宣称跨关闭项目或客户端重启持久化。调整尺寸不重新启动程序/语言服务，运行配置仍是独立弹窗。终端也可独立上下调整，本批不增加日志下载或断点/变量功能。
+
+验证：隔离 Java 运行配置界面测试通过实际鼠标上拖增高、方向键调整、关闭重开高度恢复，并通过原有配置/JDK 弹窗回归；项目 SQL/系统字体/对话折叠回归通过，桌面 renderer 构建和本批 diff 检查通过。尚未重新打包安装或提交推送。
+
 ## 9. 数据源管理与 Git 版本管理补齐（2026-10-10）
 
 ### 9.1 数据源：同一详情组件，本机执行
@@ -876,3 +916,711 @@ ad-hoc 保证签名完整性，不代表通过浏览器下载后的 Gatekeeper �
 本批验收结果：相关 API 回归 26 项通过、1 项真实 PostgreSQL 测试按环境开关跳过（该项在数据源开发阶段已独立通过）；数据源与 Git 的 Electron 界面回归均通过；TypeScript/renderer 构建与 `git diff --check` 通过。macOS arm64 客户端已重新打包并替换 `/Applications/Code Studio.app`，旧版本备份为 `/Applications/Code Studio.app.backup-20261010-223540`，未删除用户数据。安装后的 `app.asar` 与构建产物 SHA-256 均为 `6464fce931cd187970b6d22e0cea3ee35d2784a0c78970a2a517403722deac9d`。本机测试构建尚未进行 Developer ID 签名与公证，不是公开发布验收。
 
 后续版本管理待办：远程分支管理/跟踪分支专用界面、分支删除/重命名、stash、合并/变基及冲突解决器、提交身份与远程凭据设置界面；当前可用本机 Git/终端执行，不等于这些完整 IDE 功能已实现。快速索引层仍按第 8 节分步实施，本批不标为完成。
+
+### 工作区交互与命令事件修复（2026-10-14）
+
+- 文件树：网页与桌面复用展开状态逻辑，折叠父目录后再展开，保留已展开的子目录；当前仅在该工作区生命周期内保存，不承诺重启恢复。
+- 格式化：JSON、XML、SQL 使用共享格式化处理，其他受支持语言调用语言服务；网页与桌面均修改编辑草稿，不自动写盘。桌面支持撤销。Shell 格式化依赖可用的外部语言工具。
+- 桌面 API 调试：项目内请求页签支持方法、URL、参数、请求头、请求体、取消和响应查看。请求只保存在内存，不自动跟随重定向，响应上限 2 MiB；企业网络白名单仍生效。当前未提供网页版对应调试界面或 Swagger 导入。
+- 桌面终端：点击直接打开，不再弹出启动确认；支持最多十个独立会话页签。关闭正在使用的会话仍需确认，隐藏面板不终止进程。
+- Git 网络：确认工具进程继承的代理与本机登录环境不同会导致 TLS 连接失败。客户端启动时读取用户登录环境中的代理与证书白名单，而不是禁用 TLS 校验。真实仓库的只读 `ls-remote` 已通过；未对业务仓库执行 Push/Pull 或改动。
+- Agent 命令事件：CLI 同一 item 的 started/updated/completed 是一次调用。按任务、调用类型和 item ID 去重，不按命令文本去重；完成事件单独到达仍可展示。显示名称改为“命令执行”，并展示具体命令。没有 ID 的事件不进行猜测性去重，历史已存的重复事件不修改。
+
+验收：命令生命周期/重复回放/不同 ID 的相同命令、格式化及网络请求回归共七项通过；Electron 工作区回归通过，覆盖深层目录、JSON/XML 格式化与撤销、REST 请求及草稿保留、直接打开和两个独立终端。此前 Java 真实语言服务格式化及运行/调试回归通过。本节不是安装、提交或推送记录。
+
+后续安装记录：已替换并启动 `/Applications/Code Studio.app`；旧版本保留在 `~/Library/Application Support/Code Studio Backups/2026-10-14T10-37-55-264Z/Code Studio.app`。新包与安装文件 app.asar SHA-256 为 `ee94a5dc828a988701eb5abd7c66fd76c1fddcf9b09d55e39e3e860933bf00ad`，签名完整性检查及带本地会话的 API 健康检查通过，用户配置未清理。
+
+### 内置编辑器主题扩充（2026-10-14）
+
+新增 Xcode、JetBrains、GitHub 风格的浅色/深色，以及 Material 经典、Ocean、Darker、Palenight、浅色，共十一套主题；保留 IDEA 和 Darcula。这里是自包含的风格配色，不是第三方插件或官方主题的逐像素复刻，不加载外部脚本、样式或字体。仅调整代码编辑器，不改变整个应用页面主题。
+
+网页与桌面共用 `packages/code-intelligence/editor-appearance.cjs` 中的配色和校验规则。主题注册遍历共享定义；设置面板切换预置主题后，颜色微调基于该预置完整配色生成自定义主题。主题选择和自定义修改沿用现有偏好存储与 JSON 导入/导出流程。十三套具名配色的合法性与导出/导入往返测试通过。
+
+后续安装验收：主题版本已替换并启动本机客户端，签名完整性及 API 健康检查通过。app.asar SHA-256：`817f2b3c0c14d6177ca88d265f1bb29ddd980461280c1afc8c6e5f2eb1f5ddd0`；旧版备份目录为 `~/Library/Application Support/Code Studio Backups/2026-10-14T13-53-53-631Z/`。
+
+### P0 性能打磨第一步：真实基线与进度限频（2026-10-14，未安装）
+
+确认冷扫描逐文件发送 worker 进度，未变化文件的缓存复用分支却跳过进度通知。共享快速索引现在在扫描开始、扫描中（最多每 100 ms 一次）和完成时提供进度，缓存校验也可见；状态接口保留当前扫描代数的检查、复用、新解析计数及耗时，不能由上一代进度覆盖新扫描状态。网页及桌面共享状态条展示真实计数，不假设总量或生成虚假百分比。此改动降低进度消息数量，不等于 JDT 初始化耗时已解决。
+
+使用 `benchmark-fast-index.cjs` 只读扫描真实 site-tpl-manage，在隔离临时数据库中测量（Node 22.22.1/macOS arm64，1,991 Java 文件、22,737 符号）：改动前首次构建 6,803 ms，改动后一次测量 6,308 ms；重新启动 worker 后首个缓存搜索 62 ms，后台校验 442 ms，未变化文件重解析数为 0；稳定搜索中位 21.4 ms/P95 22.0 ms，主线程事件循环最大延迟 11.8 ms。单次前后差异不足以认定稳定性能提升，也不是冷磁盘测试。
+
+范围：快速语法索引/SQLite/worker IPC，不含 JDT、HTTP、Electron 编辑输入或安装包实际运行。索引仍需要遍历文件元数据，尚未加入系统文件监听、精确语义引用持久化或全量内存加载。下一步应测量 JDT 各阶段、后台构建期间输入响应及更多项目的重复运行基线。
+
+验收：快速索引存储/线程/管理/缓存校验回归 20 项通过；共享状态条回归 3 项通过。新增覆盖冷扫描和缓存复用扫描进度、通知数量上限、轮询计数、完成耗时，未改动用户项目源代码或生产索引库。
+
+### P0 第二步：Java 启动分段诊断（2026-10-14，未安装）
+
+共享语言服务新增 `startupTimings`：协议初始化耗时、初始化响应到 ServiceReady 的导入等待、累计语义就绪耗时，以及后台自动构建配置写出时刻。后者不是构建完成时间；项目导入可能与 initialize 重叠，分段数据不是 JVM 内部 CPU 归因。状态 API 和对应生命周期事件均可读取，尚未把详细数字做成独立用户诊断面板。
+
+后台任务增加开始/完成、导入或分析阶段、耗时、活跃任务数；不记录进度标题、任务内容或绝对路径。重复 ServiceReady 不重新记录就绪、重置状态或触发构建。ServiceReady 前的 Java 进度继续标为导入，而不是提前标成就绪后的后台构建。
+
+`benchmark-java-lifecycle.cjs` 现在分开输出 preparationMs、会话复用 reuseMs、shutdownMs、forced 和 totalMs，且要求真实 ServiceReady，不能把准备接口超时兜底当作语义就绪。隔离小型 Maven 项目最初测量首次就绪约 6.98 秒、持久缓存重开约 4.25 秒，同一活跃会话准备调用小于 1 ms。对照中的持久缓存启动约 2.7–4.1 秒，协议初始化约 2.6–3.9 秒，后续导入等待约 0.09–0.24 秒；不是大项目上限，也不是稳定提速结论。
+
+退出待办仍存在：小型项目刚就绪立即关闭的测试多次出现约 10 秒等待后兜底终止；也有约 0.46 秒正常退出。按 JDT 官方客户端能力实现核对后，试验关闭 shutdown 自动退出、延迟输入 EOF，未稳定改善，相关实验修改全部撤回。未缩短等待预算或清理持久缓存来掩盖问题，仍需进一步分析退出任务/线程。
+
+参考：[JDT 客户端能力](https://github.com/eclipse-jdtls/eclipse.jdt.ls/blob/main/org.eclipse.jdt.ls.core/src/org/eclipse/jdt/ls/core/internal/preferences/ClientPreferences.java)、[JDT shutdown/exit 实现](https://github.com/eclipse-jdtls/eclipse.jdt.ls/blob/main/org.eclipse.jdt.ls.core/src/org/eclipse/jdt/ls/core/internal/handlers/JDTLanguageServer.java)。真实 Java 导航/引用/源码回归验证同时检查启动阶段数据、自动构建顺序；不代表整个 P0 已完成。
+
+### P0 第三步：退出线程定位与重启隔离（2026-10-14，未安装）
+
+生命周期基准增加可选 `--profile-exit`：只匹配本次临时项目 dataRoot 所属 JVM，在退出等待超过 2 秒时用 jcmd 获取线程名称、状态和栈帧；不附加用户 IDE/已安装客户端，不输出完整 JVM 列表、环境或业务源码。`--no-autobuild` 只用于隔离诊断，不改变产品默认自动构建。
+
+实际复现：首次退出约 643 ms、未兜底；持久缓存重开后退出约 10,087 ms、兜底终止。2 秒时快照显示框架停止线程正在 `JavaCore.stop -> JavaModelManager.shutdown -> JobManager.shutdown -> Thread.join` 等待；两个 Java indexing 线程分别在 indexerLoop 中等待。该阻塞点属于 Eclipse Java 索引线程退出链路，而非未发送 LSP exit。关闭自动构建的持久缓存对照仍等待约 10,096 ms，不能把自动构建判为唯一原因。重复线程是否由 reset 并发或关闭期间重建造成，尚未最终证实；没有修改第三方 JAR、缩短退出预算或禁用索引。
+
+客户端风险修复：每个 project/provider 维护独立停止屏障，在停止回调执行前发布；同项目重启必须等待上一实例的退出流程完成，等待结束后重新检查全局退出标记及是否已有替代实例。避免生命周期回调、空闲回收与用户重新打开交错时立即启动第二个缓存使用者；不同项目不加全局串行锁。失败的停止屏障会向准备接口传播失败，不盲目创建新进程。
+
+新增重启回归三项：等待中的并发准备、全局退出阻止排队启动、真实 TypeScript 服务在 shutdown 回调中立即请求重启，确认第二次 spawn 晚于 stopped。真实 Java 导航/引用回归同时验证共享管理器。内部 JDT 的偶发退出等待仍列为未完成项，下一步需在组件兼容升级或有充分证据的服务端修复中处理，不能仅靠 UI 隐藏等待。
+
+参考：[Eclipse JobManager 退出和重置逻辑](https://github.com/eclipse-jdt/eclipse.jdt.core/blob/master/org.eclipse.jdt.core/search/org/eclipse/jdt/internal/core/search/processing/JobManager.java)。本地组件为 JDT LS 1.61.0、JDT Core 3.47.0，具体本地栈行号与仓库主分支可能不同。
+
+### P0 第四步：官方组件对照与未确认退出保护（2026-10-14，未安装）
+
+隔离下载官方 JDT LS 1.62.0（`jdt-language-server-1.62.0-202610131109.tar.gz`），官方 SHA-256 校验值 `f587dafd8410633c2c2bf005e853a2bbb03cddee88933d49bfe6d9cb1cf09342` 匹配；包含 JDT Core 3.48.0。候选组件启动日志显示 core.filesystem 1.12.0 要求 JavaSE 25，因此本机默认 Java 22 启动失败（退出码 13），不能仅依据 jdt.ls.core 自身的 JavaSE 21 声明判断完整发行包要求。
+
+改用本机现有 Java 25 做三轮冷/持久缓存启动与立即退出（独立临时项目和索引库）：六次中五次需要兜底终止，等待约 10.07–10.08 秒；一次正常退出 399 ms。1.61.0 改用 Java 21 的冷/热对照仍有约 10.08–10.09 秒兜底等待。因此不把 1.62.0 接入默认安装/打包流程，也不把切换 Java 主版本宣称为退出修复。该测试仅针对生命周期，不代表候选组件的 Lombok、源码导航和 Debug 已通过兼容验收。
+
+基准脚本支持 `--cycles=1..10`、`--summary` 与显式 `--keep-data`，用于重复统计和保留隔离失败日志。默认仍清理自己创建的临时项目；候选目录和显式保留的诊断目录只用于测试，不是客户端用户缓存。
+
+修复另一处安全边界：有界退出流程结束但未收到进程 close，不能允许重用同一持久工作区。共享管理器保留 project/provider 退出未确认标记，准备接口返回可重试状态、不启动第二个进程；标记只在实际 close 后解除，不阻塞其他项目。客户端全局退出仍保留原来的有界流程，没有延长等待或修改原始第三方 JAR。
+
+验收新增覆盖“未确认退出时不启动替代进程，解除标记后恢复准备”，连同既有并发准备、全局退出和真实 TypeScript 重启顺序回归；另回归真实 Java 导航/引用。原始 JDT 索引线程退出阻塞仍未彻底解决，不能将本节保护措施记为退出性能问题已完成。
+
+官方来源：[1.62.0 下载目录](https://download.eclipse.org/jdtls/milestones/1.62.0/)、[归档校验值](https://download.eclipse.org/jdtls/milestones/1.62.0/jdt-language-server-1.62.0-202610131109.tar.gz.sha256)。项目组件版本仍为 1.61.0，已安装客户端未替换。
+
+### P0 第五步：索引退出兼容补丁验证（2026-10-14，实验，不默认启用）
+
+单独将 JobManager.reset 串行化的诊断补丁，六次隔离退出仍有四次兜底，未作为正式修复。进一步加入 OSGi 生命周期判断：在 JDT Core bundle 为 STOPPING 时直接返回，不允许 reset 在框架关闭期间重新创建索引线程；正常启动、运行时 reset 保留原逻辑。采用显式 Java agent 的内存字节码转换，不改写原始 JDT JAR，不删除缓存或关闭索引。
+
+第二版三轮冷/热生命周期（六次）全部真实退出，无兜底；耗时 459、3465、3652、2900、3807、2653 ms。调整诊断包依赖布局后追加冷/热验证，退出 3924、2419 ms，均未兜底。数据仅适用于本机、小型隔离 Maven 项目，不是产品全局退出上限或跨平台统计。
+
+补丁验证通过：JVM 字节码校验、ACTIVE/STOPPING/无 bundle 的行为、方法重载隔离；真实 Java 导航/引用/JAR/JDK 源码，以及 Lombok 生成方法、格式化、Maven 构建、运行、断点、变量、单步与停止的两项综合回归通过。原有重启隔离四项回归通过。固定转换标记转为一次 index-guard-applied 生命周期事件，基准验证补丁实际应用，避免把未加载补丁的偶然正常退出判为有效。
+
+实施文件：`packages/code-intelligence/java-compat/`、`apps/desktop/scripts/build-index-thread-guard.cjs`。构建仅生成独立临时诊断包，保留原版 ASM 归档及许可；mock Eclipse 类不进入补丁包。运行时仅可信开发配置显式传入 indexThreadGuardJar 才启用，默认 Java 工具准备、CI 打包和本机安装均未接入。
+
+下一步正式接入前必须补充大项目、长期编辑/索引、升级缓存及 Windows/macOS x64 验收，再决定默认启用范围与回退开关。本批找到并验证了兼容方案，但不将全平台退出问题或整个 P0 标为完成。
+
+### P0 第六步：大项目边界、请求取消与真实进度（2026-10-15，未安装）
+
+真实 site-tpl-manage 复制到隔离目录，仅在副本中运行语言服务；排除 Git、构建输出及 Eclipse 项目元数据。有效快照 2,099 个文件、约 10.6 MB。首次 ServiceReady 测量约 12.1–12.6 秒，关闭自动构建对照约 10.0 秒；这是协议报告的服务可接入时刻，不是全量分析完成，也未测出成功的大项目实现类跳转/缓存重开数据。
+
+大项目接口类型的 implementation 查询仍超过 15 秒，启用自动构建时退出仍发生约 10 秒兜底；关闭自动构建的单次对照退出约 436 ms，但查询依然超时，不能认定自动构建是唯一瓶颈。线程快照出现编译/类型绑定、ClasspathJar 包查找的 CPU 工作，以及 Initialize workspace 等待构建。此前“小项目十次退出正常”的结论不能推广到大项目。早期整方法 synchronized 实验已撤回，当前 agent 仅在 STOPPING 时防止重建线程，默认仍不启用；不能按小项目结果直接发布。
+
+本批落地两项共享修复：
+
+1. 原语言请求只在本机 Promise 超时，不取消服务端计算。`language-request.cjs` 现在为有超时预算的请求提供 JSON-RPC CancellationToken，超时发送取消并保留 LOCAL_LSP_TIMEOUT；关闭会话时取消活跃请求、拒绝迟到请求、清理本地请求记录。服务端需要配合取消，不承诺不可中断的编译会立即停止；未将所有原始 javaCommand 都改成同一超时策略。
+2. 本地 JDT 1.61.0 的 JavaLanguageClient 注解明确使用 `language/progressReport`，原代码监听了错误的 `language/progress`，导致任务数长期为零、分析未完成却显示 ready。现在接收正确通知并保留旧名称兼容；跟踪所有活动任务，ServiceReady 前标为导入，之后有任务标为分析/构建，全部完成才恢复 ready。共享网页/桌面状态条显示实际任务数，不生成百分比，不保留或输出进度标题中的项目路径。
+
+验收：请求超时取消/关闭取消/协议错误/同步断连、进度通知/并行任务/异常报文、共享状态文案和重启隔离共 14 项回归；另有真实 Java/Lombok、源码/JAR/JDK 导航、格式化、运行/调试两项综合回归通过；API 与网页构建通过。大项目导航和退出专项仍失败，不能计作整体通过或 P0 完成。客户端和远程常驻 API 尚未替换/重启。
+
+诊断脚本也修正了验收问题：同时处理 DocumentSymbol 与 SymbolInformation 的位置；实现类查询定位类型名称而非整段声明起点；退出统计按 Java provider 过滤，不混入 Bash 的耗时。失败时可只对本次临时 JVM 抓取导航线程状态，不接触用户 IDE。
+
+收窄后的 STOPPING-only 补丁补测小项目两轮冷/热（四次）：退出 3,103、2,641、3,028、2,473 ms，均未兜底。它没有额外 synchronized 锁，但该结果仍不覆盖前述大项目导航/自动构建场景，不作为默认启用依据。
+
+### P0 第七步：首次语义查询与缓存重开对照（2026-10-15，诊断，未安装）
+
+增强 `profile-java-startup.cjs`，分别记录 documentSymbols、首次/重复 implementation、冷启动/持久缓存重开的耗时。诊断参数 `--java-request-ms=60000` 只写入隔离测试的内部会话，不通过网页/桌面 API 请求传入；产品默认仍为 15 秒。一次导航失败后仍完成缓存重开对照并正常退出，最终退出码仍为 1，避免把部分成功计作整体通过。
+
+本机 site-tpl-manage 同一份 2,099 文件副本、原版 JDT 1.61.0、不启用实验 agent、关闭自动构建的单次测量：
+
+| 测量项 | 新建缓存 | 重用同一缓存 |
+| --- | ---: | ---: |
+| 协议初始化 | 4,190 ms | 6,855 ms |
+| 初始化响应之后至 ServiceReady | 7,025 ms | 92 ms |
+| ServiceReady 总耗时 | 11,217 ms | 6,948 ms |
+| 文件符号查询 | 1,006 ms | 961 ms |
+| 首次实现类查询 | 超过 60 秒，取消 | 47,318 ms，找到正确实现类 |
+| 同一会话重复实现类查询 | 未执行 | 59 ms |
+| Java 退出 | 491 ms，无兜底 | 996 ms，无兜底 |
+
+结论：持久缓存确实减少了项目导入工作，但不是完整的语义结果预热；首次实现类查询仍明显缓慢。重复查询很快不代表项目重开后的首次跳转也快。两次会话查询期间均仍有后台分析任务，关闭自动构建并不意味着没有后台导入/索引工作，不能据此归因全部 CPU 耗时。此测量仅一轮，不是最长时间、性能保证或跨平台统计。
+
+下一步应围绕首次类型绑定、后台分析调度及导航结果持久缓存失效策略优化，而不是默认放宽请求超时或直接发布实验退出补丁。暂未改动安装包、正式自动构建配置或远程服务。请求取消、进度、状态条、重启隔离及诊断预算覆盖共 15 项回归通过；诊断脚本语法检查和 diff 空白检查通过。本轮大项目专项仍因冷查询超时返回失败，不将 P0 标为完成。
+
+### API 调试：不启动项目的静态接口发现（2026-10-15，源码完成，未安装）
+
+用户明确要求项目未启动也能加载接口列表。新增共享模块 `packages/code-intelligence/api-discovery.cjs`，桌面本地 API 的 `GET /api/local/projects/:id/rest-endpoints` 调用独立 worker 扫描已注册项目。不会运行 Maven/Gradle、启动 Spring 或 Java 语言服务、执行项目脚本、联网读取 Swagger 或远程 `$ref`。扫描复用 Java 快速索引的 tree-sitter 解析器初始化，但独立于语义索引，不必等待 JDT。
+
+当前覆盖：
+
+- Spring Java Controller/RestController 的类级与方法级 RequestMapping，以及 Get/Post/Put/Patch/DeleteMapping，组合字面量路径、方法限制、多路径数组；读取 RequestParam、PathVariable、RequestHeader、RequestBody，默认参数值和源码位置。采用 AST 而非整文件正则匹配，注释或字符串中的伪注解不会成为接口。保留结尾斜杠。
+- 项目内以 openapi/swagger 开头的 JSON 文档，支持 OpenAPI 3 和 Swagger 2 的 paths，路径级/操作级参数覆盖、本地参数引用及 JSON 请求体 example。不抓取运行时文档。
+- API 调试页打开时自动扫描，可搜索路径/方法/Controller、手动刷新；选择接口新建可编辑请求草稿，不覆盖原草稿、不自动发送。基础地址由用户填写，可包含服务上下文/网关前缀；未替换的路径占位符禁止发送，请求体暂以文档 example 或 `{}` 初始化。
+
+资源与边界：忽略构建/依赖目录和符号链接，校验真实路径；单文件 1 MiB、总读取 64 MiB、遍历 100,000 项、最多展示 5,000 条、worker 最长 30 秒。同项目并发扫描复用，同进程最多两个扫描；不完整、无法静态解析及读取失败会提示，不将局部列表宣称为全部接口。没有后台自动执行接口请求。
+
+尚未覆盖：非字面量常量/配置表达式映射、继承/组合自定义注解、动态注册路由、DTO 字段递归生成请求体、OpenAPI YAML、Express/FastAPI/NestJS 等框架适配。本批入口接入桌面 API 调试；纯网页远程工作区尚未接入对应入口，共享扫描模块可复用，但不宣称网页功能已完成。
+
+验收：未启动的 source-only fixture、类/方法组合、参数默认值、注释排除、尾斜杠、OpenAPI 本地引用/覆盖、忽略构建目录和软链接、HTTP 鉴权/项目隔离/未启动语言服务及原 REST 网络回归通过。网页 TypeScript/Vite 构建通过（已有大 chunk 警告）。对本机 site-tpl-manage 仅只读扫描，约 885 ms 发现 475 条记录；这是单次本机测量，不是全量正确性或所有项目性能保证。未替换本机客户端。
+
+映射语义参考：[Spring MVC Mapping Requests](https://docs.spring.io/spring-framework/reference/web/webmvc/mvc-controller/ann-requestmapping.html)、[OpenAPI 3.0.3](https://spec.openapis.org/oas/v3.0.3)。
+
+后续本机安装验收（2026-10-15）：用户要求更新客户端，macOS arm64 DMG/ZIP 重新构建并校验；检查 ASAR 内静态扫描模块与源码一致，Local API 路由和 renderer 接口列表已入包。接口发现/HTTP 鉴权、REST 请求、语言请求取消、真实进度及状态条共 19 项回归通过。应用深度严格签名校验通过，仍是 ad-hoc 本机调试包，未进行 Apple 公证。
+
+正常退出后已替换并打开 `/Applications/Code Studio.app`，未删除项目、配置或用户数据；旧版本归档在 `~/Library/Application Support/Code Studio Backups/2026-10-15T02-16-25.587Z/Code Studio.app`，没有在“应用程序”目录新增备份图标。构建/暂存/安装 ASAR SHA-256 一致：`ac611e9e1c79e5b24e1bce9c0bf3f0b337bcb5bf6476c1d024d3f0699c8069e7`。已安装进程的本机 API 返回 ready，标题 code studio；通过该进程对已登记 site-tpl-manage 只读扫描得到 475 条记录，约 3,070 ms，未达到截断上限，不启动业务项目或发送业务请求。本次同时带入前述 P0 共享进度/取消/快速索引修复，实验性 Java agent 仍默认关闭；不代表慢语义查询瓶颈已解决。未部署远程网页/API。
+
+### 引用字体、上下导航箭头与终端中文输出（2026-10-15，源码完成，未安装）
+
+网页和桌面共用 `useEditorAppearance` 的字体变量。Monaco 引用弹窗中的代码预览原本继承编辑器配置，但引用列表与只读编辑提示使用独立样式；现在列表、文件标题和“无法在只读编辑器中编辑”等 overlay message 也同步字体/字号，不放开只读限制，不修改 node_modules。真实窗口以 11px Menlo 验证列表、预览、只读提示计算样式和只读内容未变化。
+
+新增共享 `workspace-relations.cjs` 和前端 `workspace-relations.ts`：
+
+- Java AST 静态建立项目内直接父类型/接口与实现/子类的双向关联；方法按名称、参数数量及保守的类型名称解析匹配重载，排除 private/static。左侧使用行装饰栏的上/下箭头，和断点 glyph margin 分离。
+- MyBatis Java 全限定类型名对应 XML mapper namespace，方法名对应 select/insert/update/delete 的 id；支持 Java→XML 和 XML→Java。XML 注释、CDATA 和 sql 片段不作为语句方法；不加载 DTD 或外部实体。
+- 一个目标直接打开文件并定位，多目标弹出同字体选择列表；复用工作区打开文件/光标历史，失效的异步结果不回写当前编辑器，关闭编辑器清理装饰及监听。
+- 独立 worker 内缓存语法元数据，同项目复用；按文件 stamp 增量校验，保存/文件操作使其失效，未保存 Java/XML 草稿仅用于本次覆盖，不污染缓存。外部文件改动在后续查询时按 30 秒校验间隔读取；不是常驻文件监听，也未将该层声明为完整语义索引或持久数据库。
+- 单文件 1 MiB，总字节 64 MiB、最多 10,000 源文件/100,000 遍历项、25 秒扫描预算、35 秒请求上限；同进程最多两个项目 worker，闲置 120 秒释放，退出 API 时关闭。部分扫描在结果标明 incomplete；本地可选标记失败不阻断编辑，原有语言服务跳转仍保留。
+
+网页通过既有 workspace language 服务的 related-locations 操作接入，沿用项目读权限及结果返回前再次鉴权，无需 LSP_ENABLED。桌面走相同共享模块，校验已注册项目及工作区路径。能力边界：未覆盖依赖 JAR/跨项目继承、传递继承、复杂泛型替换、任意 MyBatis 扩展注解或自定义映射约定；不将静态关联等同于 IDEA 完整语义能力。
+
+终端乱码排查与修复：GUI 进程可能没有有效 UTF-8 locale；特别是 macOS 的裸 LC_CTYPE=UTF-8 不能复制为 LANG/LC_ALL，否则 JVM 可回退 US-ASCII。共享 `process-text.cjs` 为新建 POSIX PTY 与 Maven 构建子进程补充有效 UTF-8 locale，保留已有有效 UTF-8 语言及其他环境配置，不修改用户 shell profile/系统设置，不强制覆盖 Maven 源码编码或 JVM 选项；Windows 环境暂保持原样。Maven stdout/stderr 分别用有状态 StringDecoder 解码，避免中文在数据块边界被破坏。
+
+真实 javac 对照：隔离 Java 源文件故意调用不存在的 all()，中文编译诊断在 C locale 下 17 个问号、无中文；修正 locale 后有中文、问号为零。该错误是合成验证，不代表用户业务代码中的 all() 编译问题已经修复。已输出的问号无法还原，已存在的 PTY 不自动修改环境；更新客户端后需新建终端重跑，若用户登录脚本主动覆盖 locale，仍需检查脚本。
+
+验收：桌面关联/草稿覆盖/路径拒绝/缓存失效、UTF-8 环境/分字节解码、Maven 中文输出/配置/取消及真实 PTY 共 12 项通过；网页静态关联权限专项通过；隔离 Electron 窗口验证 XML↔Mapper、接口↔实现类、多个目标选择、引用列表/预览/只读提示字体通过。API、网页与桌面 renderer 构建通过，diff 空白检查通过。测试期间出现过已修正的装饰属性名和测试命令参数错误，最终通过，不将此前失败运行计作成功。本批未打包替换安装客户端、未部署远程 API。
+
+输出编码参考：[OpenJDK System 编码属性与 native.encoding](https://github.com/openjdk/jdk/blob/master/src/java.base/share/classes/java/lang/System.java)、[JEP 400 默认字符集与控制台输出的区别](https://inside.java/2021/10/04/the-default-charset-jep400/)。
+
+后续本机安装验收（2026-10-15）：按用户要求重新生成并校验 macOS arm64 DMG/ZIP，正常退出旧客户端、备份并替换 `/Applications/Code Studio.app`。旧版位于 `~/Library/Application Support/Code Studio Backups/2026-10-15T03-48-37.519Z/Code Studio.app`，项目和用户配置未清理。构建、暂存与安装 ASAR SHA-256 均为 `c1ee8926e1b2fc2dcd9b262794448b6e47a26a2ede211639c25c4fdc85657b4f`，应用深度严格签名校验通过，仍是本机 ad-hoc、未公证构建。
+
+包内验证 workspace-relations/process-text 与当前源码一致，PTY/Maven 已调用 UTF-8 环境和流解码辅助，renderer 含引用/只读提示字体规则及导航标记。安装前 12 项桌面相关回归与 1 项网页权限专项再次通过。安装后检查曾将守护子进程混入主进程，继而检查期间应用进入退出流程；未将失败检查视作启动成功。重新打开后限次健康检查明确返回 ready / desktop-local / community / remoteApiRequired=false，页面标题 code studio。退出日志另有一次 quit-cleanup-error（45 秒），保留为后续退出流程专项问题，不宣称此项已修复。本次未部署远程 API；UTF-8 修复需要新建终端后重跑命令，旧问号输出不能恢复。
+
+### 箭头恢复与终端主题同步（2026-10-15，源码完成，未安装）
+
+用户确认终端不再乱码，停止继续修改编码路径。用户反馈接口/Mapper 箭头消失后，只读检查已安装进程的关联 API：CDNTaskAdminService 返回 14 处、RouterMapper 返回 9 处，均 HTTP 200 且 incomplete=false，因此未将这次现象解释为关联索引丢失。
+
+修复共享前端的恢复边界：临时请求失败自动最多重试三次；重新聚焦无标记的编辑器时重试；仅对可见编辑器每 15 秒刷新关联。后台刷新不预先清除已展示的标记，切换模型/编辑仍清理不再适用的结果；同一模型版本的请求去重，并用请求代次阻止旧响应覆盖。关联 worker 达到两项目上限时回收最近最少使用且无请求的 worker，而非直接拒绝第三个已打开项目。两项改动避免一次失败或第三项目切换后永久没有标记，但不据此断言已穷尽所有现场原因。
+
+Monaco 默认行装饰栏同时容纳折叠图标和导航标记，存在覆盖/点击冲突风险。共享导航实例将该栏设为 30px，导航/折叠各占 15px，导航只响应标记自身命中区域，不截获同一行的折叠点击；断点仍使用独立 glyph margin。
+
+终端新增共享 `terminal-theme.cjs`，根据当前软件深浅模式（编辑器“跟随页面”）或选定的 IDEA/Darcula/Xcode/JetBrains/GitHub/Material/自定义编辑器主题生成背景、前景、光标、选区及 ANSI 16 色。支持自定义 terminal.background/foreground/ansi 等颜色覆盖，其余继承编辑器颜色与对应深浅色回退。移除终端容器/工具栏固定黑底与白字。已存在的 xterm 通过 options.theme 即时更新，不重建实例、不清空输出、不结束 PTY。显式 truecolor/256 色由终端程序自行指定，不强制改写应用输出中的 RGB。
+
+验收：主题自动深浅切换、全部内置主题颜色继承、自定义 ANSI 覆盖、关联匹配/草稿/失效及三项目来回切换共 6 项回归通过。隔离 Electron 测试先注入两次 HTTP 503，验证无需再编辑也恢复箭头；XML↔Mapper、接口↔实现类、多目标选择与字体回归通过；真实切换 Darcula/GitHub 浅色，终端容器与 xterm viewport 配色同步，终端会话 ID 保持不变。网页和桌面 renderer 构建通过（保留已知 chunk 体积警告），diff 空白检查通过。测试关闭时仍有原语言服务 code-actions 断连日志，不将退出专项问题计为已修复。本批未替换本机安装客户端、未部署远程服务。
+
+后续安装记录（2026-10-15）：首次替换因旧进程清理超时而停止，未覆盖旧安装。用户明确告知已强制结束进程后，重新执行备份/替换，已安装并打开 `/Applications/Code Studio.app`。旧版备份：`~/Library/Application Support/Code Studio Backups/2026-10-15T06-06-30.075Z/Code Studio.app`。新 ASAR SHA-256：`f376de317290e51c0c6f94e5d293f2495b4b9bf17bc5c85f32aa5f773d486ec3`；签名、DMG/ZIP 和包内模块校验通过；CSS 压缩器将 translateX(15px) 化为等价 translate(15px)，验证已按压缩后语义检查。已安装 API 返回 ready，页面标题 code studio。项目/用户数据未清理。此包包含终端主题和箭头恢复，不包含随后提出的 Git 界面改造；退出清理超时问题仍单列待办，未宣称修复。
+
+### 2026-10-15：方法标记、Debug 与人工编码补全（源码，尚未安装）
+
+静态关联补齐泛型父接口参数替换、继承实现、通配符、可变参数和方法类型参数匹配；不将静态扫描等同于完整 Java 语义。Debug 断点使用独立居中 glyph lane，暂停位置箭头使用右侧 lane，导航和折叠仍独立；固定文件图标尺寸，避免长文件名挤压 SVG。真实隔离 Debug 测试验证断点、暂停位置、变量值和切换文件后的定位；关联/主题 Electron 测试通过。测试缺少隔离凭据存储导致的布局变化不作为用户现场原因。
+
+人工编辑原来只接入 textDocument/completion，缺少 completionItem/resolve，部分候选的延迟 import 编辑无法落到 Monaco。现在共享语言管理器与前端均接入 resolve：候选由后端生成短期随机 token，仅允许同一语言会话、同文件、同内容解析；最多保留 1500 项，120 秒过期，不接收客户端任意 LSP data/command。前端在接受候选前取得 additionalTextEdits，转换为 Monaco 的附加编辑；模型版本变化、取消或切换项目不应用旧结果。textEdit.newText 优先于 insertText，声明支持 snippets 与延迟 detail/documentation/additionalTextEdits，启用 Java 参数猜测。
+
+自动导包发生于选择类名候选（如 ArrayList），而非输入 class 关键字；变量命名使用 Java 语言服务的类型/上下文建议，而非强制替换用户名称。真实 JDT 测试验证 ArrayLi → ArrayList 候选解析返回 import java.util.ArrayList，以及 StringBuilder str → stringBuilder 命名建议。共享前端 19 项回归验证延迟 import 编辑、取消/旧版本保护及既有导航；web/API 构建通过。整套多语言测试曾有 clangd 超时，不能声称所有语言全量通过。本节开发验收时未安装本机客户端，未完成前述全部 Git 改造。
+
+后续安装记录（2026-10-15）：应用户要求重新生成 arm64 DMG/ZIP，签名校验通过，已备份并替换 `/Applications/Code Studio.app` 后打开。ASAR SHA-256：`47a7ef318a35d31e924f5fa2756d09447c7006861704737dace1dcd743ab91e0`。旧应用位于 `~/Library/Application Support/Code Studio Backups/2026-10-15T07-04-03.710Z/Code Studio.app`；用户项目和配置未清理。已安装 API 健康状态 ready、desktop-local/community，页面标题 code studio。包含上述补全、方法箭头、Debug 标记与图标修复；Git 改造仍非完整验收状态，不计为完成。
+
+### 2026-10-15：安装后现场反馈再修复与 Git 多栏入口接通
+
+用户反馈上一包仍看不到断点、部分箭头缺失，Git 多栏入口未完成。重新审核发现：桌面旧入口仍使用原始 patch 弹窗；已有双栏组件不代表功能入口已经完成，此前不得据此称 Git 改造完成。
+
+断点：取消右侧 glyph lane 点击直接返回的逻辑，保留断点与暂停箭头不同 lane 的布局；红点增加 11px 独立伪元素绘制，不只依赖背景渐变；模型切换监听后重绘，加入 F9/右键切换断点。真实 Electron 测试点击断点栏最右侧，断言红点颜色/尺寸/可见性，随后跨文件 Debug 暂停、变量 41→42、返回项目定位通过。第一次测试因资源重建时启动及初始化等待未通过，未将其记为通过。
+
+静态导航：补齐内部类型父接口解析、参数类型注解清理和后置数组维度，增加内部类与 `String values[]` 的双向方法导航回归；现有关联测试共 6 项通过。它仍是有资源上限的项目内静态关联，不代表已覆盖外部依赖、所有 Java 语义或用户尚未提供的缺失文件；已请求实际文件路径/方法名以继续核对。
+
+Git：桌面分支搜索实际接入公共 Select；双栏 WorkingDiffModal 替换旧 patch 弹窗，可选工作区/暂存区范围；共享 CodeDiffView 增加显式“→ 应用当前块”、逐块 gutter 箭头及上/下差异导航，支持撤销。应用到编辑器先核对磁盘基线和未保存草稿，不自动写盘。网页和桌面分支入口均接入共享 GitCompareModal，按冻结 commit ID 读取两栏内容，支持分页与二进制/大文件提示，不 checkout；修复分支异步返回时默认左右选成同一分支。
+
+桌面合并复用网页 ConflictResolverModal 的本地/结果/传入版本三栏、逐块箭头、两者保留、手工编辑、保存以及完成/中止入口。新增本地 merge/conflicts API，写操作串行到已有 Git mutation 队列；仓库根目录约束，拒绝不干净仓库开始合并，校验实际未解决冲突、路径/符号链接和内容版本 token，拒绝过期结果与未清理冲突标记。自动合并也需要显式“完成合并”，不直接创建提交。二进制/大文件暂不支持内置文本合并；根目录以外子项目需从仓库根打开。未执行用户业务仓库合并。
+
+验收：临时仓库测试通过分支对比不改变 HEAD、路径/参数拒绝、合并冲突、旧版本拒绝、中止、解决和继续提交；隔离 Electron 实际点击通过双栏块应用、撤销且不写磁盘、分支对比、三栏两者保留与保存。共享前端导航/补全 19 项通过，web renderer/API 构建通过。首次 UI 验证还发现 Monaco 默认 revert 按钮未显示，现已使用显式按钮和自绘 gutter 箭头，不以双栏显示代替交互验收。
+
+安装验证：已重新生成 macOS arm64 DMG/ZIP，正常退出后备份并替换 `/Applications/Code Studio.app`，已打开。旧应用备份 `~/Library/Application Support/Code Studio Backups/2026-10-15T08-13-52.167Z/Code Studio.app`；ASAR SHA-256 `cff3f95ad2ed76186162113aefba62b702531d9a13c893f97267db9c31a01f86`。已安装包包含 Git 合并模块和本地路由，API ready、页面标题 code studio。项目、用户配置未清理。静态导航用户特定遗漏仍待实际文件/方法核对，不因安装成功宣称全部现场问题均已穷尽。
+
+### 2026-10-15：对话拖拽方向、断点尺寸与 NavigationAdminService.query
+
+对话位于左侧并显式 order=1，而右侧面板没有 order，面板库登记顺序与 DOM 顺序可能相反。网页和桌面统一给右侧 workspace-content 面板 order=2，分隔条提供“调整项目对话宽度”可访问名称。普通/条件/日志断点统一使用 8px 伪元素，移除原先较大渐变背景，避免视觉上仍有大圆。
+
+用户给出的 NavigationAdminService.query 已只读复现：接口显式 import NavigationQueryFilterDto，实现类采用 dto.navigation.*，旧 canonical 将两者生成不同签名。现在优先使用扫描中可唯一定位的通配导入类型，只有一个通配导入时按其命名空间规范化，保留多个候选的歧义保护。使用真实完整 site-tpl-manage 项目验证，接口第 26 行返回 NavigationAdminServiceImpl.java 第 132 行向下链接，incomplete=false；未修改业务项目文件。新增显式/通配导入双向 query 回归，共 7 项关联测试通过；桌面 renderer 构建通过。本节改动尚未替换已安装应用。
+
+隔离 Electron 连续鼠标拖拽验收通过：右拖 80px 对话宽度增加、左拖 80px 宽度减少；沿用 Mapper/接口/实现类双向点击、引用字体及终端主题回归全部通过。首次测试的连续无等待事件未带按下状态，未产生拖动，现测试显式带 leftButtonDown 并逐步移动，不将无拖动误判为方向通过。
+
+### 2026-10-15：桌面 Agent 原生会话与多轮上下文
+
+问题确认：此前项目 UI 只按顺序展示独立任务。Codex 每轮 `exec --ephemeral`，Claude 每轮 `--no-session-persistence`，兼容 API 只传当前 user prompt；连续展示不等于连续上下文。本批改造桌面 LocalAgentRuntime；网页服务端已有 Codex SDK resumeThread / Claude resume 链路，未将桌面任务接到远程 Worker，也未宣称本批完成远端真实模型端到端验收。
+
+本地 SQLite 升级到 schema 9：新增 agent_conversations，agent_tasks 通过 conversation_id 关联。对话绑定项目规范真实路径、模型连接 ID、引擎/提供方/服务地址/配置更新时间的散列，防止跨项目、跨连接或连接改变后误续聊。保存 CLI session ID 和建立该执行会话时的权限；对外接口只接受应用对话 ID，不接受外部 CLI ID，不用 --last/--continue 猜测“最近一次”。旧任务保持原记录并放到“旧任务记录（不参与续聊）”，不伪造旧会话，不删除或自动发送全部旧历史。
+
+执行流程：首轮启动非 ephemeral Codex / 可持久化 Claude，从 Codex thread.started.thread_id、Claude system.init/result.session_id 捕获 UUID；只信任 stdout 的相应协议事件，保存到本地对话。下一轮显式 Codex exec resume <UUID> 或 Claude --resume <UUID>，仍每轮传入模型/推理配置和当前权限。prompt 通过 stdin 传递，避免长历史塞入命令行；stdout/stderr 各自 UTF-8 增量解码，避免分块中文或两条输出流互相破坏会话事件。意外会话 ID 会中止运行；原生恢复失败提示用户新建，不自动发起第二次可能重复写文件的任务。
+
+切换查看/修改权限时不复用旧权限的原生会话，重新建执行会话并带入同一应用对话的已完成文字历史；查看仍 Codex read-only / Claude plan+Read,Glob,Grep，修改仍要求桌面一次性授权。项目忙锁和授权 token 消费规则保留。切换模型连接选择其独立对话，同一 Codex 连接选择不同具体模型仍可在原对话续聊；连接被编辑后旧绑定失效，需要新建对话。Aider 没有在本批增加原生 session API，只使用上述有界文字历史。
+
+普通 OpenAI-compatible / Ollama 每轮传 system + 当前对话的成功 user/assistant 对 + 当前问题。不把工具日志、推理文本、失败/取消任务或其他会话混入历史。API 与权限切换的文字引导最多取最近 40 轮、60000 个字符，按完整对话对保留，超限给出提示；这不是自动摘要，超大单轮可能无法纳入。原生 CLI 的长期上下文压缩仍由对应 CLI 负责。Claude result 与最终 assistant 文本重复时去重，Codex agent_message 的累计快照转增量，防止历史重复堆叠。
+
+界面：项目对话标题旁增加“新建对话”，下方可搜索选择历史会话，不使用时间页签；对话内继续顺序展示。切换时从服务端读取对应任务，当前加载/请求用代次隔离，避免旧响应覆盖新项目；每会话 UI 当前读取最近 50 轮、列表最多显示 200 个会话，不等于删除更早数据库记录。重启后恢复最近使用对话及其原生会话引用。对话/历史仍在本机 SQLite，CLI 持久文件由本机 CLI 管理，不要求登录远程 API。
+
+验证：12 项运行时/存储/会话回归通过，包括 schema 8→9 保留旧任务、两种 CLI 的首轮/续聊、重建运行时和数据库后恢复、权限变化创建新执行会话、空对话隔离、错误项目/配置拒绝、丢失会话只执行一次、普通 API 有界完整历史；新增本机 HTTP 集成验证多轮请求确实带历史、API 重启恢复、项目隔离和每轮写授权。原执行/取消/一次性授权/工具调用 2 项回归通过。隔离 Electron UI 验证连续发送、原生 resume ID、新对话、API/SQLite 重建、切回旧会话后续聊通过。CLI 集成使用离线协议 fixture、API 使用本机模拟服务，未调用用户真实付费模型；本机已安装 Codex/Claude help 也核对了参数。web 与桌面 renderer 构建通过。使用 OpenAI Docs 核对 Codex 原生恢复方式：https://learn.chatgpt.com/docs/non-interactive-mode 。本批尚未替换本机安装版本、未提交或推送。
+
+后续安装记录（2026-10-15）：应用户要求生成最新 arm64 DMG/ZIP，通过签名及 ASAR 内容校验后，正常退出并替换 `/Applications/Code Studio.app`，已打开。ASAR SHA-256：`4defbfbc0f2f28c92955edd9a1d1937d93be36de30941a5368705576933b1b78`。旧应用和关闭状态的 SQLite（含存在的 WAL/SHM）分别备份到 `~/Library/Application Support/Code Studio Backups/2026-10-15T10-48-28.416Z/Code Studio.app` 与同目录 `local-data/`。升级后 API ready，标题 code studio；只读验证本机数据库 schema=9、agent_tasks.conversation_id 存在。包含本节原生会话以及上节拖拽方向、8px 红点和通配导包导航修复。未删除项目或用户配置。若需回退旧 schema 8 应用，必须配套恢复升级前数据库备份，不能只替换旧应用；恢复会覆盖升级后的新增记录，未经明确确认不执行。
+# 2026-10-15：项目加载性能优化（第一轮）
+
+- 共享 Java/XML 关联索引改用 tree-sitter 原生声明遍历，不再在 JavaScript 中逐个展开方法体表达式；保留成员类、方法内局部类识别。
+- 关联 worker 增加最多 32 个文件的结果缓存。文件变更通知、下一次目录校验都会使缓存失效；包含未保存内容的请求不复用磁盘版本结果，避免错误箭头。
+- Java 入口发现、快速修复、重命名、调用层次和符号查询接入统一请求超时与关闭取消。编译保留独立的 10 分钟预算，启动调试为 60 秒，普通查询为 15 秒。该改动防止请求无限等待，不意味着 JDT 初始化变快。
+- 隐藏的项目页签不主动准备语言服务或发现启动入口。空闲运行状态轮询由 700ms 调整为 5s，运行/调试中仍为 700ms。
+- 只读复测：`site-tpl-manage` 副本（2,000 个 Java 文件），`NavigationAdminService.java` 关联查询第一次 4,149ms，后两次各约 1ms，均返回 19 行关联，未触发扫描上限。复测脚本：`apps/desktop/scripts/benchmark-relations.cjs PROJECT RELATIVE_JAVA_FILE`。
+- 此数据为独立关联 worker 测试，不是客户端端到端启动数据；尚不能据此宣称 Java 完整语义索引、首次实现跳转或退出耗时已经解决。本轮源码修改未替换本机安装包。
+
+## 第二轮：缓存重开和后台请求
+
+- 修正第一轮缓存覆盖范围：编辑器始终提交当前文件内容，现在关联结果按路径、所有未保存文档的内容哈希缓存，重复编辑版本也可命中；不同内容版本相互隔离。
+- Web/桌面共用声明索引持久化逻辑，分别写入服务端 `RELATIONS_INDEX_ROOT`（默认 `.data/relations-index`）和本机用户数据目录 `relations-index`。缓存只包含类型、方法、导入和 XML 映射声明，不持久化未保存编辑内容。格式绑定解析器版本和规范项目根目录，最多 16MiB；原子写入，损坏、不可写或版本不匹配时正常退回扫描。
+- 重开仍先校验实际目录和文件元数据，不直接相信旧关系。未变化文件只检查元数据，不逐个重新打开读取；增量解析变化文件，完整扫描后清理删除记录。保持 symlink、项目边界、文件及扫描容量限制。
+- 同一项目并发 Java 入口发现合并为一次请求，完成或失败后清除，不长期保留可能过期的入口列表。切换项目页签不重置尚未保存的运行参数。
+- 网页快速索引进度读取不再排在耗时关联查询之后，权限检查及工作区切换检查仍执行；语义状态保留真实后台任务数量。
+- SQLite 缓存校验最多每 128 个文件提交一次事务，不跨异步文件读取持有事务。取消扫描不执行完成清理，旧代次不能写入；保留原有单文件更新方式。
+
+复测（同一 `site-tpl-manage` 副本，非操作系统冷缓存）：
+
+| 项目 | 结果 |
+| --- | --- |
+| 声明关联全新缓存，包含当前编辑内容 | 4,209ms，解析 2,069 个 Java/XML 文件 |
+| 持久化缓存重建 worker（优化元数据校验后） | 663ms / 628ms，解析 0，校验复用 2,069 个文件 |
+| 同一内容版本再次查询 | 0–1ms，仍为 19 行关联 |
+| 快速符号索引冷扫描 | 9,849ms，解析 2,000 个 Java 文件 |
+| 重开快速符号索引，逐文件提交对照 | 617ms / 605ms，解析 0 |
+| 重开快速符号索引，批量提交 | 402ms / 419ms，解析 0 |
+
+复现：`benchmark-relations.cjs PROJECT RELATIVE_JAVA_FILE CACHE_DIRECTORY`、`benchmark-fast-validation.cjs PROJECT`。两者只读项目，缓存写入单独目录；前者建议使用私有缓存目录，后者自动创建临时目录。逐文件/批量对照交替进行，避免把热缓存差异当成优化收益。
+
+Java 语义服务独立对照：正常自动构建时首次 ServiceReady 21,189ms、重开 4,240ms；关闭自动构建时 12,156ms / 4,910ms。但两组的首次实现跳转都达到 15s 请求上限，不能断言自动构建是唯一阻塞源。保留产品自动构建默认值；语义索引与快速声明索引不是同一就绪状态。这些是独立服务测试，不是新安装客户端的端到端启动承诺。本轮未替换本机应用、未修改业务项目、未提交或推送代码。
+
+验证：37 项关联、入口并发、符号存储、缓存恢复和 worker 回归通过；3 项网页权限/状态进度回归通过；API 构建、前端生产构建及最终 TypeScript 检查通过。Java 实现跳转性能对照未通过（两组均超时），作为明确遗留项保留，不计入功能通过结论。
+
+## 第三轮：首次语义跳转的阻塞定位与后台分流
+
+这次仅在诊断脚本把单次查询观察窗口设置为 120s，让首次索引真正完成后再退出/重开；产品普通请求仍为 15s，没有把延长超时作为性能修复。
+
+`site-tpl-manage` 临时副本的两次独立测试：
+
+| 测量 | 第一次 | 第二次 |
+| --- | --- | --- |
+| 冷启动 ServiceReady | 14,402ms | 15,172ms |
+| 冷启动第一次实现查询（从发起查询计时） | 67,908ms | 68,851ms |
+| 同进程重复查询 | 81ms | 120ms |
+| 完整索引后重开 ServiceReady | 3,317ms | 3,786ms |
+| 重开第一次实现查询 | 1,795ms | 4,933ms |
+| 重开重复查询 | 148ms | 218ms |
+
+这些是单独语言服务的对照数据，不是本轮修改带来的加速百分比，也不是客户端端到端启动时间。两次均返回真实 `NavigationAdminServiceImpl.java` 实现。与前两轮区别在于没有在索引完成之前中止测试，因此不能把此前不完整缓存的表现当成完整热启动表现。
+
+线程证据：实现查询经过 `IndexBasedHierarchyBuilder`，在 `JobManager.performConcurrentJob` 等待全局索引；同时存在 Java 编译/注解处理和 JDK 索引工作。第二次采样约 46s 时累计 GC 为 1.775s、Full GC 为 0；没有据此增大默认 JVM 堆。诊断脚本保留已经确认属于本轮测试的 JVM PID，避免后续因 JVM 列表命令行变化而漏采线程，并补充 `jstat` 指标。
+
+已落地优化：
+
+- 桌面启动入口自动发现不再与项目导入、后台语义索引同时发起全局搜索，等待实际 Java 状态 `ready` 再查询；重新显示页签时也检查现有状态，手动刷新可立即执行。等待期间显示“正在准备运行配置…”，不会误报“无 Java main 入口”。保留运行参数，避免切换页签后清空。
+- 共享语言管理器按 Java 相关变更发送 watcher：源码、JAR/class、Maven/Gradle 构建配置及 Eclipse 项目/编译设置仍保留；图片、文档、Mapper XML、SQL 等不再等待 Java 初始化或发送不相关的 Java watcher。其他语言服务保持原通知范围。过滤越界、无效路径及事件类型。
+- 桌面文件扫描/保存/新建/删除按实际文件类型失效快速索引：Java 文件更新符号及关联索引，XML 更新关联索引，其他文件不触发全量 Java 缓存校验。目录操作、未知范围和重命名仍保守全量失效；未取消定时校验。
+
+验证：15 项调度相关单测通过；真实 TypeScript 未打开文件实现跳转回归通过；桌面 500+ 文件持久索引 API 的增删改/缓存恢复回归通过。隐藏 Electron 窗口测试中，导入/索引阶段入口发现请求均为 0，就绪后自动发起 1 次，后续状态轮询不重复查询，手动刷新可在索引阶段再发起查询。API 构建、桌面 renderer 生产构建、TypeScript 检查通过。
+
+仍未解决：首次完整全局语义索引约一分钟的成本。本轮减少重复工作和争抢，不宣称已将其降至秒级；真实变量引用、依赖源码等仍由 JDT 完成，不用简单名称匹配冒充完整语义结果。本轮未替换本机安装包，未提交/推送，未修改业务项目。
+
+## 第四轮：快速索引首次源码提取加速
+
+共享 `JavaSyntaxIndex` 的符号提取不再通过 JavaScript 遍历所有方法体表达式，而由 tree-sitter 原生遍历筛选声明候选，再提取符号。单文件作用域缓存复用祖先类型链，仍识别成员类、方法内局部类、匿名类中的成员、record、注解、构造器和枚举。保持源码顺序、UTF-16 坐标、导入、继承和错误状态；不持久化语法树或作用域缓存。文件大小、解析时间和符号数量预算保留；原生路径的 `visitedNodes`/节点访问预算统计声明候选，旧参考路径统计原始命名节点，因此这个内部诊断计数不参与语义结果一致性对照。
+
+Web 与桌面都通过同一个包和 worker 使用这一提取器，不需要分别维护实现。索引缓存的数据结构不变；没有为了这项提速强制清空已有持久化缓存。旧完整文件无需重新解析，旧标记为截断的文件仍按既有策略重新校验。
+
+对 `site-tpl-manage` 同一只读副本做交替顺序对照：2,000 个 Java 文件、22,853 个符号，逐文件校验除内部访问计数外的全部返回字段，新旧结果完全一致且都没有截断。纯提取累计旧实现 3,843ms、新实现 2,712ms，约减少 29%。
+
+进一步对比完整快速索引（每次创建全新 SQLite 缓存，顺序为旧/新/新/旧，操作系统文件缓存非冷态）：
+
+| 实现 | 第一轮 | 第二轮 |
+| --- | --- | --- |
+| 旧遍历 | 6,469ms | 6,379ms |
+| 原生声明遍历 | 5,319ms | 5,303ms |
+
+完整快速索引平均约从 6.42s 降至 5.31s，减少约 17%；均成功解析 2,000 个文件并返回完整状态。该结论仅适用于快速符号索引，不代表 JDT 全局语义索引的一分钟等待已解决，也不是客户端端到端打开时间。
+
+复现脚本：`node apps/desktop/scripts/benchmark-java-extraction.cjs PROJECT --full-index`，只读项目，缓存写入新建私有临时目录；旧遍历仅用于开发对照，不是用户可选模式。31 项解析、持久化、缓存恢复、worker 和增量更新回归通过，新增匿名类/局部类/不完整语法的新旧一致性测试。本轮未替换本机安装包，未提交或推送。
+
+## 第五轮（2026-10-16）：JDT 原生共享索引与构建并发实验
+
+核对 [VS Code Java 官方启动实现](https://github.com/redhat-developer/vscode-java/blob/main/src/javaServerStarter.ts)：共享索引通过 JVM 参数 `-Djdt.core.sharedIndexLocation=...` 接入，不是仅传入初始化配置。官方仍将其标为[实验功能](https://github.com/redhat-developer/vscode-java#supported-vs-code-settings)。同时检查了本地实际捆绑的 JDT Core 3.47.0 和 JDT LS 1.61.0 字节码，确认共享位置参数及 `java.maxConcurrentBuilds` 可用。
+
+实现受控开关：`LocalLspManager` 的 `javaSharedIndexRoot` 和 `javaMaxConcurrentBuilds`，桌面 `createLocalApi` 可显式转交；普通工作区 HTTP 请求不能设置这些选项。共享缓存按捆绑 JDT Core 版本分目录，路径以独立进程参数传递、支持空格；不可创建/不可写时退回本地索引。并发数仅接受 1–8 的整数。两项都保持未设置时的原有默认行为，未直接修改 JDT JAR、未增大堆、未关闭默认自动构建。生产 API 中未启用跨用户共享；服务端未来接入时必须按授权用户/信任域隔离，不能共用包含私有依赖信息的索引目录。
+
+真实 `site-tpl-manage` 副本实验，开启共享索引、构建并发数 2，查询窗口仅在诊断脚本延长到 120s：
+
+| 模式 | ServiceReady | 第一次实现查询 | 重复实现查询 |
+| --- | --- | --- | --- |
+| 全新项目索引及共享缓存 | 16,937ms | 70,903ms | 102ms |
+| 原工作区完整缓存重开 | 4,362ms | 3,557ms | 373ms |
+| 同一项目路径、新的 JDT 工作区，仅复用共享缓存 | 18,382ms | 68,137ms | 84ms |
+
+共享目录实际生成约 313MiB 的 `.index` 文件，但新工作区的首次查询与未启用实验时约 68s 的观测没有实质差异。不能把目录中有索引文件等同于消除了全局索引等待，也不能从这组组合实验分别归因共享缓存和并发数各自的影响。因此不将这两个开关作为默认提速方案。未测试跨机器/跨用户迁移，也不宣称所有 JDT 项目都没有收益。
+
+另做完整的关闭自动构建对照（不是前两轮的短窗口中断测试）：ServiceReady 14,124ms、首次实现查询 55,970ms、重复 147ms；完整缓存重开为 5,534ms、3,595ms、170ms。仍存在明显全局索引等待，且关闭自动构建影响诊断行为，因此没有改变产品默认设置。当前也没有把构建并发数提高到 4/8 或将其描述为已证实的优化。
+
+复现：
+
+```sh
+node apps/desktop/scripts/profile-java-startup.cjs PROJECT --summary --shared-index --build-concurrency=2 --java-request-ms=120000 --navigation-path=RELATIVE_JAVA_FILE
+node apps/desktop/scripts/profile-java-startup.cjs PROJECT --summary --no-autobuild --java-request-ms=120000 --navigation-path=RELATIVE_JAVA_FILE
+```
+
+首个命令依次完成冷缓存、原工作区重开、新工作区复用共享缓存三轮；脚本在私有临时目录复制源码、建立独立缓存并在退出后清理，不操作原项目或既有 IDE。补充共享索引文件数量日志，便于后续确认缓存产生情况；这不是缓存命中率证明。
+
+验证：7 项调优参数/路径/取消回归通过；另有 6 项进度与 watcher 范围回归通过。通过 `CODE_STUDIO_TEST_JDT_TUNING=1` 运行真实 Java 回归，源码/JAR/JDK 跳转、补全导包、命名建议、Lombok、格式化、编译错误拦截、运行、Debug 断点/变量/步进/停止全部通过（2 个集成测试，约 35.8s）。保持开发诊断开关，未修改默认配置；本轮没有证明 JDT 冷启动提速，未替换本机安装包，未提交或推送。
+
+## 第六轮（2026-10-16）：JFR 热点归因与工具 JVM 对照
+
+新增显式诊断资源 `javaFlightRecording`：只在开发者指定路径时添加 JFR 录制参数，限制录制大小为 64MiB、栈深度为 64，并关闭 JFR 启动日志，避免污染 LSP stdout。普通客户端和服务端不默认录制，不提高产品 JVM 堆。诊断脚本支持 `--flight-recording`、`--fresh-only`、`--keep-data`；保留目录只属于脚本创建的临时副本，不修改原项目。
+
+最初通过 `jfr print --json` 导出触及缓冲限制；流式读取也触及 1GiB 展开输出预算。最终改为 `JavaRecordingSummary.java` 通过 JDK 的 `RecordingFile` 接口直接读取约 25MiB 的二进制记录，单独汇总 JVM 限制堆为 256MiB、输出为小型 JSON，不加载巨大 JSON 报告。原始录制已保留在本机私有临时目录，后续可以重新汇总而不用重新跑索引。
+
+成功汇总 `site-tpl-manage` 冷启动的 4,207 个有栈 `jdk.ExecutionSample` 样本（整段录制，包括启动及构建，不是独立阶段计时）：
+
+| 栈分类 | 样本 | 比例 |
+| --- | --- | --- |
+| JAR 索引 | 1,514 | 36.0% |
+| 项目源码索引 | 997 | 23.7% |
+| 编译/构建 | 947 | 22.5% |
+| JDK/JRT 索引 | 274 | 6.5% |
+| 导航计算 | 85 | 2.0% |
+| 其他 | 390 | 9.3% |
+
+分类根据完整记录中的调用栈推断，优先识别 `AddJrtToIndex`、`AddJarFileToIndex`、源码索引调用，再识别编译器，避免把二进制索引使用的编译器辅助类误判为项目构建。这些比例是采样分布，不能乘以总等待时间冒充各阶段耗时，也不能据此排除 I/O、锁等待等开销。
+
+前八条热点栈中，`CharOperation.hashCode` 相关两组共 618 个样本，另有 `SimpleWordSet.add`、常量池引用提取和 `DiskIndex.mergeWith` 等热点。下一步若深入 JDT 内核，应围绕索引词条处理及重复工作验证；当前没有修改哈希算法或索引格式，不能用更换算法破坏旧索引兼容性来换速度。没有证据把大多数 CPU 成本归结为 JDK/JRT 索引。
+
+本次录制的 ServiceReady 为 16,768ms、第一次实现查询 73,014ms、重复 182ms、正常退出 1,292ms；由于开启录制，不用于宣称相对无录制基线的加速或退化。另对本机已有 Corretto 21.0.3 做无录制冷启动对照：ServiceReady 16,574ms、第一次实现查询 68,284ms、重复 82ms、正常退出 990ms，与此前 Java 22 的约 68s 查询观测相近，因此没有替换默认工具 JVM。
+
+修正 Java 启动器此前忽略 `commands.java` 的问题，支持开发者显式指定工具 JVM；默认仍为 PATH 中的 `java`，不改系统默认 Java，不改项目 Maven 编译级别或运行配置。诊断脚本的 `--java-command=ABSOLUTE_JAVA_EXECUTABLE` 用于做版本对照。
+
+复现：
+
+```sh
+node apps/desktop/scripts/profile-java-startup.cjs PROJECT --summary --fresh-only --flight-recording --keep-data --java-request-ms=120000 --navigation-path=RELATIVE_JAVA_FILE
+node apps/desktop/scripts/summarize-java-recording.cjs RECORDING_FILE
+node apps/desktop/scripts/profile-java-startup.cjs PROJECT --summary --fresh-only --java-command=ABSOLUTE_JAVA_EXECUTABLE --java-request-ms=120000 --navigation-path=RELATIVE_JAVA_FILE
+```
+
+验证：10 项调优路径、显式工具 JVM 生效、二进制汇总分类/JSON 编码和请求取消测试通过；真实录制二进制汇总成功，使用标准 JFR 的录制启动未破坏 LSP 初始化和实际实现跳转。首次两种 JSON 导出方式失败不计为通过，最终已从工具链移除这两种读取实现。没有承诺 JDT 冷索引提速，没有启用补丁、共享索引或新 JVM 默认值；未安装客户端、未提交/推送代码。
+
+### 第七轮：自有轻量声明导航层（2026-10-16，首阶段已验证）
+
+结论：采用“Code Studio 持久化声明索引 + JDT 完整语义服务”分层，不自行重写 Java 编译器，也不把文件名/同名匹配当成完整语义解析。本轮先完成独立可用的项目内实现查询入口，保留原有 JDT 实现跳转；不是把已有全部跳转切换到轻量索引。
+
+#### 主流方案依据
+
+- [IntelliJ Indexing and PSI Stubs](https://plugins.jetbrains.com/docs/intellij/indexing-and-psi-stubs.html)：文件索引定位候选文件，stub 索引定位声明；索引后台加载期间限制依赖完整索引的功能。IDEA 也不是启动瞬间全部语义功能可用。
+- [IntelliJ Stub Indexes](https://plugins.jetbrains.com/docs/intellij/stub-indexes.html)：持久化声明应仅依赖本文件内容，跨文件变化不能导致缓存隐性失效；更改序列化结构须升级版本。
+
+借鉴的是分层、声明持久化、按需分析的原则。本项目使用 tree-sitter 声明摘要与现有缓存，不是移植 IntelliJ PSI，也没有实现等价的 Java 类型系统。
+
+#### 已完成
+
+- 复用共享 `workspace-relations.cjs` 与已有磁盘声明缓存，查询不启动或等待 JDT；网页 API 与桌面本地 API 使用同一 `related-locations` 处理逻辑。
+- 共享编辑器新增右键菜单“跳转项目内实现（声明索引）”，将光标放在类/接口或方法声明名称上使用；结果选择器标明“项目内声明匹配”。原有完整语言服务 `Go to Implementations` 不变。
+- 新增按行、列精确选择声明的查询，先筛声明再按行聚合，避免同一行多个重载方法的目标混在一起。仅返回向下 Java 实现/子类关系，不混入向上关系或 Mapper XML 语句。
+- 使用当前文件与其他未保存文件的临时覆盖，覆盖内容不落声明缓存；响应带 `source: project-declarations`、`scope: project`、`semanticComplete: false`，达到扫描资源上限时保留 `incomplete` 标识。
+- 查询结果返回时校验编辑器模型与内容版本，旧响应不能覆盖新内容；网页查询继续执行项目读取权限检查。
+
+#### 真实项目验证后记录
+
+对 `/Users/zhangshuaiqiang/Desktop/projects/site-tpl-manage` 只读扫描，缓存写入独立临时目录，没有启动 JDT。实际查询 `NavigationAdminService.query`，三次查询均断言命中 `NavigationAdminServiceImpl.java` 第 132 行、第 36 列。
+
+| 测量阶段 | 耗时 | 声明文件处理 |
+| --- | ---: | --- |
+| 全新缓存及 worker，首次定位 | 3524 ms | 解析 2069 个 Java/XML 文件 |
+| 结束 worker 后重新加载缓存，首次定位 | 598 ms | 复用 2069 个文件，解析 0 个 |
+| 同一 worker、相同编辑内容重复查询 | 四舍五入 0–1 ms | 命中内存查询缓存 |
+
+这些是单次真实项目样本的后台查询耗时，不是界面端到端耗时、上限或跨机器承诺。0 ms 是取整结果，不表示没有成本。原有关系箭头此前已有独立索引，本轮新增的是精确声明查询和共享操作入口；不能把复用后的全部耗时改善归功于本轮代码。此前约 68 秒的 JDT 冷态完整实现查询，本轮并未加速。
+
+复现（最后一个参数为预期实现路径，脚本断言实际结果；缓存目录应使用新建临时目录）：
+
+```sh
+node apps/desktop/scripts/benchmark-project-navigation.cjs PROJECT RELATIVE_INTERFACE_FILE CACHE_DIRECTORY EXPECTED_IMPLEMENTATION_FILE
+```
+
+验证通过：共享索引/精确重载/继承/泛型/Mapper/缓存/临时覆盖等 10 项测试、共享编辑器操作与过期响应 1 项测试、网页无需 JDT 的权限/覆盖查询 2 项测试；API 构建、网页 TypeScript 检查通过。此处不代表安装后的 GUI 端到端测试完成。
+
+#### 边界及后续步骤
+
+- [x] 第一阶段：不依赖 JDT 的项目内声明实现查询，验证持久化重开与实际目标。
+- [x] 第二阶段第一步：复用按文件及声明位置组织的双向关系图，避免每个新查询重算全项目关系；验证更新、删除及继承变化的保守失效。已验证数据见第八轮。
+- [x] 第二阶段后续第一步：方法摘要/声明位置变化按继承依赖更新关系分区，见第九轮；类型集合、导包及继承结构变化仍全量重建。
+- [ ] 第二阶段后续扩展：评估类型拓扑变化的安全增量处理，以及 Mapper 语句的细粒度分区更新；扩大范围前先做准确性对照。
+- [ ] 第三阶段：在明确来源、范围和完整性的前提下设计统一跳转调度，避免两个结果源静默覆盖；候选不确定时交给 JDT。
+- [ ] 第四阶段：补充多项目、不同模块依赖、生成代码及复杂重载的准确性对照和端到端交互性能测试，再决定扩大默认覆盖。
+
+当前声明查询不保证完整 Java 语义，不覆盖调用点变量解析、外部依赖实现、Lombok 生成方法、精确引用与重命名；JAR/JDK、复杂类型绑定、诊断、自动导包及 debug 继续使用完整语言服务。没有替换系统安装包，没有提交或推送代码。
+
+### 第八轮：跨文件查询复用关系图（2026-10-16，已验证）
+
+本轮针对“换一个文件/声明就重新计算整个项目关系”的重复成本，不修改 JDT、不扩大静态声明匹配的语义承诺。网页与桌面共享模块同时生效。
+
+实现：
+
+- 将关系构建与查询拆分为 `buildRelationIndex` / `queryRelationIndex`。关系图保留源文件、声明行列/名称范围、向上/向下目标；查询只遍历当前文件的边，同一行重载仍在聚合之前按位置筛选。
+- 每个 worker 最多保留一个磁盘基准关系图和一个未保存声明覆盖关系图。打开不同的干净文件不再重建；未改变声明摘要和位置的方法体修改也不重建。覆盖签名按路径排序，切换活动文件但覆盖声明集合相同可以复用。
+- 保留原来的 32 项查询缓存、worker 内存限制和空闲回收。每张图最多 100000 条去重关系边，超限显式标记 `incomplete`，不能冒充完整结果。
+- 关系图仅驻留内存，不写入磁盘声明缓存，避免跨文件依赖失效污染持久化摘要。文件保存/重命名/删除触发原有失效流程；重新扫描前丢弃旧图及覆盖图，查询时重建。未经过应用操作的外部变化仍依赖既有 30 秒查询触发扫描，不是新增了实时文件系统 watcher。
+- 失效采取保守全图重建，包括周期校验；尚未实现“仅更新受影响继承子图”。图复用的适用区间是两次扫描之间及声明覆盖签名不变时。
+
+真实项目结果（沿用上一轮 `site-tpl-manage` 的 2069 文件声明缓存）：
+
+| 验证 | 结果 |
+| --- | --- |
+| 构建一次项目关系图 | 325 ms，4252 条边，未截断 |
+| 复用该图查询 30 个不同文件 | 合计不足 1 ms（输出取整为 0 ms） |
+| 对照：同一构建算法，每个文件查询均重新建图 | 合计 10282 ms |
+| 两组查询的完整返回数据 | 逐项深比较一致 |
+| 实际 worker 首次读取已有缓存并查实现 | 701 ms；重开 worker 627 ms |
+| 切换到实现类文件并查询全部关联 | 17 / 21 ms，均保持 `graphBuilds = 1` |
+
+30 文件对照是本轮算法“复用/不复用”的隔离测量，不是旧版本界面端到端 A/B；不足 1 ms 也不包含跨进程传输或编辑器渲染。实际 worker 的 17/21 ms 包含解析活动文件内容和消息往返。初次装载比上一轮单样本 598 ms 略高，不能据此宣称启动更快；本轮收益主要在后续跨文件查询，不影响 JDT 约分钟级冷态语义索引结论。
+
+复现：先用上一轮脚本生成声明缓存，再执行：
+
+```sh
+node apps/desktop/scripts/benchmark-relation-graph.cjs PROJECT DECLARATION_CACHE
+node apps/desktop/scripts/benchmark-project-navigation.cjs PROJECT RELATIVE_INTERFACE_FILE DECLARATION_CACHE EXPECTED_IMPLEMENTATION_FILE
+```
+
+验证通过：11 项声明/关系 worker 测试（含新增跨文件只建图一次、方法体变更复用、未保存继承变化隔离、磁盘改动/重命名/删除失效）、1 项共享编辑器测试、2 项网页权限及未保存覆盖测试。未安装客户端，未提交或推送；下一步是精细依赖失效与统一调度，不应跳过准确性验证直接替换所有 JDT 跳转。
+
+### 第九轮：继承依赖分区增量更新（2026-10-16，已验证）
+
+本轮在第八轮的共享关系图上增加有限范围的增量更新。仍由网页/桌面共用的 `workspace-relations.cjs` 实现，不修改 JDT，不扩大声明匹配的语义范围。
+
+实现与安全边界：
+
+- 关系边按参与计算的子类型分别记录贡献，依赖集合记录该子类型自身及已解析祖先。方法摘要或声明位置变化时，重算自身/祖先受影响的类型分区，再合并反向边。多个子类贡献同一条继承方法关系时，不因更新一个分区而错误删除其他分区的关系。
+- 对方法参数、方法新增/删除、泛型方法摘要、可继承性及声明行列变化使用上述路径；声明摘要完全相同时直接复用原图，包括周期扫描无变化的情况。
+- 类型新增/删除/重命名、导包、父类型、类型泛型参数等拓扑信息变化时，全量重建。因为这些变化可能使原本未解析的名称获得新的目标，不能只沿旧依赖边更新。存在同文件同名局部类型时也回退全量；各局部类型的关系贡献分别保留，不能相互覆盖。
+- XML 语句变化仅重算 Mapper 关系分区，不重算 Java 继承分区；Java 方法变化也会重算 Mapper 分区以更新关联位置。Mapper 分区目前仍整体计算，尚未细化到单个 namespace/id。
+- 未保存内容以磁盘基准图为基础生成临时增量图，查询结束后不改变磁盘基准，不写入持久化声明缓存。磁盘重新扫描会基于扫描前后的声明摘要更新基准图，扫描不完整则丢弃基准图而非沿用可能错误的增量依赖。
+- 增量图或前次图超出关系预算时回退全量，保留 `incomplete`；合并关系仍受原有上限约束。增量更新包含全项目摘要比对和关系合并，不是常数耗时，也不意味着文件扫描过程已经变为增量 watcher。
+
+实测在上一轮 `site-tpl-manage` 声明缓存上进行：2069 个文件，当前提取器覆盖 1921 个类/接口声明。在内存中给 `NavigationAdminService.query` 增加一个参数，模拟方法签名变化；不修改项目文件、不启动 JDT。每轮交替增量/全量测量顺序，并比较全部文件查询返回值及边数。
+
+| 测量 | 5 轮结果 |
+| --- | --- |
+| 增量更新 | 67 / 49 / 55 / 55 / 55 ms，中位数 55 ms |
+| 全量重建 | 326 / 327 / 611 / 459 / 375 ms，中位数 375 ms |
+| 增量重算类型 | 每轮 2 个 |
+| 全部 2069 文件的查询结果及边数 | 每轮与全量深比较一致 |
+
+这次关系图更新的中位数耗时约降低 85%；不包含文件读取、磁盘校验、AST 解析、跨进程请求或编辑器渲染，不代表项目启动或 JDT 索引提速。同轮机器负载/GC 可造成全量样本波动，不能作为最长时间承诺。
+
+复现：
+
+```sh
+node apps/desktop/scripts/benchmark-relation-incremental.cjs PROJECT DECLARATION_CACHE
+```
+
+验证通过：19 项共享关系索引、增量/全量对照、局部同名类型、worker 磁盘与未保存覆盖、编辑器入口和变更路由测试；2 项网页读取权限及覆盖查询测试；JavaScript 语法与差异检查通过。已验证导包/类型集合/继承结构变化回退全量、泛型父接口及共享继承实现关系、位置变化、XML 变更、周期无变化复用。未做安装后 GUI 端到端测试，未替换客户端，未提交/推送代码。
+
+### 第十轮：JDT 完整语义冷启动排查与调优对照（2026-10-16，未证实提速）
+
+本轮与前几轮轻量声明导航分开验收：直接使用真实 JDT 的实现查询，不走关系图或快速导航缓存。结论是尚未找到可默认启用的冷索引提速改动，不能将本轮记为“完整 Java 语义服务已加速”。
+
+#### 可复现的冷态测量
+
+对 `site-tpl-manage` 创建私有源码副本，每轮使用全新 JDT 工作区，保持默认自动构建、相同工具 JDK 和 `-Xms256m -Xmx1G`。依赖本机已有 Maven 仓库，不是断网或清空 Maven 缓存的首次下载测试。记录实际接口实现结果返回时间，不将 ServiceReady 当作全局索引完成。
+
+参考 [VS Code Java 的官方 JVM 参数](https://github.com/redhat-developer/vscode-java/blob/main/package.json)，增加内部受控的 `javaGcProfile` 对照开关，只允许 `default` / `parallel`，不开放任意 JVM 参数注入。Parallel 模式使用 `UseParallelGC`、`GCTimeRatio=4`、`AdaptiveSizePolicyWeight=90`，不加大堆。普通客户端、网页 API 默认不启用该模式。
+
+| 运行 | ServiceReady | 首次实现查询等待 | 从启动到首次正确实现结果 | 重复查询 |
+| --- | ---: | ---: | ---: | ---: |
+| 默认 GC，第一轮 | 17796 ms | 80699 ms | 99597 ms | 107 ms |
+| Parallel GC 对照 | 18842 ms | 85478 ms | 105493 ms | 162 ms |
+| 默认 GC，复测 | 13194 ms | 74412 ms | 88739 ms | 73 ms |
+
+均返回 `NavigationAdminServiceImpl.java`。Parallel 对照没有表现出改善，不更改默认值；样本也不足以归因其慢多少。此次默认样本本身存在波动，不把之前约 68 秒的单次查询等待当成最长时间或总启动时长。
+
+#### 依赖与 GC 归因
+
+- 在已完成索引的真实 JDT 上读取 10 个 Java 项目的 runtime classpath：共 3216 次 JAR 引用、489 个不同 JAR 路径，未发现模块内重复条目或路径别名。跨模块重复引用同一个依赖属于正常情况，不能直接去重删除。该统计不能证明索引器实际只处理了每个 JAR 一次；后续判断重复工作仍需执行级事件证据。
+- 新增 `java-startup-diagnostics.cjs`，统计路径别名、项目内重复条目；后续诊断显式报告无法 realpath 校验的 JAR 路径数量，避免把路径字符串去重误称为物理文件验证。初次命令以对象传递 classpath 选项，捆绑 JDT 返回 options 为 null；已按其实际命令协议改用序列化 JSON，默认 GC 复测获得上述依赖统计。首次失败不记为依赖诊断通过。
+- 对第六轮保留的完整二进制 JFR 重新汇总：231 次 GC，顶层 `jdk.GCPhasePause` 停顿合计 2895 ms，最长 40 ms。不将并发 GC 的周期时长或嵌套暂停事件重复相加。此结果不支持把分钟级等待主要归因于 GC；也不代表 GC 没有额外 CPU 开销。
+- 可选 `--runtime-stats` 最初未能从 `jcmd -l` 的命令行识别测试 JVM，记录 `available: false`，没有捏造 GC 数据。工具后续增加仅检查本次 guardian 直接子进程的回退，不扫描/附加用户的其他 IDE；该回退尚未在本轮真实运行中验证，不能写成已获得运行时 GC 统计。上述有效暂停数据来自已有二进制 JFR。
+
+#### 索引合并实验的处理
+
+尝试对 JDT `MemoryIndex` 的查询触发合并阈值做临时实验，100 调至 500，不跳过索引条目。普通 JVM 上的原始类/转换类阈值与合并行为测试通过，但多次真实 JDT 运行没有确认转换生效；包括调整依赖预加载与无类名定义处理后仍未通过真实生效断言。不能用这些运行数据评价该算法，也不将失败归因当作已经确定的 OSGi 原因。
+
+已从工作区撤下本轮新增的 `IndexBufferAgent`、构建/测试源文件、启动入口和回归环境开关；不改捆绑 JDT JAR，不安装该实验。独立临时构建产物不是生产组件，未加入打包流水线。原有第六轮之前的退出兼容实验与其他已有功能保持不变。
+
+#### 验证与后续
+
+复现默认和 GC 对照：
+
+```sh
+node apps/desktop/scripts/profile-java-startup.cjs PROJECT --summary --fresh-only --dependency-summary --java-request-ms=120000 --navigation-path=RELATIVE_INTERFACE_FILE
+node apps/desktop/scripts/profile-java-startup.cjs PROJECT --summary --fresh-only --java-gc=parallel --java-request-ms=120000 --navigation-path=RELATIVE_INTERFACE_FILE
+```
+
+脚本现在同时记录 `durationMs`（查询等待）与 `totalElapsedMs`（从服务启动到结果），二者不可混用。
+
+撤下实验后，默认配置的 2 项真实 Java 集成测试通过（约 37.5 秒），覆盖源码/JAR/JDK、补全导包、命名建议、Lombok、格式化、编译错误拦截、运行、Debug 断点/变量/步进/停止。工具、边界与取消测试另行验证。没有将失败的补丁生效检查计为通过，未替换客户端、未提交/推送。
+
+后续应以执行级证据定位 JAR 索引、词表构建和磁盘合并的重复工作，再考虑对上游源码做可版本锁定的改动；不继续把增加堆、提高并发或关闭诊断作为未经实测的默认提速方案。
+
+### 第十一轮：完整实现查询等待链与内核热点定位（2026-10-16）
+
+本轮是定位，不修改 JDT 行为。离线重新读取第六轮保留的真实 `site-tpl-manage` 二进制 JFR（约 25 MiB，录制跨度 91063 ms，4207 个有效执行栈样本），扩展原汇总器保留较深调用链、互斥操作分类、monitor wait / park、I/O 栈与约 10 秒时间桶。不启动新的 JDT，不附加用户 IDE，不修改项目或客户端。它是该次冷态录制的证据，不是最新安装版的新一次性能测量。
+
+#### 已确认：实现查询主要在等待后台索引，而不是实现搜索计算本身
+
+录制中实际实现查询线程的 monitor 等待累计 **68403969756 ns（约 68.404 秒）**，完整调用链包括：
+
+```text
+ImplementationsHandler.findImplementations
+  → ImplementationCollector.findTypeImplementations
+  → SourceType.newTypeHierarchy
+  → IndexBasedHierarchyBuilder.searchAllPossibleSubTypes
+  → IndexBasedHierarchyBuilder.legacySearchAllPossibleSubTypes
+  → JobManager.performConcurrentJob
+  → Object.wait
+```
+
+同时核对实际捆绑的 JDT Core 3.47.0 字节码：`performConcurrentJob` 检查待处理索引任务，并按等待策略等待后执行查询。录制显示这条路径实际被调用，而不只是从源码推测。该等待说明实现查询被索引就绪条件挡住，不应描述成前端渲染耗时或 HTTP 往返慢。此处仍是该调用栈多次 wait 的累计时间，不能与别的线程等待相加当作总耗时。
+
+`LanguageServerApplication.start` 的约 88 秒等待是主线程的应用生命周期等待；进度任务约 69 秒等待也是伴随现象，均不能据此认定死锁。导航分类执行样本为 85/4207，约 2.0%，与“查询主要等待索引”的证据一致，但采样比例不是响应时间比例。
+
+#### 已确认的 CPU 工作热点
+
+以下分类按完整栈互斥归类；百分比以 4207 个执行样本为分母，不能换算成实际耗时或预期可节省时间：
+
+| 工作 | 样本数 | 比例 | 关键方法 |
+| --- | ---: | ---: | --- |
+| 构建/类型绑定主路径 | 884 | 21.0% | JDT compiler / builder |
+| 源码二阶段语义解析（不含下面单列的环境构建） | 614 | 14.6% | `SourceIndexer.resolveDocument` |
+| JAR 词表插入及扩容 | 567 | 13.5% | `MemoryIndex.addIndexEntry`、`SimpleWordSet.add/rehash` |
+| JAR 常量池/二进制解析 | 481 | 11.4% | `BinaryIndexer.extractReferenceFromConstantPool/extractArgCount` |
+| JAR 索引合并 | 435 | 10.3% | `Index.save → DiskIndex.mergeWith/copyQueryResults` |
+| 源码 classpath 查询环境构建 | 302 | 7.2% | `JavaSearchNameEnvironment.computeClasspathLocations/indexPackageNames` |
+
+其余为 JDK 索引、其他操作等，因此表中不是 100%。按大阶段归类仍为 JAR 1514（36.0%）、源码 997（23.7%）、构建 947（22.5%）；不能把大小两种口径相加。
+
+深栈进一步表明：
+
+- `CharOperation.hashCode` 的热栈不只来自 `SimpleWordSet`，也来自 `DiskIndex.copyQueryResults → HashtableOfObject.get` 和 `putUnsafely → rehash`。仅看原先前四帧，会把索引合并中的哈希开销漏归到词表。
+- 局部最热合并深栈分别有 90 个 get/hash 样本、73 个 put/rehash/hash 样本；词表 rehash/hash 深栈 65 个样本。这是确切热点，不足以证明哈希算法错误或每次扩容都是冗余。
+- `SourceIndexer.resolveDocument` 的实际字节码在该路径上重新解析文件，再 `new JavaSearchNameEnvironment(project, workingCopies)`，随后建立类型绑定；环境构造调用 `computeClasspathLocations`，并建立包名到 classpath 的映射。JFR 同时命中这条新建环境/包名索引路径。尚未统计调用次数，不能声称全部 2000 个 Java 文件都走了相同分支。
+- 约 10 秒粗粒度桶显示：中前段 JAR 索引与编译并行，后段转为源码语义索引。桶按录制起点所在绝对时间边界对齐，存在不足 10 秒的偏差；这不是精确阶段起止时间，也不能证明每段完全串行。
+
+#### 排除错误的 I/O 解读
+
+最初聚合出现约 75 秒 `FileRead:other`，展开调用栈后，其中 **73.622 秒来自 `StreamMessageProducer.listen` 读取 LSP 输入管道等待消息**，不是读取项目磁盘文件。另约 1.549 秒来自调试组件监视输出流。不能把两者当作磁盘阻塞。
+
+该录制的可见 SocketRead 事件累计约 1.694 秒，部分栈为 Buildship 获取 Gradle 版本元数据，即使当前主要使用 Maven。这只说明存在该活动，不证明它在关键路径，不能据此直接移除 Gradle/Buildship 组件。文件/网络事件受录制阈值限制，会漏掉大量短操作；跨线程事件可能重叠，不能用少量 I/O 事件断言磁盘或网络完全没有影响。
+
+#### 下一步优先级（方案，尚未实施）
+
+1. 优先验证源码解析阶段能否按项目/classpath 版本复用**只读包名与路径元数据**，减少环境重建。不要直接共享可变的 `LookupEnvironment` 或整个 `JavaSearchNameEnvironment`；需要考虑 working copy、模块、构建配置和依赖变化的失效。此项同时命中后段尾部和实际 CPU 热栈。
+2. 对 JAR 词表与 `copyQueryResults` 建立执行次数/数据规模基准，再评估扩容和合并中的重复哈希、集合复用。实际实现已有初始容量估计，不能把“简单增加初始容量”写成确定缺陷的修复。
+3. 必须保留完整引用/继承语义。不能靠跳过二阶段解析、返回不完整结果或无条件绕过 `performConcurrentJob` 的就绪等待冒充完整能力提速。
+
+本轮只增强诊断工具并定位，没有实现上述内核优化。汇总器自测新增分类优先级和有界聚合断言，4 项录制/依赖诊断测试通过；真实二进制重读成功，JavaScript 差异检查通过。原有 JVM 256 MiB 汇总预算、输出大小与超时约束保持不变，未替换客户端、未提交/推送。
+
+### 第十二轮：真实 JDT 模型上的包名元数据复用验证（2026-10-16，局部验证）
+
+结论分开记录：**逐次验证文件指纹的包名缓存更慢，不采用；以 JDT 原生模型快照为输入的纯字符串投影缓存有局部收益，但尚未验证完整冷索引提速。** 本轮没有替换 `JavaSearchNameEnvironment.indexPackageNames`，也没有共享类型绑定环境。
+
+#### 验证方式与范围
+
+- 新增开发诊断 OSGi bundle，通过 JDT 正常扩展加载机制执行命令，直接读取真实 `JavaCore` 项目和 `IPackageFragmentRoot.getChildren()`。不使用模拟项目模型，不使用上一轮未确认生效的 Java agent。
+- 使用之前保留的 `site-tpl-manage` 私有副本及专属 JDT 缓存。每次先验证真实接口实现查询命中 `NavigationAdminServiceImpl.java`，再执行诊断；不更改原项目、安装组件或客户端。
+- 每次诊断交替安排基准与候选的执行顺序，共六轮，逐根深比较包名内容及顺序。计时只覆盖包名提取/转换与候选缓存维护，比较断言在计时之外；不是完整环境构造、类型绑定或全量索引的计时。
+- 覆盖 10 个 Java 项目、3989 个 package fragment root，约 8.3 万条包名引用。不同运行分别为 83128/83138 条，属于不同模型时点；只做每次运行内部的严格对照，不假定跨运行模型完全相同。此口径包含 JDT 模型中的所有根，不等同于第十轮 runtime classpath 的 JAR 路径数。
+
+#### 文件指纹方案：结果一致，但收益为负
+
+缓存 JAR 包名列表，键包含根标识、编译级别及文件身份/mtime/size。源码与不可校验的根不缓存，Java 模型变化会清空缓存。第一版每个根重复校验较慢，第二版将重复 JAR 的指纹和项目配置检查合并到每轮一次：
+
+| 方案 | 原路径六轮（ms） | 候选六轮（ms） |
+| --- | --- | --- |
+| 初版逐根文件校验 | 17 / 16 / 18 / 18 / 17 / 7 | 295 / 210 / 220 / 207 / 152 / 135 |
+| 合并重复校验后的 v2 | 18 / 17 / 16 / 22 / 20 / 12 | 111 / 60 / 60 / 74 / 68 / 67 |
+
+两版内容和顺序均一致。v2 排除第一轮后，热态中位数为原路径 17 ms、候选 67 ms，仍然更慢。不能因为命中了缓存就宣称优化。
+
+核对捆绑 JDT Core 3.47.0 字节码：`JavaElement.getChildren → getElementInfo → JavaModelManager.getInfo` 本身已使用模型缓存。继续叠加文件系统检查会增加开销。该结果只否定本次逐次文件指纹方案，不等于证明所有环境级缓存都无效。
+
+#### 原生模型快照投影方案：局部收益通过
+
+进一步只缓存纯函数结果：从 JDT 当前 children 模型数组生成不可变的包名路径字符串列表。数组身份作为快照键，不额外查询文件系统，不缓存或复用 `ClasspathLocation`、working copy、模块映射或 `LookupEnvironment`。模型事件会清空缓存。
+
+核对并测试了本版 JDT 的 `OpenableElementInfo.addChild/removeChild`：复制后替换 children 数组；新包/删除包的新快照不会命中旧数组的投影。此依赖是特定内核行为，不是对所有未来版本/任意插件原地修改数组的兼容承诺。
+
+| 原生快照 v3 | 原路径六轮（ms） | 缓存投影六轮（ms） | 热态中位数（排除第一轮） |
+| --- | --- | --- | --- |
+| 第一次真实模型运行 | 19 / 19 / 19 / 16 / 14 / 20 | 16 / 11 / 7 / 8 / 5 / 5 | 19 → 7 ms |
+| 第二次独立重开复测 | 18 / 19 / 27 / 17 / 17 / 16 | 14 / 10 / 9 / 9 / 10 / 9 | 17 → 9 ms |
+
+每轮全部根的包名与顺序一致，主动失效后重读也一致；两次均验证真实 JDT 实现查询成功。缓存最多 4096 项/200000 个包名；原型仅存活于诊断命令内，没有开启常驻缓存或持久化。缓存会持有模型数组引用，长期内存行为、弱引用策略与冷态命中率尚未验收。
+
+#### 可以得出的结论与不能得出的结论
+
+- 可以继续评估“复用 JDT 已确认的模型快照的只读派生数据”，不应继续采用逐文件查询额外扫磁盘的方案。
+- 当前只优化包名字符串转换部分，不包含 `ClasspathLocation.listPackages()` 补充列表、包名到路径集合的重建、模块解析等剩余工作，不能称为已缓存整个 classpath 环境。
+- 这是已有缓存工作区上的局部对照，没有将候选接入真实 `SourceIndexer` 调用链，也没有完整冷启动 A/B。不得把 19→7 ms 推广为 JDT 约分钟级等待下降相同比例，更没有证据能将冷索引缩短到数秒。
+- 下一阶段应在版本锁定的 JDT 源码路径中评估包名到路径映射的只读基础数据复用，保留每个查询自己的可变绑定状态；再验证模块、多版本 JAR、未保存文件、模型失效与真实冷启动。
+
+工具与复现：
+
+```sh
+node apps/desktop/scripts/build-package-metadata-probe.cjs
+node apps/desktop/scripts/verify-package-metadata.cjs OWNED_RETAINED_DIAGNOSTIC_DIRECTORY BUNDLE_JAR
+node apps/desktop/scripts/verify-package-metadata.cjs OWNED_RETAINED_DIAGNOSTIC_DIRECTORY BUNDLE_JAR --native-model
+```
+
+验证器只接受系统临时目录下本工具保留的 `java-startup-profile-*` 目录，检查真实路径和已有工作区元数据，不能指向用户项目/安装缓存。`diagnosticJavaBundles` 仅为受信任内部资源选项，最多两个绝对 JAR 文件，默认空；没有增加网页/桌面 HTTP 执行任意插件命令的入口，也未加入打包流程。
+
+7 项调优及原型构建自测通过，覆盖默认不加载插件、输入边界、快照不可变、容量限制、JDT 复制后替换、新增/删除、并发失效等；真实 OSGi 命令及多轮结果对照通过，差异和脚本语法检查通过。尚未完成内核接入或冷启动提速验收，未替换客户端、未提交/推送。
+
+### 第十三轮：包名投影接入真实索引链，未通过冷启动收益验收（2026-10-16）
+
+**结论：已确认候选缓存在真实 JDT 索引中执行并大量命中，但本轮冷启动对照没有显示收益，不加入正式组件与打包流程。** 第十二轮的局部收益不能外推为完整 Java 语义能力提速。
+
+#### 隔离实现与正确性边界
+
+- 新增 `build-projection-core-experiment.cjs`：只接受 SHA-256 为 `723e30be1e841516c388ebb32017cb8b36662808f46be5265b78cc06bd4fe71c` 的捆绑 Core，复制完整 JDT 分发到临时目录中的 control/candidate。原 JAR 在操作前后校验不变；不修改用户项目、已安装客户端或默认加载路径。
+- 仅替换 `JavaSearchNameEnvironment.indexPackageNames` 第一段包名提取/规范化循环的输入。保留后续 `ClasspathLocation.listPackages()`、包名到路径映射写入、模块与类型绑定流程。构建时核对目标字节码形状、恰好一个类入口，并比较重写前后各方法的规范化指令，拒绝其他方法发生变化；另用 `-Xverify:all` 加载校验。
+- 缓存键为 JDT children 数组的弱引用身份，值为只供内部读取的字符串数组；不共享可变绑定环境。模型变化触发失效，并发计算不能重新填入旧代。最多 4096 项、200000 个包名、2000000 个字符；超限清空，单项超限不保留。字符累计使用 long 避免计算溢出。仍属特定 JDT 版本的开发实验，不承诺第三方插件原地修改数组的兼容性或长期监听器生命周期。
+- 本地改造 JAR 的原签名及条目摘要移除，并增加实验清单标记；它不是 Eclipse 签名的官方组件，不能冒充官方分发发布。
+
+#### 先确认真实执行，不能只看文件存在
+
+早期小项目回归及第一轮大项目测试未捕获 `used/hit` 标记，被判为未验收，而不是把这些运行记为有效提速结果。增加 OSGi 运行时来源诊断后，确认真实加载路径指向候选 JAR，目标类资源 SHA-256 与改造字节码一致，且投影辅助类确实存在。
+
+Eclipse 的输出重定向可能影响 `System.err` 采集，因此实验标记改用原始进程 stderr 文件描述符，绝不写入 LSP stdout。重测得到真实调用和退出统计后才验收接入；这只是诊断证据修正，不是性能优化。运行时来源命令仅由受信任开发诊断 bundle 提供，未暴露为网页/桌面任意执行入口。
+
+#### 实际项目冷启动对照
+
+同为 `site-tpl-manage` 只读源码副本：2108 个文件、10707247 字节；使用独立空工作区、默认 GC、原有 256 MiB/1 GiB 堆设置，导入就绪后启用自动构建。两个运行顺序执行，没有同时运行两个测试 JDT。首次全局实现查询均返回 `NavigationAdminServiceImpl.java`。
+
+| 指标 | 原版 control | 候选 candidate |
+| --- | ---: | ---: |
+| 导入/ServiceReady | 20.246 s | 20.864 s |
+| 首次实现查询自身耗时 | 93.367 s | 104.349 s |
+| 从启动到首次查询完成 | 114.794 s | 126.543 s |
+| 重复实现查询 | 208 ms | 85 ms |
+| 退出耗时 | 1612 ms | 917 ms |
+| 强制退出 | 否 | 否 |
+
+候选真实统计：249338 次调用、248535 次命中、803 次未命中，约 99.68% 命中率；本次未发生模型失效或容量淘汰，退出时 803 项、16745 个包名、563251 个字符上界。数字不是常驻 RSS 测量，也不代表修改文件后不需要失效。
+
+计时候选 JAR SHA-256 为 `a39abaf905c8aa9b7d7acfe5507ce0f9096f2cb4de47342f1d75f4a1fdc00a02`。之后增加字符溢出保护及构建验证，不能把前述计时视为这些后续改动的重新测速。
+
+这只是一次候选→原版的探索性对照，不是多轮 ABBA 统计；期间有短暂辅助 Java 编译测试，主机负载、JIT、文件缓存等也未严格控制。候选在这一组更慢，但不能据此断言稳定退化百分比；同样没有任何证据支持稳定提速。重复查询的 85/208 ms 差异不能冒充冷索引收益。
+
+#### 后续决策
+
+不合入正式 JDT、不替换客户端，不继续围绕单纯包名字符串转换承诺分钟级提速。当前只避免了转换，仍会重建包名到 classpath 的集合、执行源码二阶段解析、JAR 词表/索引合并与类型绑定。下一阶段应分别测量这些剩余工作的真实次数与分配量，再决定是否缓存更高层的只读结构或改造词表合并；不能共享查询私有可变状态，也不能跳过引用语义来降低计时。
+
+复现入口：
+
+```sh
+node apps/desktop/scripts/build-projection-core-experiment.cjs --test-only
+node apps/desktop/scripts/build-projection-core-experiment.cjs
+node apps/desktop/scripts/profile-java-startup.cjs PROJECT --summary --fresh-only --jdtls-home=CONTROL_HOME --java-request-ms=120000 --navigation-path=JAVA_INTERFACE_PATH
+node apps/desktop/scripts/profile-java-startup.cjs PROJECT --summary --fresh-only --jdtls-home=CANDIDATE_HOME --require-package-projection --java-request-ms=120000 --navigation-path=JAVA_INTERFACE_PATH
+node apps/desktop/scripts/verify-package-metadata.cjs OWNED_RETAINED_DIAGNOSTIC_DIRECTORY BUNDLE_JAR --provenance
+```
+
+`--require-package-projection` 必须同时确认实际使用、命中、退出统计，否则运行失败。最后一条通过受信任的 `CODE_STUDIO_JDTLS_HOME` 环境选项选择待检查组件；只接受工具保留的隔离工作区。
+
+实验构建及快照新增/删除、并发失效、容量边界、诊断解析等 9 项自测通过。最终隔离组件另通过 2 项真实集成回归：Java 导航/引用 21.45 s（同时要求实际投影使用、命中和退出统计）；Lombok、Java 运行、断点、变量、单步及停止 27.53 s。后者的通过不代表已验收模块、多版本 JAR、长期文件变更及所有插件组合。脚本语法与差异检查通过。未安装、未提交或推送。

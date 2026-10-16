@@ -55,6 +55,12 @@ test('TypeScript project navigation resolves definitions, references and symbols
   const completion = await manager.request(project, 'completion', { path: 'src/main.ts', content: completionSource, line: 2, column: 18 });
   const completionItems = Array.isArray(completion) ? completion : completion.items;
   assert.ok(completionItems.some((item) => item.label === 'answer'));
+  const answerProposal = completionItems.find((item) => item.label === 'answer');
+  assert.match(answerProposal.resolveToken, /^[a-f0-9]{36}$/);
+  const resolvedAnswer = await manager.request(project, 'completion-resolve', { path: 'src/main.ts', content: completionSource, line: 2, column: 18, item: { token: answerProposal.resolveToken } });
+  assert.equal(resolvedAnswer.label, 'answer');
+  assert.equal(await manager.request(project, 'completion-resolve', { path: 'src/main.ts', content: completionSource, line: 2, column: 18, item: { token: 'forged', data: { uri: 'file:///etc/passwd' } } }), null);
+  assert.equal(await manager.request(project, 'completion-resolve', { path: 'src/main.ts', content: completionSource + ' ', line: 2, column: 18, item: { token: answerProposal.resolveToken } }), null);
   const diagnostics = await manager.diagnostics(project, { path: 'src/main.ts', content: "const broken: string = 42;\n" });
   assert.ok(diagnostics.some((item) => item.severity === 1 && /number.*string|not assignable/i.test(item.message)));
   const missingImport = 'console.log(answer);\n';
@@ -124,20 +130,53 @@ test('Java project navigation and references are provided by JDT LS', { timeout:
   const source = 'package com.example;\npublic class Main { public static void main(String[] args) { System.out.println(Greeting.message()); } }\n';
   fs.writeFileSync(path.join(sourceRoot, 'Main.java'), source);
   const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'code-studio-jdtls-data-'));
+  const projection = process.env.CODE_STUDIO_TEST_PACKAGE_PROJECTION === '1' ? require('../scripts/projection-diagnostics.cjs').projectionDiagnostics() : null;
   const lifecycleEvents = []; const startupBuildStates = [];
-  const manager = new LocalLspManager({ idleMs: 60_000, dataRoot, onLifecycle: event => {
+  const manager = new LocalLspManager({ idleMs: 60_000, dataRoot, ...(process.env.CODE_STUDIO_TEST_JDT_TUNING === '1' ? { javaMaxConcurrentBuilds: 2, javaSharedIndexRoot: path.join(dataRoot, 'shared-index') } : {}), resources: process.env.CODE_STUDIO_TEST_INDEX_THREAD_GUARD_JAR ? { indexThreadGuardJar: process.env.CODE_STUDIO_TEST_INDEX_THREAD_GUARD_JAR } : {}, onLifecycle: event => {
     lifecycleEvents.push(event);
+    if (projection && event.event === 'spawn' && event.provider === 'java') queueMicrotask(() => manager.sessions.get('java-project:java')?.child.stderr.on('data', chunk => projection.accept(chunk)));
     if (event.event === 'initialize-complete' || event.event === 'project-ready') startupBuildStates.push({ event: event.event, enabled: manager.sessions.get('java-project:java')?.javaAutobuildEnabled });
   } });
-  t.after(async () => { await manager.shutdown(); fs.rmSync(root, { recursive: true, force: true }); if (process.env.CODE_STUDIO_LSP_DEBUG !== '1') fs.rmSync(dataRoot, { recursive: true, force: true }); else console.error(`JDT data: ${dataRoot}`); });
+  t.after(async () => {
+    await manager.shutdown(); fs.rmSync(root, { recursive: true, force: true });
+    if (process.env.CODE_STUDIO_LSP_DEBUG !== '1') fs.rmSync(dataRoot, { recursive: true, force: true }); else console.error(`JDT data: ${dataRoot}`);
+    if (projection) { assert.equal(projection.result.used, true); assert.equal(projection.result.hit, true); assert.ok(projection.result.stats?.hits > 0, 'Actual patched JDT must report cache hits'); }
+  });
   const project = { id: 'java-project', path: root };
 
   const prepared = await manager.prepareProject(project);
   assert.deepEqual(prepared.providers, [{ provider: 'java', ready: true }]);
+  const completionPath = 'src/main/java/com/example/Main.java';
+  const importSource = 'package com.example;\npublic class Main { ArrayLi }';
+  const importColumn = importSource.split('\n')[1].indexOf('ArrayLi') + 'ArrayLi'.length + 1;
+  const proposalResult = await manager.request(project, 'completion', { path: completionPath, content: importSource, line: 2, column: importColumn });
+  const proposalItems = Array.isArray(proposalResult) ? proposalResult : proposalResult.items;
+  const arrayList = proposalItems.find(item => String(item.label).startsWith('ArrayList'));
+  assert.ok(arrayList, JSON.stringify(proposalItems.map(item => item.label)));
+  const resolvedImport = await manager.request(project, 'completion-resolve', { path: completionPath, content: importSource, line: 2, column: importColumn, item: { token: arrayList.resolveToken } });
+  assert.ok(resolvedImport.additionalTextEdits?.some(edit => edit.newText.includes('import java.util.ArrayList;')), JSON.stringify(resolvedImport));
+  const namingSource = 'package com.example;\npublic class Main { void test() { StringBuilder str } }';
+  const namingColumn = namingSource.split('\n')[1].indexOf('str }') + 4;
+  const namingResult = await manager.request(project, 'completion', { path: completionPath, content: namingSource, line: 2, column: namingColumn });
+  const namingItems = Array.isArray(namingResult) ? namingResult : namingResult.items;
+  assert.ok(namingItems.some(item => String(item.label).startsWith('stringBuilder')), JSON.stringify(namingItems.map(item => item.label)));
   assert.equal(startupBuildStates.find(state => state.event === 'initialize-complete').enabled, false);
   assert.equal(startupBuildStates.find(state => state.event === 'project-ready').enabled, false);
   assert.equal(manager.sessions.get('java-project:java').javaAutobuildEnabled, true);
   assert.equal(lifecycleEvents.filter(event => event.event === 'autobuild-enabled').length, 1);
+  if (process.env.CODE_STUDIO_TEST_INDEX_THREAD_GUARD_JAR) assert.equal(lifecycleEvents.filter(event => event.event === 'index-guard-applied').length, 1);
+  const startup = manager.projectStatus(project).providers.find(item => item.provider === 'java').startupTimings;
+  assert.ok(startup.protocolInitializationMs >= 0);
+  assert.ok(startup.projectImportMs >= 0);
+  assert.ok(startup.serviceReadyMs >= startup.protocolInitializationMs);
+  assert.deepEqual(lifecycleEvents.find(event => event.event === 'project-ready').startupTimings.serviceReadyMs, startup.serviceReadyMs);
+  for (const event of lifecycleEvents.filter(event => event.event.startsWith('background-task-'))) {
+    assert.ok(['import', 'analysis'].includes(event.stage));
+    assert.ok(event.activeTasks >= 0);
+    assert.equal(event.title, undefined);
+    assert.equal(event.message, undefined);
+    if (event.event === 'background-task-complete') assert.ok(event.durationMs >= 0);
+  }
 
   await manager.diagnostics(project, { path: 'src/main/java/com/example/Main.java', content: source });
   const symbols = await manager.request(project, 'documentSymbols', { path: 'src/main/java/com/example/Main.java', content: source });

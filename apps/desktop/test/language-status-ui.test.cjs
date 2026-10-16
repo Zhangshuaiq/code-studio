@@ -13,7 +13,13 @@ const componentModule = new Module(filename, module);
 componentModule.filename = filename;
 componentModule.paths = Module._nodeModulePaths(path.dirname(filename));
 componentModule._compile(compiled, filename);
-const { DesktopLanguageStatus, isLanguageStartupError, fastIndexStatusText } = componentModule.exports;
+const { DesktopLanguageStatus, isLanguageStartupError, fastIndexStatusText, semanticStatusText } = componentModule.exports;
+test('semantic loading shows actual task count without claiming ready or a percentage', () => {
+  assert.equal(semanticStatusText({ provider: 'java', phase: 'indexing', message: '', backgroundTasks: 3 }, '', true), '正在后台分析与构建 · 3 项任务');
+  assert.equal(semanticStatusText({ provider: 'java', phase: 'importing', message: '', backgroundTasks: 3 }, '', true), '语义服务正在加载');
+  assert.equal(semanticStatusText({ provider: 'java', phase: 'ready', message: '' }, '代码智能已就绪', false), '代码智能已就绪');
+  assert.equal(semanticStatusText({ provider: 'java', phase: 'indexing', message: '', backgroundTasks: NaN }, '', true), '正在后台分析与构建');
+});
 
 test('language startup uses a compact indeterminate status, not an error alert or invented percentage', () => {
   const html = renderToStaticMarkup(React.createElement(DesktopLanguageStatus, { projectId: 'test', active: true }));
@@ -32,6 +38,9 @@ test('fast-index readiness is separate from Java loading and incomplete coverage
   assert.equal(fastIndexStatusText({ state: 'ready', files: 1647, complete: true }), '快速索引就绪 · 1647 文件');
   assert.match(fastIndexStatusText({ state: 'needs-validation', files: 1647, complete: false }), /缓存符号可用.*后台校验/);
   assert.match(fastIndexStatusText({ state: 'scanning', files: 0, complete: false }), /正在建立/);
+  const progress = fastIndexStatusText({ state: 'scanning', files: 1000, complete: false, discoveredFiles: 250, unchangedFiles: 249, parsedFiles: 1 });
+  assert.match(progress, /已检查 250 文件.*缓存复用 249.*新解析 1/);
+  assert.doesNotMatch(progress, /就绪|%/);
   assert.match(fastIndexStatusText({ state: 'ready', files: 2, complete: false }), /部分可用/);
   assert.doesNotMatch(fastIndexStatusText({ state: 'ready', files: 2, complete: true, backgroundError: 'FAST_INDEX_ERROR' }), /索引就绪/);
 });

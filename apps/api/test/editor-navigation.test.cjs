@@ -85,6 +85,26 @@ function providerFixture(transport, prepareLocations, options = {}) {
   const model = { uri: monaco.Uri.parse('codegen://session/Main.java'), getVersionId: () => version, getValue: () => 'class Main {}', isDisposed: () => disposed };
   return { providers, installed, model, edit: () => version++, disposeModel: () => { disposed = true; } };
 }
+test('shared Java completion resolves imports lazily and rejects stale or cancelled results', async () => {
+  let resolveCalls = 0;
+  const importRange = { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } };
+  const fixture = providerFixture(async (operation, input) => {
+    if (operation === 'completion') return { result: { items: [{ label: 'ArrayList', insertText: 'wrong', textEdit: { range: importRange, newText: 'ArrayList' }, resolveToken: 'opaque' }] } };
+    assert.equal(operation, 'completion-resolve'); assert.deepEqual(input.item, { token: 'opaque' }); resolveCalls++;
+    return { result: { detail: 'java.util.ArrayList', additionalTextEdits: [{ range: importRange, newText: 'import java.util.ArrayList;\n' }] } };
+  });
+  try {
+    const provider = fixture.providers.get('java:CompletionItem');
+    const result = await provider.provideCompletionItems(fixture.model, { lineNumber: 1, column: 1 });
+    const item = result.suggestions[0];
+    assert.equal(item.insertText, 'ArrayList'); assert.equal(resolveCalls, 0);
+    const resolved = await provider.resolveCompletionItem(item, {});
+    assert.equal(resolved.additionalTextEdits[0].text, 'import java.util.ArrayList;\n');
+    assert.equal(resolved.additionalTextEdits[0].range.startLineNumber, 1);
+    await provider.resolveCompletionItem(item, { isCancellationRequested: true }); assert.equal(resolveCalls, 1);
+    fixture.edit(); await provider.resolveCompletionItem(item, {}); assert.equal(resolveCalls, 1);
+  } finally { fixture.installed.dispose(); }
+});
 test('shared shell completion preserves kinds, snippets, replacement edits and incompleteness', async () => {
   const editRange = { start: { line: 2, character: 7 }, end: { line: 2, character: 10 } };
   const calls = [];

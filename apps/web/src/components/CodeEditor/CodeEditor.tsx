@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import Editor, { DiffEditor, OnMount, useMonaco } from "@monaco-editor/react";
+import Editor, { OnMount, useMonaco } from "@monaco-editor/react";
+import { CodeDiffView } from './CodeDiffView';
 import { WorkspaceFileViewer } from './WorkspaceFileViewer';
 import type { MarkdownNavigation } from '../../lib/markdown-resource';
 import { useQueryClient } from '@tanstack/react-query';
@@ -7,13 +8,14 @@ import { ArrowLeft, ArrowRight } from 'lucide-react';
 import { editorLocation, type EditorLocation } from '../../lib/editor-navigation';
 import { installWorkspaceLanguageProviders, monacoLang, setupIntelliSense, syncWorkspaceModels, workspaceModelUri, workspacePathFromUri } from "../../lib/monaco";
 import { requestWorkspaceLanguage, supportsWorkspaceLanguage, workspaceLanguageError } from '../../lib/workspace-language';
-import { canFormat, fileExt, formatCode } from "../../lib/format";
+import { canFormat, canFormatDocument, fileExt, formatCode, formatDocument } from "../../lib/format";
 import { fetchWorkspaceFile, useFileContent, useSaveFile, useWorkspaceSourceIndex } from "../../hooks/useSessionFiles";
 import { useTheme } from "../../store/theme";
 import { useEditorTabs } from "../../store/editorTabs";
 import type { FileChange } from "../../hooks/useSessionChanges";
 import { useEditorPreferences } from '../../store/editorPreferences';
 import { useEditorAppearance } from '../../hooks/useEditorAppearance';
+import { installWorkspaceRelations } from '../../lib/workspace-relations';
 import { navigationDirection, navigationShortcuts } from '../../lib/editor-keymap';
 import { Select } from '../common/Select';
 import { api } from '../../lib/api';
@@ -380,11 +382,13 @@ export function CodeEditor({
   async function doFormat() {
     if (readOnlyRef.current) return;
     const p = pathRef.current;
-    if (!p || !canFormat(p)) return;
+    if (!p || !canFormatDocument(p)) return;
     setFormatting(true);
     setFormatErr("");
     try {
-      const formatted = await formatCode(draftRef.current, p);
+      const snapshot = draftRef.current;
+      const formatted = await formatDocument(snapshot, p, input => requestWorkspaceLanguage(sessionRef.current!, 'format', input));
+      if (pathRef.current !== p || draftRef.current !== snapshot) throw Error('格式化期间文件已变化，请重试');
       setDraftContent(p, formatted);
     } catch (e) {
       setFormatErr(errText(e));
@@ -402,6 +406,17 @@ export function CodeEditor({
 
   const handleMount: OnMount = (editor, monaco) => {
     editorRef.current = editor;
+    installWorkspaceRelations(editor, monaco, {
+      request: input => sessionRef.current ? requestWorkspaceLanguage(sessionRef.current, 'related-locations', input) : Promise.resolve({}),
+      open: async (targetPath, line, column) => {
+        const currentSession = sessionRef.current; if (!currentSession) return;
+        const sourceModel = editor.getModel(), sourceVersion = sourceModel?.getVersionId();
+        await queryClient.fetchQuery({ queryKey: ['file', currentSession, targetPath], queryFn: () => fetchWorkspaceFile(currentSession, targetPath), staleTime: Infinity });
+        if (sessionRef.current !== currentSession || sourceModel?.isDisposed() || editor.getModel() !== sourceModel || sourceModel?.getVersionId() !== sourceVersion) return;
+        const model = editor.getModel(), position = editor.getPosition(), source = workspacePathFromUri(model?.uri);
+        useEditorTabs.getState().jumpToLocation(editorLocation(source || targetPath, position?.lineNumber || 1, position?.column || 1), editorLocation(targetPath, line, column));
+      },
+    });
     blame.attach(editor);
     monacoRef.current = monaco;
     setupIntelliSense(monaco); // 配置 TS/JS 智能补全
@@ -517,7 +532,7 @@ export function CodeEditor({
   }
 
   const ext = fileExt(path) || "txt";
-  const formattable = canFormat(path);
+  const formattable = canFormatDocument(path);
 
   return (
     <div className="flex h-full flex-col bg-white dark:bg-slate-900">
@@ -634,19 +649,10 @@ export function CodeEditor({
         ) : nonText && data && sessionId && path ? (
           <RemoteFilePreview sessionId={sessionId} path={path} view={{ kind: data.kind!, mime: data.mime || 'application/octet-stream', reason: data.reason, readOnly: true }} />
         ) : mode === "diff" && change ? (
-          <DiffEditor
+          <CodeDiffView
             key={"diff-" + path}
-            language={monacoLang(path)}
-            original={change.before}
-            modified={draft}
-            theme={editorTheme}
-            options={{
-              ...appearanceOptions,
-              readOnly: true,
-              renderSideBySide: true,
-              automaticLayout: true,
-              scrollBeyondLastLine: false,
-            }}
+            path={path || ''} before={change.before} after={draft} editable={!readOnly}
+            onChange={value => { if (path && !readOnly) setDraftContent(path, value); }}
           />
         ) : (
           <WorkspaceFileViewer path={path || ''} view={{ kind: 'text', mime: data?.mime || 'text/plain', language: data?.language, encoding: data?.encoding, bom: data?.bom }} content={draft} loadMarkdownImage={loadMarkdownImage} onMarkdownNavigate={navigateMarkdown} markdownAnchor={markdownTarget?.path === path ? markdownTarget.anchor : undefined} onMarkdownAnchorApplied={markdownAnchorApplied}>

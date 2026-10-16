@@ -59,6 +59,17 @@ class FastIndexStore {
     this.generation(generation);
     return stamp === undefined ? this.db.prepare('UPDATE files SET generation=? WHERE path=?').run(generation, relative(filePath)).changes : this.db.prepare('UPDATE files SET generation=?,stamp=? WHERE path=?').run(generation, stamp, relative(filePath)).changes;
   }
+  markSeenBatch(entries, generation) {
+    this.generation(generation);
+    if (!Array.isArray(entries) || entries.length > 128) throw new TypeError('Invalid validation batch');
+    return this.transaction(() => {
+      const update = this.db.prepare('UPDATE files SET generation=?,stamp=COALESCE(?,stamp) WHERE path=?');
+      for (const entry of entries) {
+        if (entry.stamp !== undefined && typeof entry.stamp !== 'string') throw new TypeError('Invalid validation stamp');
+        update.run(generation, entry.stamp ?? null, relative(entry.path));
+      }
+    });
+  }
   replace(filePath, stamp, hash, parsed, generation, rejected = false) {
     this.generation(generation); filePath = relative(filePath);
     if (typeof stamp !== 'string' || typeof hash !== 'string' || !parsed || !Array.isArray(parsed.symbols)) throw new TypeError('Invalid parsed file record');

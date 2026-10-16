@@ -2,6 +2,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
+const { performance } = require('node:perf_hooks');
 const { decodeText } = require('./file-text.cjs');
 const { abbreviation } = require('./fast-index-store.cjs');
 const { openRecoverableFastIndexStore } = require('./recoverable-fast-index-store.cjs');
@@ -37,7 +38,26 @@ class JavaFastIndex {
     if (epoch !== this.epoch || this.closed) return { cancelled: true };
     const generation = this.store.beginScan();
     const current = () => epoch === this.epoch && !this.closed;
+    // Commit metadata validation in bounded synchronous batches. Never hold a
+    // SQLite transaction across filesystem awaits or block live symbol queries.
+    const validated = [];
+    const flushValidated = () => { if (validated.length) { this.store.markSeenBatch(validated, generation); validated.length = 0; } };
+    const markValidated = (file, fileStamp) => {
+      validated.push({ path: file, stamp: fileStamp });
+      if (validated.length === 128) flushValidated();
+    };
     const counts = { discoveredFiles: 0, parsedFiles: 0, unchangedFiles: 0, rejectedFiles: 0, directoryErrors: 0 };
+    const startedAt = performance.now();
+    let reportedAt = -Infinity;
+    const report = () => {
+      const now = performance.now();
+      // Bound worker -> API traffic, including cached metadata validation.
+      if (!current() || now - reportedAt < 100) return;
+      reportedAt = now;
+      this.lastProgress = { ...this.store.status(), ...counts, state: 'scanning', complete: false, generation, elapsedMs: Math.round(now - startedAt) };
+      try { this.onProgress(this.lastProgress); } catch { /* Observers cannot corrupt indexing. */ }
+    };
+    report();
     const pending = [this.root];
     while (pending.length && current()) {
       const directory = pending.pop();
@@ -48,6 +68,7 @@ class JavaFastIndex {
         entries = await fs.promises.readdir(directory, { withFileTypes: true });
       }
       catch (error) { if (!['EACCES', 'EPERM', 'ENOENT', 'ENOTDIR'].includes(error.code)) throw error; counts.directoryErrors++; continue; }
+      report();
       entries.sort((a, b) => a.name.localeCompare(b.name));
       for (const entry of entries) {
         if (!current()) return { cancelled: true };
@@ -65,7 +86,7 @@ class JavaFastIndex {
           const previous = this.store.file(relative);
           if (previous?.stamp === fileStamp && !previous.rejected && !previous.truncated) {
             if (!current()) return { cancelled: true };
-            this.store.markSeen(relative, generation); counts.unchangedFiles++; continue;
+            markValidated(relative); counts.unchangedFiles++; continue;
           }
           if (stat.size > this.maxBytes) throw Object.assign(new Error('Source file exceeds byte budget'), { code: 'FAST_INDEX_FILE_TOO_LARGE' });
           handle = await fs.promises.open(absolute, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0));
@@ -87,7 +108,7 @@ class JavaFastIndex {
           hash = crypto.createHash('sha256').update(sourceBytes).digest('hex');
           if (!current()) return { cancelled: true };
           if (previous?.hash === hash && !previous.rejected && !previous.truncated) {
-            this.store.markSeen(relative, generation, fileStamp); counts.unchangedFiles++; continue;
+            markValidated(relative, fileStamp); counts.unchangedFiles++; continue;
           }
           const parser = await this.getParser();
           const parsed = parser.parse(source, relative);
@@ -97,13 +118,14 @@ class JavaFastIndex {
           if (!['EACCES', 'EPERM', 'ENOENT', 'ENOTDIR', 'ELOOP'].includes(error.code) && !String(error.code || '').startsWith('FAST_INDEX_')) throw error;
           if (!current()) return { cancelled: true };
           this.store.replace(relative, fileStamp, hash, { symbols: [], truncated: true }, generation, true); counts.rejectedFiles++;
-        } finally { await handle?.close(); }
-        try { this.onProgress({ ...counts, state: 'scanning', generation }); } catch { /* UI observers must not corrupt indexing. */ }
+        } finally { await handle?.close(); report(); }
       }
     }
     if (!current()) return { cancelled: true };
+    flushValidated();
     this.store.finishScan(generation, counts.directoryErrors);
-    const result = { ...counts, ...this.store.status() };
+    const result = { ...counts, ...this.store.status(), elapsedMs: Math.round(performance.now() - startedAt) };
+    this.lastProgress = result;
     try { this.onProgress(result); } catch {}
     return result;
   }
@@ -164,7 +186,10 @@ class JavaFastIndex {
     const overlay = parsed.find(document => document.path === normalized);
     return { items: overlay ? overlay.symbols : this.store.outline(normalized), index: this.store.status(), overlayApplied: !!overlay, overlayTruncated: !!overlay?.truncated };
   }
-  status() { return this.store.status(); }
+  status() {
+    const stored = this.store.status();
+    return this.lastProgress?.generation === stored.generation ? { ...this.lastProgress, ...stored } : stored;
+  }
   async close() {
     if (this.closePromise) return this.closePromise;
     this.closed = true; ++this.epoch;

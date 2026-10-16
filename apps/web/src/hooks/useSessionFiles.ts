@@ -58,6 +58,10 @@ export interface FastIndexStatus {
   files?: number;
   symbols?: number;
   complete: boolean;
+  discoveredFiles?: number;
+  parsedFiles?: number;
+  unchangedFiles?: number;
+  elapsedMs?: number;
 }
 export function isFastIndexLoading(index?: FastIndexStatus) {
   return !!index && ['starting', 'needs-scan', 'needs-validation', 'scanning'].includes(index.state);

@@ -1,0 +1,24 @@
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('node:fs/promises');
+const os = require('node:os');
+const path = require('node:path');
+const { createLocalApi } = require('../src/local-api.cjs');
+test('static endpoint discovery requires auth, scopes project and never starts Java language service', async t => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'api-discovery-http-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  await fs.writeFile(path.join(root, 'Controller.java'), 'import org.springframework.web.bind.annotation.*; @RestController class C { @GetMapping("/ping") void ping(){} }');
+  const events = [];
+  const api = await createLocalApi({ token: 'test-token', onLifecycle: event => events.push(event) });
+  t.after(() => api.close());
+  const project = api.registerWorkspace(root);
+  const url = `${api.origin}/api/local/projects/${project.id}/rest-endpoints`;
+  assert.equal((await fetch(url)).status, 401);
+  const headers = { Authorization: 'Bearer test-token' };
+  assert.equal((await fetch(`${api.origin}/api/local/projects/${'0'.repeat(24)}/rest-endpoints`, { headers })).status, 404);
+  const response = await fetch(url, { headers });
+  assert.equal(response.status, 200);
+  const result = await response.json();
+  assert.equal(result.items.length, 1); assert.equal(result.items[0].path, '/ping');
+  assert.equal(events.filter(e => e.event === 'spawn').length, 0);
+});

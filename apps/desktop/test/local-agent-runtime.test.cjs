@@ -7,7 +7,8 @@ const { cliInvocation, verifiedWorkspaceRoot } = require('../src/local-agent-run
 
 test('Codex invocation ignores project configuration and enforces its sandbox profile', () => {
   const readOnly = cliInvocation({ engine: 'codex-cli', model: '' }, 'inspect', 'read-only');
-  assert.ok(readOnly.args.includes('--ephemeral'));
+  assert.equal(readOnly.args.includes('--ephemeral'), false);
+  assert.equal(readOnly.stdin, 'inspect');
   assert.ok(readOnly.args.includes('--ignore-user-config'));
   assert.equal(readOnly.args[readOnly.args.indexOf('--sandbox') + 1], 'read-only');
   assert.equal(readOnly.args.includes('--dangerously-bypass-approvals-and-sandbox'), false);
@@ -24,6 +25,7 @@ test('Claude exposes only read tools until workspace editing is explicitly autho
   assert.equal(readOnly.args[readOnly.args.indexOf('--permission-mode') + 1], 'plan');
   assert.ok(readOnly.args.includes('--strict-mcp-config'));
   assert.ok(readOnly.args.includes('--disable-slash-commands'));
+  assert.equal(readOnly.args.includes('--no-session-persistence'), false);
 
   const writable = cliInvocation({ engine: 'claude-code', model: '' }, 'edit', 'workspace-write');
   const tools = writable.args[writable.args.indexOf('--tools') + 1];

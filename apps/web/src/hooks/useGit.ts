@@ -120,6 +120,7 @@ export interface ConflictHunk {
 }
 
 export interface ConflictDetail {
+  version?: string;
   path: string;
   conflictType:
     "content" | "both-added" | "deleted-by-us" | "deleted-by-them" | "other";
@@ -148,12 +149,14 @@ export function useRemoteSyncStatus(sessionId?: string) {
   });
 }
 
-export function useConflictDetail(sessionId?: string, path?: string) {
+export interface ConflictTransport { scope: string; detail: (path: string) => Promise<ConflictDetail>; resolve: (body: any) => Promise<any>; continue: () => Promise<any>; abort: () => Promise<any>; changed: () => void; }
+export function useConflictDetail(sessionId?: string, path?: string, transport?: ConflictTransport) {
   return useQuery<ConflictDetail>({
-    queryKey: ["git-conflict-detail", sessionId, path],
-    enabled: !!sessionId && !!path,
+    queryKey: ["git-conflict-detail", transport?.scope || sessionId, path],
+    enabled: !!(sessionId || transport) && !!path,
+    refetchOnWindowFocus: false,
     queryFn: async () =>
-      (
+      transport ? transport.detail(path!) : (
         await api.get(`/sessions/${sessionId}/git/conflicts/detail`, {
           params: { path },
         })
@@ -161,17 +164,18 @@ export function useConflictDetail(sessionId?: string, path?: string) {
   });
 }
 
-export function useResolveConflict(sessionId?: string) {
+export function useResolveConflict(sessionId?: string, transport?: ConflictTransport) {
   const qc = useQueryClient();
   return useMutation<
     { path: string; resolved: true; remaining: string[] },
     unknown,
-    { path: string; resolution: ConflictResolution; content?: string }
+    { path: string; resolution: ConflictResolution; content?: string; version?: string }
   >({
     mutationFn: async (body) =>
-      (await api.put(`/sessions/${sessionId}/git/conflicts/resolve`, body))
+      transport ? transport.resolve(body) : (await api.put(`/sessions/${sessionId}/git/conflicts/resolve`, body))
         .data,
     onSuccess: (result, variables) => {
+      if (transport) { qc.removeQueries({ queryKey: ['git-conflict-detail', transport.scope, variables.path] }); transport.changed(); return; }
       qc.setQueryData<RemoteSyncStatus | null>(
         ["git-sync-status", sessionId],
         (current) =>
@@ -193,9 +197,10 @@ export function useResolveConflict(sessionId?: string) {
   });
 }
 
-export function useRemoteSyncOps(sessionId?: string) {
+export function useRemoteSyncOps(sessionId?: string, transport?: ConflictTransport) {
   const qc = useQueryClient();
   const invalidate = () => {
+    transport?.changed();
     for (const key of [
       "git-sync-status",
       "git-branch",
@@ -223,13 +228,13 @@ export function useRemoteSyncOps(sessionId?: string) {
   });
   const continueMerge = useMutation({
     mutationFn: async () =>
-      (await api.post(`/sessions/${sessionId}/git/conflicts/continue`))
+      transport ? transport.continue() : (await api.post(`/sessions/${sessionId}/git/conflicts/continue`))
         .data as RemoteSyncStatus,
     onSuccess: invalidate,
   });
   const abortMerge = useMutation({
     mutationFn: async () =>
-      (await api.post(`/sessions/${sessionId}/git/conflicts/abort`))
+      transport ? transport.abort() : (await api.post(`/sessions/${sessionId}/git/conflicts/abort`))
         .data as RemoteSyncStatus,
     onSuccess: invalidate,
   });

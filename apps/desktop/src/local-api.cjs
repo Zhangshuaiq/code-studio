@@ -6,15 +6,21 @@ const path = require('node:path');
 const { spawn } = require('node:child_process');
 const ExcelJS = require('exceljs');
 const { LocalStore } = require('./local-store.cjs');
-const { LocalAgentRuntime } = require('./local-agent-runtime.cjs');
+const { LocalAgentRuntime, conversationBinding } = require('./local-agent-runtime.cjs');
 const { LocalPreviewRuntime } = require('./local-preview-runtime.cjs');
 const { LocalJavaRuntime } = require('./local-java-runtime.cjs');
+const { validateRequest: validateRestRequest, sendRequest: sendRestRequest } = require('./local-rest-client.cjs');
+const { discoverApis } = require('@codegen/code-intelligence/api-discovery.cjs');
+const { relatedLocations, closeRelations, invalidateRelations } = require('@codegen/code-intelligence/workspace-relations.cjs');
+const { indexChangeScope } = require('@codegen/code-intelligence/workspace-change-scope.cjs');
 const { JavaRunConfigurationStore } = require('./java-run-configuration.cjs');
 const { decodeText, encodeText, textEncoding } = require('@codegen/code-intelligence/file-text.cjs');
 const { JavaBreakpointConfigurationStore, relocateBreakpointPaths } = require('./java-breakpoint-configuration.cjs');
 const { LocalTerminalRuntime } = require('./local-terminal-runtime.cjs');
 const { LocalConnectorRuntime, validateConnector } = require('./local-connector-runtime.cjs');
 const { LocalGitHistory } = require('./local-git-history.cjs');
+const { compareBranches, branchFile, workingFile } = require('@codegen/code-intelligence/git-comparison.cjs');
+const gitMerge = require('@codegen/code-intelligence/git-merge.cjs');
 const { resolveGitRemote, checkGitRemotePolicy } = require('./local-git-policy.cjs');
 const { gitBlame } = require('@codegen/code-intelligence/git-blame.cjs');
 const { LocalLspManager } = require('./local-lsp-manager.cjs');
@@ -73,10 +79,15 @@ function createLocalApi(options = {}) {
   });
   const policyStatus = () => evaluatePolicy(store?.getSetting(POLICY_SETTING), { publicKey: options.policyPublicKey, now: typeof options.policyNow === 'function' ? options.policyNow() : options.policyNow, appVersion: options.appVersion });
   const credentialCodec = options.credentialCodec;
-  const lspManager = new LocalLspManager({ idleMs: options.lspIdleMs, dataRoot: options.lspDataRoot, onLifecycle: options.onLifecycle });
+  const lspManager = new LocalLspManager({ idleMs: options.lspIdleMs, dataRoot: options.lspDataRoot, javaMaxConcurrentBuilds: options.javaMaxConcurrentBuilds, javaSharedIndexRoot: options.javaSharedIndexRoot, onLifecycle: options.onLifecycle });
   const fastIndexRoot = options.fastIndexRoot || (options.storePath && path.join(path.dirname(options.storePath), 'fast-index'));
+  const relationsCacheRoot = options.relationsCacheRoot || (options.storePath && path.join(path.dirname(options.storePath), 'relations-index'));
   const fastIndex = fastIndexRoot ? new FastIndexManager({ directory: fastIndexRoot, maxWorkers: options.fastIndexMaxWorkers ?? 2, intervalMs: options.fastIndexIntervalMs ?? 120_000 }) : null;
-  const refreshFastIndex = project => { if (fastIndex) void fastIndex.invalidate(project).catch(() => {}); };
+  const refreshFastIndex = (project, changes) => {
+    const scope = indexChangeScope(changes);
+    if (scope.relations) invalidateRelations(project.path);
+    if (scope.java && fastIndex) void fastIndex.invalidate(project).catch(() => {});
+  };
   let closePromise;
   let closing = false;
   const workspaceIndex = new WorkspaceIndex({
@@ -84,7 +95,7 @@ function createLocalApi(options = {}) {
     directory: options.workspaceIndexRoot || (options.storePath ? path.join(path.dirname(options.storePath), 'workspace-index') : undefined),
     intervalMs: options.indexIntervalMs,
     onChanges: async (project, changes) => {
-      refreshFastIndex(project);
+      refreshFastIndex(project, changes);
       await lspManager.workspaceChanged(project, changes);
       void lspManager.refreshNavigation(project, workspaceIndex.pendingQueries(project));
     },
@@ -409,10 +420,17 @@ function createLocalApi(options = {}) {
         const project = projects.get(lspPrepareMatch[1]); if (!project) { json(response, 404, { code: 'LOCAL_PROJECT_NOT_FOUND', message: '项目不存在或尚未打开' }); return; }
         json(response, 200, await lspManager.prepareProject(project)); return;
       }
-      const lspMatch = url.pathname.match(/^\/api\/local\/projects\/([a-f0-9]{24})\/language\/(definition|declaration|type-definition|implementation|references|hover|completion|diagnostics|rename|code-actions|call-hierarchy-prepare|call-hierarchy-incoming|call-hierarchy-outgoing|document-symbols|workspace-symbols|fast-symbols|fast-document-symbols|index-status|index-refresh)$/);
+      const lspMatch = url.pathname.match(/^\/api\/local\/projects\/([a-f0-9]{24})\/language\/(format|definition|declaration|type-definition|implementation|references|hover|completion|completion-resolve|diagnostics|rename|code-actions|call-hierarchy-prepare|call-hierarchy-incoming|call-hierarchy-outgoing|document-symbols|workspace-symbols|fast-symbols|fast-document-symbols|index-status|index-refresh|related-locations)$/);
       if (lspMatch && (request.method === 'GET' || request.method === 'POST')) {
         const project = projects.get(lspMatch[1]); if (!project) { json(response, 404, { code: 'LOCAL_PROJECT_NOT_FOUND', message: '项目不存在或尚未打开' }); return; }
         const operation = lspMatch[2];
+        if (operation === 'related-locations') {
+          const input = request.method === 'POST' ? await readJsonBody(request, 1024 * 1024) : { path: url.searchParams.get('path') };
+          resolveWorkspaceFile(project.path, input.path);
+          try { json(response, 200, { result: await relatedLocations(project.path, input, { cacheDirectory: relationsCacheRoot }) }); }
+          catch { json(response, 400, { message: '文件关联查询未完成，请稍后重试' }); }
+          return;
+        }
         if (['fast-symbols', 'fast-document-symbols', 'index-status', 'index-refresh'].includes(operation)) {
           if (!fastIndex) { json(response, 503, { code: 'FAST_INDEX_UNAVAILABLE', message: '索引暂不可用' }); return; }
           if (operation === 'index-refresh') {
@@ -448,7 +466,7 @@ function createLocalApi(options = {}) {
           await lspManager.syncDocuments(project, body.documents);
         }
         const input = { ...body, path: body.path || body.item?.path || url.searchParams.get('path'), content: body.content, line: Number(body.line || url.searchParams.get('line') || 0), column: Number(body.column || url.searchParams.get('column') || 0) };
-        const positionRequired = !['document-symbols', 'diagnostics', 'call-hierarchy-incoming', 'call-hierarchy-outgoing'].includes(operation);
+        const positionRequired = !['format', 'document-symbols', 'diagnostics', 'call-hierarchy-incoming', 'call-hierarchy-outgoing'].includes(operation);
         if (!input.path || (positionRequired && (!Number.isInteger(input.line) || input.line < 1 || !Number.isInteger(input.column) || input.column < 1))) { json(response, 400, { code: 'LOCAL_LSP_REQUEST_INVALID', message: '代码位置无效' }); return; }
         if (operation === 'diagnostics') { json(response, 200, { result: await lspManager.diagnostics(project, input) }); return; }
         if (operation === 'rename') { json(response, 200, { result: await lspManager.rename(project, input) }); return; }
@@ -495,13 +513,42 @@ function createLocalApi(options = {}) {
         if (!terminalRuntime.resize(terminalMatch[1], body.cols, body.rows)) { json(response, 409, { code: 'LOCAL_TERMINAL_NOT_RUNNING', message: '终端已结束' }); return; } response.writeHead(204); response.end(); return;
       }
       if (terminalMatch && request.method === 'DELETE' && !terminalMatch[2]) { if (!terminalRuntime.close(terminalMatch[1])) { json(response, 404, { code: 'LOCAL_TERMINAL_NOT_FOUND', message: '终端会话已结束' }); return; } response.writeHead(204); response.end(); return; }
-      const javaRunMatch = url.pathname.match(/^\/api\/local\/projects\/([a-f0-9]{24})\/java-run(?:\/(configuration|configurations|breakpoint-configuration|targets|start|stop|continue|continueAll|next|stepIn|stepOut|pause|breakpoints|scopes|variables|evaluate|threads|selectThread))?$/);
+      const terminalListMatch = url.pathname.match(/^\/api\/local\/projects\/([a-f0-9]{24})\/terminals$/);
+      if (terminalListMatch && request.method === 'GET') {
+        if (!projects.has(terminalListMatch[1])) { json(response, 404, { message: '项目不存在' }); return; }
+        if (!policyAllows(policyStatus(), 'terminal')) { json(response, 403, policyDenied('当前企业策略不允许运行终端')); return; }
+        json(response, 200, { items: terminalRuntime.list(terminalListMatch[1]) }); return;
+      }
+      const discoveryMatch = url.pathname.match(/^\/api\/local\/projects\/([a-f0-9]{24})\/rest-endpoints$/);
+      if (discoveryMatch && request.method === 'GET') {
+        const project = projects.get(discoveryMatch[1]);
+        if (!project) { json(response, 404, { message: '项目不存在' }); return; }
+        try { json(response, 200, await discoverApis(project.path)); }
+        catch (error) { json(response, 400, { message: error.message }); }
+        return;
+      }
+      const restMatch = url.pathname.match(/^\/api\/local\/projects\/([a-f0-9]{24})\/rest-request$/);
+      if (restMatch && request.method === 'POST') {
+        if (!projects.has(restMatch[1])) { json(response, 404, { message: '项目不存在' }); return; }
+        let input; try { input = validateRestRequest(await readJsonBody(request, 512 * 1024)); } catch (error) { json(response, 400, { message: error.message }); return; }
+        const policy = policyStatus();
+        if (policy.enforcementRequired && !policy.policy.allowedNetworkHosts.includes(new URL(input.url).hostname.toLowerCase())) { json(response, 403, policyDenied('当前企业策略不允许访问此主机')); return; }
+        const cancellation = new AbortController(); const cancel = () => { if (!response.writableEnded) cancellation.abort(); }; response.on('close', cancel);
+        try { json(response, 200, await sendRestRequest(input, cancellation.signal)); }
+        catch (error) { if (!response.destroyed) json(response, 400, { message: error.cause?.code || error.message || '请求失败' }); }
+        finally { response.off('close', cancel); } return;
+      }
+      const javaRunMatch = url.pathname.match(/^\/api\/local\/projects\/([a-f0-9]{24})\/java-run(?:\/(environment|configuration|configurations|breakpoint-configuration|targets|start|stop|continue|continueAll|next|stepIn|stepOut|pause|breakpoints|scopes|variables|evaluate|threads|selectThread))?$/);
       if (javaRunMatch) {
         try {
         const project = projects.get(javaRunMatch[1]);
         if (!project) { json(response, 404, { message: '本地项目不存在' }); return; }
         if (!policyAllows(policyStatus(), 'terminal')) { json(response, 403, policyDenied('当前企业策略不允许运行程序')); return; }
         const action = javaRunMatch[2];
+        if (action === 'environment') {
+          if (request.method !== 'POST') { json(response, 405, { message: '不支持的 JDK 查询操作' }); return; }
+          json(response, 200, await javaRuntime.environment(project, await readJsonBody(request, 16 * 1024))); return;
+        }
         if (action === 'configurations') {
           if (request.method === 'GET') { json(response, 200, javaConfigurations.list(project)); return; }
           if (request.method === 'POST') { const body = await readJsonBody(request, 80 * 1024); json(response, 200, javaConfigurations.mutate(project, body)); return; }
@@ -545,11 +592,26 @@ function createLocalApi(options = {}) {
         if (!previewRuntime.stop(project.id)) { json(response, 409, { code: 'LOCAL_PREVIEW_NOT_RUNNING', message: '本地预览当前未运行' }); return; }
         json(response, 202, previewRuntime.inspect(project)); return;
       }
+      const conversationsMatch = url.pathname.match(/^\/api\/local\/projects\/([a-f0-9]{24})\/agent\/conversations$/);
+      if (conversationsMatch && ['GET', 'POST'].includes(request.method)) {
+        const project = projects.get(conversationsMatch[1]); if (!project || !store) { json(response, 404, { message: '项目不存在' }); return; }
+        if (request.method === 'GET') { json(response, 200, { items: store.listAgentConversations(project.id) }); return; }
+        if (agentRuntime.isProjectBusy(project.id)) { json(response, 409, { message: '请等待当前任务完成后新建对话' }); return; }
+        const body = await readJsonBody(request, 4096);
+        if (typeof body.modelConfigId !== 'string') { json(response, 400, { message: '请选择模型连接' }); return; }
+        const config = store.getModelConfig(body.modelConfigId);
+        if (!config) { json(response, 404, { message: '模型连接不存在' }); return; }
+        const conversation = store.createAgentConversation({ projectId: project.id, modelConfigId: config.id, engine: config.engine, bindingKey: conversationBinding(project, config) });
+        const { cliSessionId, cliPermission, bindingKey, ...publicConversation } = conversation;
+        json(response, 201, publicConversation); return;
+      }
       const projectTasksMatch = url.pathname.match(/^\/api\/local\/projects\/([a-f0-9]{24})\/agent\/tasks$/);
       if (projectTasksMatch && request.method === 'GET') {
         const project = projects.get(projectTasksMatch[1]);
         if (!project) { json(response, 404, { code: 'LOCAL_PROJECT_NOT_FOUND', message: '本地项目不存在或尚未打开' }); return; }
-        json(response, 200, { items: store?.listAgentTasks(project.id) || [] });
+        const conversationId = url.searchParams.get('conversationId');
+        if (conversationId && conversationId !== 'legacy' && store?.getAgentConversation(conversationId)?.projectId !== project.id) { json(response, 404, { message: '对话不存在' }); return; }
+        json(response, 200, { items: store?.listAgentTasks(project.id, 50, conversationId) || [] });
         return;
       }
       if (projectTasksMatch && request.method === 'POST') {
@@ -571,10 +633,21 @@ function createLocalApi(options = {}) {
         if (configRow.engine !== 'codex-cli' && (body.model !== undefined || body.reasoningEffort !== undefined)) { json(response, 400, { code: 'LOCAL_AGENT_MODEL_OVERRIDE_UNSUPPORTED', message: '当前模型平台不支持任务级模型切换' }); return; }
         const activePolicy = policyStatus(); if (!policyAllows(activePolicy, 'model', configRow.engine)) { json(response, 403, policyDenied('当前企业策略不允许运行该模型平台')); return; }
         const blockedHost = firstBlockedNetworkHost(activePolicy, modelHosts(configRow)); if (blockedHost) { json(response, 403, policyDenied(`当前企业策略不允许访问模型主机 ${blockedHost}`)); return; }
-        const task = { id: crypto.randomBytes(12).toString('hex'), projectId: project.id, modelConfigId: configRow.id, prompt, permissionProfile, selectedModel: selectedModel || null, reasoningEffort, status: 'queued', createdAt: new Date().toISOString() };
+        const bindingKey = conversationBinding(project, configRow);
+        let conversation;
+        if (body.conversationId !== undefined) {
+          if (typeof body.conversationId !== 'string' || !/^[a-f0-9]{24}$/.test(body.conversationId)) { json(response, 400, { message: '对话标识无效' }); return; }
+          conversation = store.getAgentConversation(body.conversationId);
+          if (!conversation || conversation.projectId !== project.id || conversation.modelConfigId !== configRow.id || conversation.bindingKey !== bindingKey) { json(response, 409, { message: '该对话不属于当前项目或模型连接已变化，请新建对话' }); return; }
+        } else {
+          conversation = store.listAgentConversations(project.id).filter(item => item.modelConfigId === configRow.id).map(item => store.getAgentConversation(item.id)).find(item => item.bindingKey === bindingKey);
+          if (!conversation) conversation = store.createAgentConversation({ projectId: project.id, modelConfigId: configRow.id, engine: configRow.engine, bindingKey });
+        }
+        const task = { id: crypto.randomBytes(12).toString('hex'), conversationId: conversation.id, projectId: project.id, modelConfigId: configRow.id, prompt, permissionProfile, selectedModel: selectedModel || null, reasoningEffort, status: 'queued', createdAt: new Date().toISOString() };
         const config = { ...resolvePrivateModelConfig(configRow, credentialCodec), model: selectedModel, reasoningEffort };
         store.createAgentTask(task);
-        agentRuntime.start(task, project, config);
+        try { agentRuntime.start(task, project, config); }
+        catch (error) { store.updateAgentTask(task.id, 'failed', { error: '对话启动失败，请重新尝试', finishedAt: new Date().toISOString() }); throw error; }
         json(response, 202, store.getAgentTask(task.id));
         return;
       }
@@ -625,7 +698,7 @@ function createLocalApi(options = {}) {
         if (fs.existsSync(target.absolute)) { json(response, 409, { code: 'LOCAL_FILE_EXISTS', message: '同名文件或文件夹已存在' }); return; }
         if (body.type === 'directory') fs.mkdirSync(target.absolute);
         else fs.writeFileSync(target.absolute, '', { encoding: 'utf8', flag: 'wx' });
-        refreshFastIndex(project);
+        refreshFastIndex(project, body.type === 'directory' ? undefined : [{ path: target.relativePath, type: 1 }]);
         json(response, 201, { path: target.relativePath, type: body.type }); return;
       }
       if (request.method === 'DELETE' && filesMatch) {
@@ -635,7 +708,7 @@ function createLocalApi(options = {}) {
         const stat = fs.lstatSync(target.absolute);
         if (stat.isSymbolicLink()) { json(response, 400, { code: 'LOCAL_FILE_SYMLINK_FORBIDDEN', message: '不允许通过工作区删除符号链接' }); return; }
         if (stat.isDirectory()) fs.rmSync(target.absolute, { recursive: true, force: false }); else fs.unlinkSync(target.absolute);
-        refreshFastIndex(project);
+        refreshFastIndex(project, stat.isDirectory() ? undefined : [{ path: target.relativePath, type: 3 }]);
         response.writeHead(204); response.end(); return;
       }
       if (request.method === 'PATCH' && filesMatch) {
@@ -682,6 +755,35 @@ function createLocalApi(options = {}) {
       const spreadsheetMatch = url.pathname.match(/^\/api\/local\/projects\/([a-f0-9]{24})\/spreadsheet$/);
       const searchMatch = url.pathname.match(/^\/api\/local\/projects\/([a-f0-9]{24})\/search$/);
       const symbolsMatch = url.pathname.match(/^\/api\/local\/projects\/([a-f0-9]{24})\/symbols$/);
+      const mergeMatch = url.pathname.match(/^\/api\/local\/projects\/([a-f0-9]{24})\/git\/(merge|conflicts\/(detail|resolve|continue|abort))$/);
+      if (mergeMatch) {
+        const project = projects.get(mergeMatch[1]); if (!project) { json(response, 404, { message: '项目不存在' }); return; }
+        try {
+          let result;
+          if (mergeMatch[3] === 'detail' && request.method === 'GET') result = await gitMerge.detail(project.path, url.searchParams.get('path'));
+          else if (request.method === 'POST') {
+            const body = await readJsonBody(request, 2 * 1024 * 1024);
+            result = await gitHistory.mutate(project.path, async () => {
+              const value = mergeMatch[3] === 'resolve' ? await gitMerge.resolve(project.path, body) : await gitMerge.merge(project.path, mergeMatch[3] || 'start', body.branch);
+              await workspaceIndex.get(project, true); return value;
+            });
+          } else { json(response, 405, { message: '请求方法无效' }); return; }
+          json(response, 200, result);
+        } catch (error) { json(response, 400, { message: error.message }); }
+        return;
+      }
+      const comparisonMatch = url.pathname.match(/^\/api\/local\/projects\/([a-f0-9]{24})\/git\/(compare|working-diff)$/);
+      if (comparisonMatch && request.method === 'GET') {
+        const project = projects.get(comparisonMatch[1]); if (!project) { json(response, 404, { message: '项目不存在' }); return; }
+        try {
+          const input = url.searchParams, file = input.get('path');
+          const result = comparisonMatch[2] === 'working-diff' ? await workingFile(project.path, file, input.get('stage') || 'working')
+            : file ? await branchFile(project.path, input.get('left'), input.get('right'), file, input.get('oldPath'))
+            : await compareBranches(project.path, input.get('left'), input.get('right'), Number(input.get('offset') || 0));
+          json(response, 200, result);
+        } catch (error) { json(response, 400, { message: error.message }); }
+        return;
+      }
       const gitStatusMatch = url.pathname.match(/^\/api\/local\/projects\/([a-f0-9]{24})\/git\/status$/);
       const gitBlameMatch = url.pathname.match(/^\/api\/local\/projects\/([a-f0-9]{24})\/git\/blame$/);
       if (request.method === 'POST' && gitBlameMatch) {
@@ -900,7 +1002,7 @@ function createLocalApi(options = {}) {
         const encoded = encodeText(body.content, textEncoding(current));
         try { fs.writeFileSync(temporary, encoded, { mode }); fs.renameSync(temporary, file); }
         finally { if (fs.existsSync(temporary)) fs.unlinkSync(temporary); }
-        refreshFastIndex(project);
+        refreshFastIndex(project, [{ path: body.path, type: 2 }]);
         await lspManager.saved(project, body.path);
         json(response, 200, { saved: true, path: body.path, version: fileVersion(encoded) });
         return;
@@ -982,6 +1084,7 @@ function createLocalApi(options = {}) {
               phase('terminal-stopped', () => terminalRuntime.shutdown()),
               phase('index-flushed', () => workspaceIndex.close()),
               phase('fast-index-stopped', () => fastIndex?.close()),
+              phase('file-relations-stopped', () => closeRelations()),
               phase('java-debug-stopped', () => javaRuntime.shutdown()),
             ]);
             await phase('language-services-stopped', () => lspManager.shutdown());
@@ -1385,6 +1488,7 @@ async function gitStatus(root) {
     upstream: branchMatch?.[2] || null,
     ahead: Number(branchMatch?.[3] || 0),
     behind: Number(branchMatch?.[4] || branchMatch?.[5] || 0),
+    ...(await gitMerge.status(root)),
     files,
   };
 }

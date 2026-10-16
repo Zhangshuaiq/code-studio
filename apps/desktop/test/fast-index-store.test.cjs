@@ -13,6 +13,22 @@ async function fixture(t) {
   t.after(() => { store.close(); parser.close(); fs.rmSync(directory, { recursive: true, force: true }); });
   return { directory, parser, get store() { return store; }, reopen(version) { store.close(); store = new FastIndexStore(path.join(directory, 'symbols.sqlite3'), directory, version); return store; } };
 }
+test('bounded validation batches preserve stamps, roll back invalid entries and reject stale scans', async t => {
+  const f = await fixture(t);
+  let generation = f.store.beginScan();
+  for (const file of ['A.java', 'B.java']) f.store.replace(file, 'old', 'hash', f.parser.parse('class A {}', file), generation);
+  f.store.finishScan(generation);
+  const oldGeneration = generation; generation = f.store.beginScan();
+  assert.throws(() => f.store.markSeenBatch([{ path: 'A.java' }], oldGeneration), { code: 'FAST_INDEX_STALE' });
+  assert.throws(() => f.store.markSeenBatch([{ path: 'A.java', stamp: 'bad-update' }, { path: '../outside.java' }], generation));
+  assert.equal(f.store.file('A.java').stamp, 'old');
+  f.store.markSeenBatch([{ path: 'A.java' }, { path: 'B.java', stamp: 'new' }], generation);
+  f.store.finishScan(generation);
+  assert.equal(f.store.status().files, 2);
+  assert.equal(f.store.file('A.java').stamp, 'old');
+  assert.equal(f.store.file('B.java').stamp, 'new');
+  assert.throws(() => f.store.markSeenBatch(Array(129).fill({ path: 'A.java' }), generation), /batch/);
+});
 test('persistent symbol store searches substring, short names and camel abbreviation and restores metadata', async t => {
   const f = await fixture(t); const generation = f.store.beginScan();
   const source = 'package demo; class CustomerOrderService { void buildOrder(){} String 中文; }';

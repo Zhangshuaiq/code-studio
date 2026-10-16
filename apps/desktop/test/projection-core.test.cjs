@@ -1,0 +1,21 @@
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const path = require('node:path');
+const fs = require('node:fs');
+const os = require('node:os');
+const { execFile } = require('node:child_process');
+const { promisify } = require('node:util');
+const core = path.resolve(__dirname, '../../../packages/code-intelligence/.cache/jdtls/1.61.0/plugins/org.eclipse.jdt.core_3.47.0.v20260828-1141.jar');
+test('isolated core projection verifies bytecode, copy-on-write, budgets and concurrent invalidation', { skip: !fs.existsSync(core) }, async t => {
+  const { stdout } = await promisify(execFile)(process.execPath, [path.resolve(__dirname, '../scripts/build-projection-core-experiment.cjs'), '--test-only'], { timeout: 30000, maxBuffer: 1024 * 1024 });
+  const rows = stdout.trim().split('\n').map(line => JSON.parse(line));
+  const result = rows.at(-1), directory = fs.realpathSync(result.directory);
+  assert.ok(directory.startsWith(fs.realpathSync(os.tmpdir()) + path.sep));
+  assert.match(path.basename(directory), /^jdt-projection-core-/);
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  assert.equal(rows[0].patchedExactlyOneMethod, true);
+  assert.equal(rows[1].projectionAndPatchedClassVerificationPassed, true);
+  assert.notEqual(result.originalSha, result.patchedSha);
+  assert.equal(result.controlHome, undefined);
+  assert.ok(fs.statSync(result.patchedJar).isFile());
+});

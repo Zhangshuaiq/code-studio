@@ -21,7 +21,6 @@ import {
   CodeXml,
   Eye,
   File,
-  FileCode2,
   FilePlus2,
   Pencil,
   Folder,
@@ -29,7 +28,6 @@ import {
   FolderPlus,
   GitBranch,
   History,
-  ExternalLink,
   LoaderCircle,
   RefreshCw,
   Regex,
@@ -47,6 +45,9 @@ import {
   workspacePathFromUri,
 } from "../../lib/monaco";
 import { useTheme } from "../../store/theme";
+import { useFolderExpansion } from '../../hooks/useFolderExpansion';
+import { canFormatDocument, formatDocument } from '../../lib/format';
+import { DesktopRestClient } from './DesktopRestClient';
 import { DesktopLocalAgentPanel } from "./DesktopLocalAgentPanel";
 import { DesktopLocalPreview } from "./DesktopLocalPreview";
 import { DesktopLocalOutputPanel } from "./DesktopLocalOutputPanel";
@@ -55,10 +56,13 @@ import { useDesktopJavaRun, breakpointLine, breakpointCondition, breakpointHitCo
 import { Select } from "../common/Select";
 import { useFeedback } from "../common/FeedbackProvider";
 import { HistoryPanel } from "../HistoryPanel/HistoryPanel";
+import { GitCompareModal, WorkingDiffModal } from '../SourceControl/GitCompareModal';
+import { ConflictResolverModal } from '../HistoryPanel/ConflictResolverModal';
 import type { GitHistoryTransport } from "../../hooks/useGit";
 import { appendNavigation, restoreNavigation } from "../../lib/editor-navigation";
 import { navigationDirection, navigationShortcuts } from "../../lib/editor-keymap";
 import { useEditorPreferences } from "../../store/editorPreferences";
+import { installWorkspaceRelations } from '../../lib/workspace-relations';
 import { collectJavaDrafts } from '../../lib/fast-index-drafts';
 import { buildWorkspaceFileTree } from '../../lib/workspace-file-tree';
 import { verifyFastSymbolTarget, staleFastSymbol } from '../../lib/fast-symbol-target';
@@ -95,6 +99,8 @@ interface GitFile {
   worktreeStatus: string;
 }
 interface GitStatus {
+  conflicts?: string[];
+  mergeInProgress?: boolean;
   repository: boolean;
   branch: string | null;
   head?: string | null;
@@ -195,6 +201,7 @@ export function DesktopLocalWorkspace({
   const markdownRequest = useRef(0);
   useEffect(() => () => { markdownRequest.current++; }, [project.id]);
   const [error, setError] = useState("");
+  const [formatting, setFormatting] = useState(false);
   const [searchInput, setSearchInput] = useState("");
   const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
   const [searching, setSearching] = useState(false);
@@ -220,18 +227,20 @@ export function DesktopLocalWorkspace({
   const shortcuts = navigationShortcuts(navigationKeymap, navigator.platform);
   const [sidebarMode, setSidebarMode] = useState<"files" | "git">("files");
   const [workspaceTab, setWorkspaceTab] = useState<
-    "code" | "preview" | "history"
+    "code" | "preview" | "history" | "rest"
   >("code");
   const [terminalOpen, setTerminalOpen] = useState(false);
+  const [restOpened, setRestOpened] = useState(false);
   const [gitStatus, setGitStatus] = useState<GitStatus>();
   const [gitLoading, setGitLoading] = useState(false);
   const [gitSelection, setGitSelection] = useState<Set<string>>(new Set());
   const [commitMessage, setCommitMessage] = useState("");
   const [gitDiff, setGitDiff] = useState<{
     path: string;
-    working: string;
-    staged: string;
   }>();
+  const [showGitCompare, setShowGitCompare] = useState(false);
+  const [showGitResolver, setShowGitResolver] = useState(false);
+  const [mergeBranch, setMergeBranch] = useState('');
   const [gitRefs, setGitRefs] = useState<GitRefs>({
     branches: [],
     remotes: [],
@@ -241,6 +250,7 @@ export function DesktopLocalWorkspace({
   const [editor, setEditor] = useState<any>();
   const [monaco, setMonaco] = useState<any>();
   const activePathRef = useRef<string>();
+  const runPanelSize = useRef(35);
   const openFileRef = useRef<
     (
       path: string,
@@ -289,11 +299,18 @@ export function DesktopLocalWorkspace({
   }, [monaco, project.id]);
   useEffect(() => {
     if (!editor || !monaco || !activePath) return;
-    const collection = editor.createDecorationsCollection([
-      ...(javaRun.breakpoints[activePath] || []).map((point) => ({ range: new monaco.Range(breakpointLine(point), 1, breakpointLine(point), 1), options: { isWholeLine: false, glyphMarginClassName: `desktop-java-breakpoint${breakpointCondition(point) || breakpointHitCondition(point) ? ' desktop-java-breakpoint-conditional' : ''}${breakpointLogMessage(point) ? ' desktop-java-logpoint' : ''}`, glyphMarginHoverMessage: { value: ['断点（点击移除，右键编辑）', breakpointCondition(point) && `条件：${breakpointCondition(point)}`, breakpointHitCondition(point) && `命中次数：${breakpointHitCondition(point)}`, breakpointLogMessage(point) && `日志：${breakpointLogMessage(point)}`].filter(Boolean).join('\n\n') } } })),
-      ...(javaRun.pausedFrame?.path === activePath ? [{ range: new monaco.Range(javaRun.pausedFrame.line, 1, javaRun.pausedFrame.line, 1), options: { isWholeLine: true, className: "desktop-java-current-line" } }] : []),
-    ]);
-    return () => collection.clear();
+    const collection = editor.createDecorationsCollection();
+    const render = () => {
+      if (workspacePathFromUri(editor.getModel()?.uri) !== activePath) { collection.clear(); return; }
+      collection.set([
+      ...(activePath.endsWith('.java') && !activePath.startsWith('@java-source/') ? [monaco.editor.GlyphMarginLane.Center, monaco.editor.GlyphMarginLane.Right].map(position => ({ range: new monaco.Range(1, 1, 1, 1), options: { glyphMarginClassName: 'desktop-java-debug-lane', glyphMargin: { position, persistLane: true } } })) : []),
+      ...(javaRun.breakpoints[activePath] || []).map((point) => ({ range: new monaco.Range(breakpointLine(point), 1, breakpointLine(point), 1), options: { isWholeLine: false, glyphMargin: { position: monaco.editor.GlyphMarginLane.Center, persistLane: true }, glyphMarginClassName: `desktop-java-breakpoint${breakpointCondition(point) || breakpointHitCondition(point) ? ' desktop-java-breakpoint-conditional' : ''}${breakpointLogMessage(point) ? ' desktop-java-logpoint' : ''}`, glyphMarginHoverMessage: { value: ['断点（点击移除，右键编辑）', breakpointCondition(point) && `条件：${breakpointCondition(point)}`, breakpointHitCondition(point) && `命中次数：${breakpointHitCondition(point)}`, breakpointLogMessage(point) && `日志：${breakpointLogMessage(point)}`].filter(Boolean).join('\n\n') } } })),
+      ...(javaRun.pausedFrame?.path === activePath ? [{ range: new monaco.Range(javaRun.pausedFrame.line, 1, javaRun.pausedFrame.line, 1), options: { isWholeLine: true, className: "desktop-java-current-line", glyphMarginClassName: 'desktop-java-execution-pointer', glyphMargin: { position: monaco.editor.GlyphMarginLane.Right, persistLane: true } } }] : []),
+      ]);
+    };
+    const changed = editor.onDidChangeModel(render);
+    render();
+    return () => { changed.dispose(); collection.clear(); };
   }, [editor, monaco, activePath, javaRun.breakpoints, javaRun.pausedFrame]);
   const openRequestRef = useRef(0);
   const treeRevisionRef = useRef(0);
@@ -302,6 +319,21 @@ export function DesktopLocalWorkspace({
   const editorRef = useRef<any>();
   const fileStatesRef = useRef(fileStates);
   fileStatesRef.current = fileStates;
+  async function formatActiveFile() {
+    const editor = editorRef.current, model = editor?.getModel();
+    const file = workspacePathFromUri(model?.uri);
+    if (!file || !canFormatDocument(file) || fileStatesRef.current[file]?.view.readOnly || formatting) return;
+    const snapshot = model.getValue(), version = model.getVersionId(); setFormatting(true); setError('');
+    try {
+      const formatted = await formatDocument(snapshot, file, async input => {
+        const response = await fetch(`/api/local/projects/${project.id}/language/format`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input) });
+        const body = await response.json(); if (!response.ok) throw Error(body.message || '语言服务格式化失败'); return body;
+      });
+      if (model.isDisposed() || editor.getModel() !== model || model.getVersionId() !== version) throw Error('格式化期间文件已变化，请重试');
+      editor.pushUndoStop(); editor.executeEdits('format-document', [{ range: model.getFullModelRange(), text: formatted }]); editor.pushUndoStop();
+    } catch (reason: any) { setError(reason.message || '格式化失败'); } finally { setFormatting(false); }
+  }
+  const formatActiveRef = useRef(formatActiveFile); formatActiveRef.current = formatActiveFile;
   const refreshGitFilesRef = useRef<() => Promise<void>>(async () => {});
   const historyTransport = useMemo<GitHistoryTransport>(() => {
     const base = `/api/local/projects/${project.id}/git`;
@@ -1228,17 +1260,23 @@ export function DesktopLocalWorkspace({
   }
 
   async function showGitDiff(path: string) {
-    try {
-      const response = await fetch(
-        `/api/local/projects/${project.id}/git/diff?path=${encodeURIComponent(path)}`,
-      );
-      const body = await response.json();
-      if (!response.ok)
-        throw new Error(body.message || `HTTP ${response.status}`);
-      setGitDiff(body);
-    } catch (reason: any) {
-      setError(String(reason?.message || reason));
-    }
+    setGitDiff({ path });
+  }
+
+  async function readGit(endpoint: string, params: Record<string, string>, signal?: AbortSignal) {
+    const response = await fetch(`/api/local/projects/${project.id}/git/${endpoint}?${new URLSearchParams(params)}`, { signal });
+    const body = await response.json(); if (!response.ok) throw new Error(body.message || 'Git 操作失败'); return body;
+  }
+  async function mutateGit(endpoint: string, input: any = {}) {
+    if (Object.values(fileStatesRef.current).some(file => file.content !== file.savedContent && !file.view.readOnly)) throw new Error('请先保存或关闭未保存的编辑器草稿');
+    const response = await fetch(`/api/local/projects/${project.id}/git/${endpoint}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input) });
+    const body = await response.json(); if (!response.ok) throw new Error(body.message || 'Git 操作失败'); return body;
+  }
+  async function startMerge() {
+    if (!mergeBranch || !window.confirm(`将 ${mergeBranch} 合并到 ${gitStatus?.branch}？合并结果需要手动确认提交。`)) return;
+    setGitLoading(true);
+    try { const result = await mutateGit('merge', { branch: mergeBranch }); await loadGitStatus(); if (result.mergeInProgress) setShowGitResolver(true); }
+    catch (reason: any) { setError(reason.message); } finally { setGitLoading(false); }
   }
 
   async function commitSelected() {
@@ -1376,8 +1414,17 @@ export function DesktopLocalWorkspace({
     onMove: (path: string, isDir: boolean) => { void treeActionsRef.current.moveWorkspaceEntry(path, isDir); },
   }), []);
   function mountEditor(instance: any, monacoInstance: any) {
+    installWorkspaceRelations(instance, monacoInstance, {
+      request: async input => {
+        const documents = Object.entries(fileStatesRef.current).filter(([path, file]) => /\.(java|xml)$/.test(path) && path !== input.path && file.content !== file.savedContent).map(([path, file]) => ({ path, content: file.content }));
+        const response = await fetch(`/api/local/projects/${project.id}/language/related-locations`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...input, documents }) });
+        if (!response.ok) throw Error('文件关联查询暂不可用'); return response.json();
+      },
+      open: (path, line, column) => openFileRef.current(path, line, column),
+    });
     blame.attach(instance);
     editorRef.current = instance;
+    instance.addCommand(monacoInstance.KeyMod.Shift | monacoInstance.KeyMod.Alt | monacoInstance.KeyCode.KeyF, () => void formatActiveRef.current());
     setEditor(instance);
     setMonaco(monacoInstance);
     const cursorListener = instance.onDidChangeCursorPosition((event: any) => {
@@ -1465,6 +1512,10 @@ export function DesktopLocalWorkspace({
       void navigateToDefinition(instance, event.target.position);
     });
     instance.addAction({
+      id: 'desktop-toggle-breakpoint', label: '切换断点', keybindings: [monacoInstance.KeyCode.F9], contextMenuGroupId: 'navigation', contextMenuOrder: 8,
+      run: (current: any) => { const file = workspacePathFromUri(current.getModel()?.uri), line = current.getPosition()?.lineNumber; if (file?.endsWith('.java') && !file.startsWith('@java-source/') && line) javaRun.toggleBreakpoint.current(file, line); },
+    });
+    instance.addAction({
       id: "desktop-open-definition",
       label: "转到定义",
       keybindings: [monacoInstance.KeyCode.F12],
@@ -1492,7 +1543,7 @@ export function DesktopLocalWorkspace({
             <DesktopLocalAgentPanel projectId={project.id} onFilesChanged={() => { void reloadWorkspaceFiles(); void loadGitStatus(); }} />
           </div>
         </WorkspaceChatPanel>
-        <Panel minSize={30}>
+        <Panel id="workspace-content" order={2} minSize={30}>
           <section className="flex h-full min-w-0 flex-col bg-white dark:bg-slate-900">
             <header className="flex min-h-14 shrink-0 flex-wrap items-center gap-x-2 gap-y-1 border-b border-slate-200 px-3 py-2 dark:border-slate-800">
               <button
@@ -1564,9 +1615,11 @@ export function DesktopLocalWorkspace({
                   <History size={14} />
                   历史
                 </WorkspaceTab>
+                <WorkspaceTab active={workspaceTab === 'rest'} onClick={() => { setRestOpened(true); setWorkspaceTab('rest'); }}>API 调试</WorkspaceTab>
               </div>
               <div className="ml-auto flex items-center gap-2">
                 {workspaceTab === 'code' && javaRun.toolbar}
+                {workspaceTab === 'code' && <button className="btn btn-ghost btn-sm" title="格式化（Shift+Alt+F）" aria-label="格式化当前文件" disabled={!activePath || !canFormatDocument(activePath) || fileView.readOnly || formatting} onClick={() => void formatActiveFile()}>{formatting ? '格式化…' : '格式化'}</button>}
                 <GitBlameDetails item={blame.selected} onClose={blame.close} load={async (hash, signal) => { const response = await fetch(`/api/local/projects/${project.id}/git/commits/${hash}/diff`, { signal }); const body = await response.json(); if (!response.ok) throw new Error(body.message || '无法加载提交改动'); return body; }} />
                 {workspaceTab === 'code' && <button className="btn btn-ghost btn-sm" disabled={nativeBlameUnsupported} title={nativeBlameUnsupported ? 'UTF-16 文件暂不支持 Git 行注释' : undefined} aria-pressed={blame.enabled} onClick={blame.toggle}>行注释</button>}
                 {workspaceTab === 'code' && blame.status && <span role="status" className="max-w-48 truncate text-[10px] text-muted" title={blame.status}>{blame.status}</span>}
@@ -1705,55 +1758,20 @@ export function DesktopLocalWorkspace({
                 </div>
               </div>
             )}
-            {gitDiff && (
-              <div
-                className="fixed inset-0 z-40 flex justify-center bg-slate-950/45 px-6 py-[8vh]"
-                onMouseDown={(event) => {
-                  if (event.target === event.currentTarget)
-                    setGitDiff(undefined);
-                }}
-              >
-                <div className="flex w-full max-w-5xl flex-col overflow-hidden rounded-2xl border border-slate-700 bg-slate-950 text-slate-100 shadow-2xl">
-                  <div className="flex items-center border-b border-slate-800 px-4 py-3">
-                    <GitBranch size={15} className="mr-2" />
-                    <span className="min-w-0 flex-1 truncate text-xs font-semibold">
-                      {gitDiff.path}
-                    </span>
-                    <button
-                      type="button"
-                      className="btn btn-ghost btn-sm mr-2"
-                      onClick={() => {
-                        const path = gitDiff.path;
-                        setGitDiff(undefined);
-                        setWorkspaceTab("code");
-                        setSidebarMode("files");
-                        void openFile(path);
-                      }}
-                      title="在编辑器中打开完整源码"
-                    >
-                      <ExternalLink size={13} />
-                      打开源码
-                    </button>
-                    <button
-                      type="button"
-                      className="icon-btn"
-                      onClick={() => setGitDiff(undefined)}
-                    >
-                      <X size={14} />
-                    </button>
-                  </div>
-                  <pre className="min-h-0 flex-1 overflow-auto p-4 font-mono text-[11px] leading-5">
-                    <code>
-                      {gitDiff.staged ? `# 已暂存\n${gitDiff.staged}\n` : ""}
-                      {gitDiff.working ||
-                        (!gitDiff.staged
-                          ? "该文件暂无可显示的文本差异（可能是未跟踪文件或二进制文件）。"
-                          : "")}
-                    </code>
-                  </pre>
-                </div>
-              </div>
-            )}
+            {showGitCompare && <GitCompareModal scope={`local:${project.id}`} current={gitStatus?.branch || 'HEAD'} branches={gitRefs.branches} load={(params, signal) => readGit('compare', params, signal)} onClose={() => setShowGitCompare(false)} />}
+            {showGitResolver && <ConflictResolverModal conflicts={gitStatus?.conflicts || []} onClose={() => setShowGitResolver(false)} transport={{ scope: `local:${project.id}`, detail: path => readGit('conflicts/detail', { path }), resolve: body => mutateGit('conflicts/resolve', body), continue: () => mutateGit('conflicts/continue'), abort: () => mutateGit('conflicts/abort'), changed: () => { void refreshAfterGitChange().catch(reason => setError(reason.message)); } }} />}
+            {gitDiff && <WorkingDiffModal scope={`local:${project.id}`} path={gitDiff.path} load={(params, signal) => readGit('working-diff', params, signal)} onClose={() => setGitDiff(undefined)} onApply={async (value, baseline) => {
+              const file = gitDiff.path;
+              const current = fileStatesRef.current[file];
+              if (current && current.content !== current.savedContent) throw new Error('文件有未保存草稿，请先保存或撤销');
+              const disk = await readGit('working-diff', { path: file, stage: 'working' });
+              if (disk.after !== baseline || !disk.exists) throw new Error('文件已变化，请重新打开对比');
+              await openFile(file);
+              const state = fileStatesRef.current[file]; if (!state || state.view.readOnly) throw new Error('无法编辑此文件');
+              if (state.content !== baseline) throw new Error('文件内容已更新，请重新打开对比');
+              const next = { ...fileStatesRef.current, [file]: { ...state, content: value } }; fileStatesRef.current = next; setFileStates(next); setContent(value); setWorkspaceTab('code');
+              const model = monaco?.editor.getModel(monaco.Uri.parse(workspaceModelUri(project.id, file))); model?.pushEditOperations([], [{ range: model.getFullModelRange(), text: value }], () => null);
+            }} />}
             {indexTruncated && (
               <div className="flex items-center border-b border-amber-200 bg-amber-50 px-4 py-2 text-xs text-amber-700 dark:border-amber-900 dark:bg-amber-950/30 dark:text-amber-300">
                 大型项目的后台代码索引已按资源上限加载；未索引文件仍可从文件树打开并使用代码导航。
@@ -1894,7 +1912,7 @@ export function DesktopLocalWorkspace({
                           </div>
                           <div className="flex shrink-0 items-center gap-2 border-t border-slate-200 px-3 py-2 dark:border-slate-800">
                             <GitBranch size={13} className="text-slate-400" />
-                            {gitStatus?.repository ? <Select ariaLabel="当前分支" className="min-w-0 flex-1" buttonClassName="border-0 bg-transparent shadow-none" size="sm" value={gitStatus.branch || ""} disabled={gitLoading} onChange={(branch) => void checkoutBranch(branch)} options={gitRefs.branches.map((branch) => ({ value: branch, label: branch }))} /> : <span className="min-w-0 flex-1 truncate text-[11px] text-slate-400">非 Git 仓库</span>}
+                            {gitStatus?.repository ? <Select ariaLabel="当前分支" searchable searchPlaceholder="搜索分支" menuMinWidth={320} className="min-w-0 flex-1" buttonClassName="border-0 bg-transparent shadow-none" size="sm" value={gitStatus.branch || ""} disabled={gitLoading} onChange={(branch) => void checkoutBranch(branch)} options={gitRefs.branches.map((branch) => ({ value: branch, label: branch }))} /> : <span className="min-w-0 flex-1 truncate text-[11px] text-slate-400">非 Git 仓库</span>}
                             {gitStatus?.files.length ? <button type="button" className="rounded-md bg-amber-100 px-1.5 py-0.5 text-[9px] font-bold text-amber-700 dark:bg-amber-500/15 dark:text-amber-300" onClick={() => { setWorkspaceTab("code"); setSidebarMode("git"); }}>{gitStatus.files.length} 项变更</button> : null}
                           </div>
                         </>
@@ -1934,11 +1952,17 @@ export function DesktopLocalWorkspace({
                             <>
                               <div className="space-y-2 border-b border-slate-200 p-2 dark:border-slate-800">
                                 <div className="flex gap-1">
+                                  <button className="btn btn-secondary btn-sm flex-1" onClick={() => setShowGitCompare(true)}>对比分支</button>
+                                  {gitStatus.mergeInProgress || gitStatus.conflicts?.length ? <button className="btn btn-secondary btn-sm flex-1" onClick={() => setShowGitResolver(true)}>解决冲突 / 完成合并</button> : null}
+                                </div>
+                                {!gitStatus.mergeInProgress && <div className="flex gap-1"><Select ariaLabel="待合并分支" searchable searchPlaceholder="搜索待合并分支" className="min-w-0 flex-1" size="sm" value={mergeBranch} onChange={setMergeBranch} options={[{value:'',label:'选择合并来源'}, ...gitRefs.branches.filter(branch => branch !== gitStatus.branch).map(branch => ({value:branch,label:branch}))]} /><button className="btn btn-secondary btn-sm" disabled={!mergeBranch || gitLoading} onClick={() => void startMerge()}>合并</button></div>}
+                                <div className="flex gap-1">
                                   <Select
                                     ariaLabel="当前分支"
                                     className="min-w-0 flex-1"
                                     size="sm"
                                     value={gitStatus.branch || ""}
+                                    searchable searchPlaceholder="搜索分支" menuMinWidth={320}
                                     disabled={gitLoading}
                                     onChange={(branch) => void checkoutBranch(branch)}
                                     options={gitRefs.branches.map((branch) => ({ value: branch, label: branch }))}
@@ -2102,7 +2126,7 @@ export function DesktopLocalWorkspace({
                               className={`group flex max-w-56 shrink-0 items-center gap-2 border-r border-slate-200 px-3 text-[10px] dark:border-slate-800 ${activePath === path ? "bg-white font-semibold text-indigo-700 dark:bg-slate-950 dark:text-indigo-300" : "text-slate-500 hover:bg-white/70 dark:hover:bg-slate-800"}`}
                               title={path}
                             >
-                              <FileCode2 size={12} />
+                              <WorkspaceFileIcon path={path} size={13} />
                               <span className="truncate">
                                 {path.split("/").pop()}
                               </span>
@@ -2126,7 +2150,9 @@ export function DesktopLocalWorkspace({
                         })}
                       </div>
                     )}
-                    <div className="min-h-0 flex-1">
+                    <PanelGroup direction="vertical">
+                    <Panel id="workspace-editor" order={1} minSize={15}>
+                    <div className="h-full min-h-0">
                       {activePath && monacoLang(activePath) === 'sql' && <WorkspaceSqlBinding key={project.id} scope={workspaceSqlScope('local', project.id)} projectId={project.id} content={content} local active={active} />}
                       {loadingFile ? (
                         <div className="grid h-full place-items-center text-sm text-slate-400">
@@ -2185,15 +2211,25 @@ export function DesktopLocalWorkspace({
                         </div>
                       )}
                     </div>
-                    {workspaceTab === "code" && javaRun.panel}
+                    </Panel>
+                    {workspaceTab === "code" && javaRun.panel && <>
+                      <PanelResizeHandle className="resize-handle-y" aria-label="调整运行面板高度" />
+                      <Panel id="java-run-output" order={2} defaultSize={runPanelSize.current} minSize={15} maxSize={80} onResize={size => { if (size > 0) runPanelSize.current = size; }}>{javaRun.panel}</Panel>
+                    </>}
                     {workspaceTab === "code" && terminalOpen && (
-                      <div className="relative h-[34%] min-h-40 shrink-0 border-t border-slate-700">
+                      <>
+                      <PanelResizeHandle className="resize-handle-y" aria-label="调整终端面板高度" />
+                      <Panel id="terminal-output" order={3} defaultSize={34} minSize={15} maxSize={80}>
+                      <div className="relative h-full min-h-0 border-t border-slate-700">
                         <DesktopLocalOutputPanel
                           projectId={project.id}
                           onClose={() => setTerminalOpen(false)}
                         />
                       </div>
+                      </Panel>
+                      </>
                     )}
+                    </PanelGroup>
                   </section>
                 </Panel>
               </PanelGroup>
@@ -2208,6 +2244,7 @@ export function DesktopLocalWorkspace({
               <DesktopLocalPreview projectId={project.id} />
             </div>
             {workspaceTab === 'history' && <div className="min-h-0 flex-1"><HistoryPanel transport={historyTransport} /></div>}
+            {restOpened && <div className={workspaceTab === 'rest' ? 'min-h-0 flex-1' : 'hidden min-h-0 flex-1'}><DesktopRestClient projectId={project.id} /></div>}
             <DesktopLanguageStatus projectId={project.id} active={active} includeFastIndex={!!activePath && monacoLang(activePath) === 'java'} />
           </section>
         </Panel>
@@ -2268,6 +2305,7 @@ const LocalFileTree = memo(function LocalFileTree({
   onMove: (path: string, isDir: boolean) => void;
 }) {
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; node: LocalTreeNode }>();
+  const expansion = useFolderExpansion(projectName);
   useEffect(() => { if (!active) setContextMenu(undefined); }, [active]);
   const root = useMemo<LocalTreeNode>(
     () => ({
@@ -2290,7 +2328,7 @@ const LocalFileTree = memo(function LocalFileTree({
   return (
     <>
       <ul className="py-2">
-        <LocalTreeItem node={root} depth={0} selected={selected} onSelect={onSelect} onContextMenu={(event, node) => { event.preventDefault(); const row = event.currentTarget.getBoundingClientRect(); setContextMenu({ x: Math.min(event.clientX, row.right), y: row.top, node }); }} />
+        <LocalTreeItem node={root} depth={0} expansion={expansion} selected={selected} onSelect={onSelect} onContextMenu={(event, node) => { event.preventDefault(); const row = event.currentTarget.getBoundingClientRect(); setContextMenu({ x: Math.min(event.clientX, row.right), y: row.top, node }); }} />
       </ul>
       {contextMenu && createPortal(<div role="menu" className="fixed z-[1000] min-w-40 overflow-hidden rounded-xl border border-slate-200 bg-white py-1 text-[11px] shadow-2xl dark:border-slate-700 dark:bg-slate-900" style={{ left: Math.max(8, Math.min(contextMenu.x, window.innerWidth - 180)), top: Math.max(8, Math.min(contextMenu.y, window.innerHeight - (contextMenu.node.isDir ? 158 : 86))) }} onPointerDown={(event) => event.stopPropagation()}>
         {contextMenu.node.isDir && <><ContextAction icon={<FilePlus2 size={13}/>} label="新建文件" onClick={() => { onCreate(contextMenu.node.path, "file"); setContextMenu(undefined); }}/><ContextAction icon={<FolderPlus size={13}/>} label="新建文件夹" onClick={() => { onCreate(contextMenu.node.path, "directory"); setContextMenu(undefined); }}/></>}
@@ -2301,26 +2339,28 @@ const LocalFileTree = memo(function LocalFileTree({
 });
 
 function LocalTreeItem({
+  expansion,
   node,
   depth,
   selected,
   onSelect,
   onContextMenu,
 }: {
+  expansion: ReturnType<typeof useFolderExpansion>;
   node: LocalTreeNode;
   depth: number;
   selected?: string;
   onSelect: (path: string) => void;
   onContextMenu: (event: ReactMouseEvent, node: LocalTreeNode) => void;
 }) {
-  const [open, setOpen] = useState(depth <= 1);
+  const open = expansion.isOpen(node.path, depth);
   const padding = { paddingLeft: `${depth * 12 + 12}px` };
   if (node.isDir)
     return (
       <li>
         <button
           type="button"
-          onClick={() => setOpen((value) => !value)}
+          onClick={() => expansion.toggle(node.path, depth)}
           aria-expanded={open}
           onContextMenu={(event) => onContextMenu(event, node)}
           style={padding}
@@ -2344,6 +2384,7 @@ function LocalTreeItem({
           <ul className="min-h-0 overflow-hidden">
             {open && node.children.map((child) => (
               <LocalTreeItem
+                expansion={expansion}
                 key={child.path}
                 node={child}
                 depth={depth + 1}

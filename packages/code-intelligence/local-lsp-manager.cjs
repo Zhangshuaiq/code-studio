@@ -7,6 +7,10 @@ const { supportsBashLanguage } = require('./shell-language.cjs');
 const { pathToFileURL, fileURLToPath } = require('node:url');
 const { createMessageConnection, StreamMessageReader, StreamMessageWriter } = require('vscode-jsonrpc/node');
 const { spawnGuarded } = require('./guarded-process.cjs');
+const { languageRequest, cancelLanguageRequests } = require('./language-request.cjs');
+const { updateLanguageProgress, registerLanguageProgress } = require('./language-progress.cjs');
+const { validChange, javaRelevant } = require('./workspace-change-scope.cjs');
+const { buildConcurrency, sharedIndexArguments, flightRecordingArguments, garbageCollectorArguments } = require('./java-index-tuning.cjs');
 
 const LANGUAGE_PROVIDERS = new Map([
   ['.ts', 'typescript'], ['.tsx', 'typescript'], ['.js', 'typescript'], ['.jsx', 'typescript'], ['.mjs', 'typescript'], ['.cjs', 'typescript'], ['.py', 'python'], ['.java', 'java'],
@@ -24,6 +28,8 @@ class LocalLspManager {
     this.dataRoot = options.dataRoot || path.join(os.tmpdir(), 'code-studio-language-data');
     this.commands = options.commands || {};
     this.resources = options.resources || {};
+    this.diagnosticJavaBundles = trustedJavaBundles(this.resources.diagnosticJavaBundles);
+    this.javaGcArguments = garbageCollectorArguments(options.javaGcProfile);
     this.maxSessions = options.maxSessions || Infinity;
     this.javaSources = new Map();
     this.navigationCache = options.navigationCache;
@@ -34,8 +40,12 @@ class LocalLspManager {
     this.javaAutobuild = options.javaAutobuild !== false;
     // Restore/import cached projects before scheduling a workspace-wide build.
     this.deferJavaAutobuild = options.deferJavaAutobuild !== false;
+    this.javaMaxConcurrentBuilds = buildConcurrency(options.javaMaxConcurrentBuilds);
+    this.javaSharedIndexRoot = options.javaSharedIndexRoot;
     this.onLifecycle = options.onLifecycle;
     this.stoppingSessions = new Set();
+    this.stoppingByKey = new Map();
+    this.blockedRestarts = new Map();
     this.projectStatuses = new Map();
   }
 
@@ -65,6 +75,13 @@ class LocalLspManager {
     const session = await this.#session(project, provider);
     await this.#syncDocument(session, file, input.content);
     this.#touch(session);
+    if (operation === 'completion-resolve') {
+      const entry = session.completionItems?.get(input.item?.token);
+      if (!entry || entry.file !== file || entry.content !== session.documents.get(pathToFileURL(file).href) || Date.now() - entry.created > 120_000) return null;
+      if (!session.capabilities?.completionProvider?.resolveProvider) return entry.item;
+      return await languageRequest(session, 'completionItem/resolve', entry.item);
+    }
+    if (operation === 'format') return await languageRequest(session, 'textDocument/formatting', { textDocument: { uri: pathToFileURL(file).href }, options: { tabSize: 4, insertSpaces: true } });
     const position = input.line ? { line: Math.max(0, input.line - 1), character: Math.max(0, (input.column || 1) - 1) } : undefined;
     const params = { textDocument: { uri: pathToFileURL(file).href }, ...(position ? { position } : {}) };
     const methods = {
@@ -116,6 +133,17 @@ class LocalLspManager {
         }
       }
     }
+    if (operation === 'completion') {
+      session.completionItems ||= new Map();
+      const items = Array.isArray(result) ? result : result?.items || [];
+      const proposals = items.slice(0, 500).map(item => {
+        const token = crypto.randomBytes(18).toString('hex');
+        session.completionItems.set(token, { item, file, content: session.documents.get(params.textDocument.uri), created: Date.now() });
+        return { ...item, resolveToken: token };
+      });
+      while (session.completionItems.size > 1500) session.completionItems.delete(session.completionItems.keys().next().value);
+      return Array.isArray(result) ? proposals : { ...result, items: proposals };
+    }
     if (process.env.CODE_STUDIO_LSP_DEBUG === '1') process.stderr.write(`[language:${operation}] ${JSON.stringify(result)}\n`);
     const normalized = Array.isArray(result) && result.some((item) => item?.path) ? result : this.#normalize(session.root, result, session);
     if (cacheContext && !hasDirtyBuffers()) await this.navigationCache.setNavigation(project, operation, { ...input, content: session.documents.get(params.textDocument.uri) }, normalized, cacheContext.revision).catch(() => {});
@@ -162,7 +190,7 @@ class LocalLspManager {
     const { file, provider } = this.#file(project, input.path); const session = await this.#session(project, provider);
     await this.#syncDocument(session, file, input.content); this.#touch(session);
     if (typeof input.newName !== 'string' || !input.newName.trim() || input.newName.length > 200 || /[\r\n\0]/.test(input.newName)) throw Object.assign(new Error('新名称无效'), { code: 'LOCAL_LSP_REQUEST_INVALID' });
-    const edit = await session.connection.sendRequest('textDocument/rename', { textDocument: { uri: pathToFileURL(file).href }, position: lspPosition(input), newName: input.newName });
+    const edit = await languageRequest(session, 'textDocument/rename', { textDocument: { uri: pathToFileURL(file).href }, position: lspPosition(input), newName: input.newName });
     const result = this.#workspaceEdit(session.root, edit);
     if (provider === 'java') {
       // Some servers omit RenameFile when the client does not advertise file
@@ -193,7 +221,7 @@ class LocalLspManager {
     await this.#syncDocument(session, file, input.content); this.#touch(session);
     const start = lspPosition(input); const end = { line: Math.max(start.line, Number(input.endLine || input.line) - 1), character: Math.max(0, Number(input.endColumn || input.column) - 1) };
     const diagnostics = Array.isArray(input.diagnostics) ? input.diagnostics.slice(0, 100) : [];
-    const actions = await session.connection.sendRequest('textDocument/codeAction', { textDocument: { uri: pathToFileURL(file).href }, range: { start, end }, context: { diagnostics, only: ['quickfix'], triggerKind: 1 } });
+    const actions = await languageRequest(session, 'textDocument/codeAction', { textDocument: { uri: pathToFileURL(file).href }, range: { start, end }, context: { diagnostics, only: ['quickfix'], triggerKind: 1 } });
     return (actions || []).slice(0, 100).map((action) => ({ title: action.title, kind: action.kind, isPreferred: action.isPreferred, disabled: action.disabled, edit: this.#workspaceEdit(session.root, action.edit) })).filter((action) => action.edit?.edits?.length);
   }
 
@@ -203,13 +231,13 @@ class LocalLspManager {
     if (operation === 'prepare') { await this.#syncDocument(session, file, input.content); params = { textDocument: { uri: pathToFileURL(file).href }, position: lspPosition(input) }; }
     else params = { item: restoreLspItem(session.root, input.item) };
     const method = operation === 'prepare' ? 'textDocument/prepareCallHierarchy' : operation === 'incoming' ? 'callHierarchy/incomingCalls' : 'callHierarchy/outgoingCalls';
-    return this.#normalize(session.root, await session.connection.sendRequest(method, params));
+    return this.#normalize(session.root, await languageRequest(session, method, params));
   }
 
   async workspaceSymbols(project, query) {
     const providers = detectProviders(project.path); const results = await Promise.all(providers.map(async (provider) => {
       const session = await this.#session(project, provider); this.#touch(session);
-      return this.#normalize(session.root, await session.connection.sendRequest('workspace/symbol', { query }));
+      return this.#normalize(session.root, await languageRequest(session, 'workspace/symbol', { query }));
     }));
     return results.flat().map(flattenSymbolLocation).filter(Boolean).slice(0, 500);
   }
@@ -224,13 +252,19 @@ class LocalLspManager {
   }
 
   projectStatus(project) {
-    return { providers: [...this.projectStatuses.values()].filter((item) => item.projectId === project.id).map(({ startedAt, ...item }) => ({ ...item, elapsedMs: Math.round(performance.now() - startedAt) })) };
+    return { providers: [...this.projectStatuses.values()].filter((item) => item.projectId === project.id).map(({ startedAt, ...item }) => {
+      const session = this.sessions.get(`${item.projectId}:${item.provider}`);
+      return { ...item, elapsedMs: Math.round(performance.now() - startedAt), ...(session?.startupTimings ? { startupTimings: { ...session.startupTimings }, backgroundTasks: session.progressTasks?.size || 0 } : {}) };
+    }) };
   }
 
   async javaCommand(project, command, args = []) {
-    if (!['vscode.java.resolveMainClass', 'vscode.java.resolveClasspath', 'vscode.java.buildWorkspace', 'vscode.java.startDebugSession', 'vscode.java.resolveJavaExecutable'].includes(command)) throw new Error('不支持的 Java 命令');
+    if (!['java.project.getSettings', 'vscode.java.resolveMainClass', 'vscode.java.resolveClasspath', 'vscode.java.buildWorkspace', 'vscode.java.startDebugSession', 'vscode.java.resolveJavaExecutable'].includes(command)) throw new Error('不支持的 Java 命令');
     const session = await this.#session(project, 'java'); this.#touch(session);
-    return session.connection.sendRequest('workspace/executeCommand', { command, arguments: args });
+    // Builds are intentionally allowed a longer budget than interactive queries.
+    // All commands participate in shutdown cancellation, including main discovery.
+    const timeoutMs = command === 'vscode.java.buildWorkspace' ? 600_000 : command === 'vscode.java.startDebugSession' ? 60_000 : session.requestTimeoutMs ?? 15_000;
+    return languageRequest(session, 'workspace/executeCommand', { command, arguments: args }, timeoutMs);
   }
 
   async javaBuild(project, target, fullBuild = false) {
@@ -263,13 +297,15 @@ class LocalLspManager {
   async workspaceChanged(project, changes) {
     // Only notify running servers; a periodic scan must not start idle runtimes.
     const root = fs.realpathSync(project.path);
-    const files = changes.filter((item) => typeof item.path === 'string' && !path.isAbsolute(item.path))
-      .map((item) => ({ uri: pathToFileURL(path.resolve(root, item.path)).href, type: item.type }));
+    const validChanges = changes.filter(validChange);
     await Promise.all([...this.sessions.values()].filter((session) => session.projectId === project.id).map(async (entry) => {
       try {
+        const relevant = entry.provider === 'java' ? validChanges.filter(javaRelevant) : validChanges;
+        if (!relevant.length) return;
+        const files = relevant.map(item => ({ uri: pathToFileURL(path.resolve(root, item.path)).href, type: item.type }));
         const session = await entry.ready;
         session.projectGraphs?.clear();
-        for (const change of changes) {
+        for (const change of relevant) {
           if (change.type !== 2) continue;
           const file = path.resolve(root, change.path);
           const uri = pathToFileURL(file).href;
@@ -321,10 +357,17 @@ class LocalLspManager {
 
   async #session(project, provider) {
     if (this.shuttingDown) throw Object.assign(new Error('语言服务正在关闭'), { code: 'LOCAL_LSP_UNAVAILABLE' });
-    const key = `${project.id}:${provider}`; const existing = this.sessions.get(key);
+    const key = `${project.id}:${provider}`;
+    // A replacement must never open the same persistent workspace while its
+    // previous JVM is flushing indexes or still holding the workspace lock.
+    const stopping = this.stoppingByKey.get(key);
+    if (stopping) await stopping;
+    if (this.shuttingDown) throw Object.assign(new Error('语言服务正在关闭'), { code: 'LOCAL_LSP_UNAVAILABLE' });
+    if (this.blockedRestarts.has(key)) throw Object.assign(new Error('上一代码智能进程尚未退出，请稍后重试；可以继续编辑'), { code: 'LOCAL_LSP_UNAVAILABLE' });
+    const existing = this.sessions.get(key);
     if (existing) return existing.ready;
     if (this.sessions.size >= this.maxSessions) throw Object.assign(new Error('语言服务繁忙，请稍后重试'), { code: 'LSP_CAPACITY_EXCEEDED' });
-    const session = { key, projectId: project.id, provider, resources: this.resources, root: fs.realpathSync(project.path), documents: new Map(), diagnostics: new Map(), diagnosticVersions: new Map(), diagnosticWaiters: new Map(), version: 0, stopping: false };
+    const session = { key, projectId: project.id, provider, resources: { ...this.resources, sharedIndexRoot: this.javaSharedIndexRoot, javaGcArguments: this.javaGcArguments }, root: fs.realpathSync(project.path), documents: new Map(), diagnostics: new Map(), diagnosticVersions: new Map(), diagnosticWaiters: new Map(), version: 0, stopping: false };
     session.ready = this.#start(session);
     this.sessions.set(key, session);
     try { return await session.ready; } catch (error) {
@@ -336,6 +379,7 @@ class LocalLspManager {
 
   async #start(session) {
     session.startedAt = performance.now();
+    session.startupTimings = {};
     session.javaAutobuildEnabled = this.javaAutobuild && !this.deferJavaAutobuild;
     this.#lifecycle(session, 'spawn');
     const invocation = languageServerInvocation(session, this.dataRoot, this.commands);
@@ -345,21 +389,23 @@ class LocalLspManager {
     if (process.platform === 'win32' && process.env.SystemRoot) env.SystemRoot = process.env.SystemRoot;
     const child = spawnGuarded(invocation.command, invocation.args, { cwd: session.root, env, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
     session.child = child;
-    child.stderr.on('data', (chunk) => { if (process.env.CODE_STUDIO_LSP_DEBUG === '1') process.stderr.write(chunk); });
+    child.stderr.on('data', (chunk) => {
+      const marker = 'CODE_STUDIO_INDEX_GUARD_APPLIED';
+      if (session.resources.indexThreadGuardJar && !session.indexGuardApplied) {
+        const text = (session.guardMarkerTail || '') + chunk.toString('utf8');
+        session.guardMarkerTail = text.slice(-(marker.length - 1));
+        if (text.includes(marker)) { session.indexGuardApplied = true; session.guardMarkerTail = ''; this.#lifecycle(session, 'index-guard-applied'); }
+      }
+      if (process.env.CODE_STUDIO_LSP_DEBUG === '1') process.stderr.write(chunk);
+    });
     session.connection = createMessageConnection(new StreamMessageReader(child.stdout), new StreamMessageWriter(child.stdin));
-    session.connection.onRequest('workspace/configuration', (params) => (params?.items || []).map((item) => session.provider === 'java' && item?.section === 'java' ? javaSettings(session.javaAutobuildEnabled).java : session.provider === 'bash' && item?.section === 'bashIde' ? bashSettings() : {}));
+    session.connection.onRequest('workspace/configuration', (params) => (params?.items || []).map((item) => session.provider === 'java' && item?.section === 'java' ? javaSettings(session.javaAutobuildEnabled, this.javaMaxConcurrentBuilds).java : session.provider === 'bash' && item?.section === 'bashIde' ? bashSettings() : {}));
     session.connection.onRequest('client/registerCapability', () => null);
     session.connection.onRequest('window/workDoneProgress/create', () => null);
-    session.connection.onNotification('language/progress', (progress) => {
-      const status = this.projectStatuses.get(session.key);
-      if (!status || session.stopping) return;
-      if (!session.progressTasks) session.progressTasks = new Map();
-      if (progress?.complete) session.progressTasks.delete(progress.id);
-      else session.progressTasks.set(progress?.id, progress);
-      const current = [...session.progressTasks.values()].at(-1);
-      if (current) Object.assign(status, { phase: 'indexing', message: '正在更新项目索引' });
-      else if (session.serviceReady) Object.assign(status, { phase: 'ready', message: '代码智能已就绪' });
-    });
+    registerLanguageProgress(session.connection, progress => updateLanguageProgress(
+      session, this.projectStatuses.get(session.key), progress,
+      (event, fields) => this.#lifecycle(session, event, fields),
+    ));
     session.buildMessages = [];
     const rememberBuildMessage = (event) => { if (event?.type <= 2 && typeof event.message === 'string') { session.buildMessages.push(event.message.slice(0, 8000)); if (session.buildMessages.length > 50) session.buildMessages.shift(); } };
     session.connection.onNotification('window/logMessage', rememberBuildMessage);
@@ -369,11 +415,12 @@ class LocalLspManager {
     session.connection.onNotification('language/status', (status) => {
       this.#lifecycle(session, 'java-status', { status: String(status?.type || '').slice(0, 80) });
       if (/serviceready/i.test(`${status?.type || ''} ${status?.message || ''}`)) {
+        if (session.serviceReady) return; // Replay must not restart readiness timing/build activation.
         session.serviceReady = true;
         this.#lifecycle(session, 'project-ready'); markJavaReady?.();
         if (this.javaAutobuild && !session.javaAutobuildEnabled && !session.stopping && !this.shuttingDown) {
           session.javaAutobuildEnabled = true;
-          session.autobuildActivation = session.connection.sendNotification('workspace/didChangeConfiguration', { settings: javaSettings(true) })
+          session.autobuildActivation = session.connection.sendNotification('workspace/didChangeConfiguration', { settings: javaSettings(true, this.javaMaxConcurrentBuilds) })
             .then(() => this.#lifecycle(session, 'autobuild-enabled'))
             .catch(() => { session.javaAutobuildEnabled = false; this.#lifecycle(session, 'autobuild-enable-failed'); });
         }
@@ -396,25 +443,26 @@ class LocalLspManager {
       }
     });
     this.#lifecycle(session, 'initialize-sent');
-    await waitForLanguageServer(session.connection.sendRequest('initialize', {
+    const initialized = await waitForLanguageServer(session.connection.sendRequest('initialize', {
       processId: null, rootUri: pathToFileURL(session.root).href,
       workspaceFolders: [{ uri: pathToFileURL(session.root).href, name: path.basename(session.root) }],
       capabilities: {
         workspace: { configuration: true, workspaceFolders: true, applyEdit: false, symbol: {} },
-        textDocument: { definition: { linkSupport: true }, declaration: {}, typeDefinition: {}, implementation: {}, references: {}, hover: {}, completion: { completionItem: { snippetSupport: false } }, documentSymbol: {}, callHierarchy: {}, publishDiagnostics: { relatedInformation: true }, synchronization: { didOpen: true, didChange: true } },
+        textDocument: { definition: { linkSupport: true }, declaration: {}, typeDefinition: {}, implementation: {}, references: {}, hover: {}, completion: { completionItem: { snippetSupport: true, resolveSupport: { properties: ['documentation', 'detail', 'additionalTextEdits'] } } }, documentSymbol: {}, callHierarchy: {}, publishDiagnostics: { relatedInformation: true }, synchronization: { didOpen: true, didChange: true } },
       },
       initializationOptions: session.provider === 'java'
-        ? { settings: javaSettings(session.javaAutobuildEnabled), bundles: [resolveJavaTool('java-debug.jar', session.resources)], extendedClientCapabilities: { classFileContentsSupport: true, progressReportProvider: true, shouldLanguageServerExitOnShutdown: true } }
+        ? { settings: javaSettings(session.javaAutobuildEnabled, this.javaMaxConcurrentBuilds), bundles: [resolveJavaTool('java-debug.jar', session.resources), ...this.diagnosticJavaBundles], extendedClientCapabilities: { classFileContentsSupport: true, progressReportProvider: true, shouldLanguageServerExitOnShutdown: true } }
         : session.provider === 'vue'
           ? { typescript: { tsdk: path.dirname(require.resolve('typescript/lib/typescript.js')), disableAutoImportCache: false }, vue: { hybridMode: false } }
           : session.provider === 'bash'
             ? bashSettings()
             : undefined,
     }), child, session.provider, session.provider === 'java' ? this.javaInitializationMs : this.initializationMs);
+    session.capabilities = initialized?.capabilities || {};
     if (session.stopping || this.shuttingDown) throw Object.assign(new Error('语言服务正在关闭'), { code: 'LOCAL_LSP_UNAVAILABLE' });
     this.#lifecycle(session, 'initialize-complete');
     await session.connection.sendNotification('initialized', {});
-    if (session.provider === 'java') await session.connection.sendNotification('workspace/didChangeConfiguration', { settings: javaSettings(session.javaAutobuildEnabled) });
+    if (session.provider === 'java') await session.connection.sendNotification('workspace/didChangeConfiguration', { settings: javaSettings(session.javaAutobuildEnabled, this.javaMaxConcurrentBuilds) });
     if (session.provider === 'java') await Promise.race([javaReady, unrefDelay(this.javaReadyMs)]);
     // Only await writing the configuration notification, never a build job.
     if (session.autobuildActivation) await session.autobuildActivation;
@@ -495,6 +543,21 @@ class LocalLspManager {
 
   #touch(session) { clearTimeout(session.timer); if (session.leases > 0 || session.stopping) return; session.timer = setTimeout(() => void this.#stop(session), this.idleMs); session.timer.unref?.(); }
   #lifecycle(session, event, extra = {}) {
+    const elapsedMs = Math.round(performance.now() - session.startedAt);
+    if (session.startupTimings) {
+      if (event === 'initialize-sent') session.initializeSentMs = elapsedMs;
+      if (event === 'initialize-complete') {
+        session.initializedMs = elapsedMs;
+        session.startupTimings.protocolInitializationMs = Math.max(0, elapsedMs - (session.initializeSentMs || 0));
+        if (session.startupTimings.serviceReadyMs !== undefined) session.startupTimings.projectImportMs = Math.max(0, session.startupTimings.serviceReadyMs - elapsedMs);
+      }
+      if (event === 'project-ready' && session.startupTimings.serviceReadyMs === undefined) {
+        session.startupTimings.serviceReadyMs = elapsedMs;
+        // Some servers send ServiceReady before the initialize response.
+        if (session.initializedMs !== undefined) session.startupTimings.projectImportMs = Math.max(0, elapsedMs - session.initializedMs);
+      }
+      if (event === 'autobuild-enabled') session.startupTimings.autobuildEnabledMs = elapsedMs;
+    }
     const phases = { spawn: ['initializing', '正在启动代码智能'], 'initialize-complete': ['importing', '正在加载项目与缓存索引'], 'project-ready': ['ready', '代码智能已就绪'], ready: ['ready', '代码智能已就绪'], stopped: ['idle', '代码智能已暂停，使用时自动恢复'] };
     const next = phases[event];
     if (next) {
@@ -502,17 +565,23 @@ class LocalLspManager {
       const importing = event === 'ready' && session.provider === 'java' && !session.serviceReady;
       this.projectStatuses.set(session.key, { projectId: session.projectId, provider: session.provider, startedAt: session.startedAt, phase: importing ? 'importing' : indexing ? 'indexing' : next[0], message: importing ? '正在加载项目与缓存索引' : indexing ? '正在更新项目索引' : next[1] });
     }
-    try { this.onLifecycle?.({ component: 'language-service', provider: session.provider, projectId: session.projectId, event, elapsedMs: Math.round(performance.now() - session.startedAt), ...extra }); } catch {}
+    try { this.onLifecycle?.({ component: 'language-service', provider: session.provider, projectId: session.projectId, event, elapsedMs, ...(['initialize-complete', 'project-ready', 'autobuild-enabled'].includes(event) ? { startupTimings: { ...session.startupTimings } } : {}), ...extra }); } catch {}
   }
   #stop(session) {
     if (session.stopPromise) return session.stopPromise;
-    session.stopPromise = this.#stopSession(session);
+    // Publish the barrier before stop callbacks can request a replacement.
+    session.stopPromise = Promise.resolve().then(() => this.#stopSession(session));
     this.stoppingSessions.add(session.stopPromise);
-    session.stopPromise.finally(() => this.stoppingSessions.delete(session.stopPromise)).catch(() => {});
+    this.stoppingByKey.set(session.key, session.stopPromise);
+    session.stopPromise.finally(() => {
+      this.stoppingSessions.delete(session.stopPromise);
+      if (this.stoppingByKey.get(session.key) === session.stopPromise) this.stoppingByKey.delete(session.key);
+    }).catch(() => {});
     return session.stopPromise;
   }
   async #stopSession(session) {
     session.stopping = true; clearTimeout(session.timer); this.sessions.delete(session.key);
+    cancelLanguageRequests(session);
     const startedAt = performance.now();
     let forced = false;
     this.#lifecycle(session, 'shutdown-request');
@@ -539,17 +608,19 @@ class LocalLspManager {
     }
     try { session.connection?.dispose(); } catch {}
     this.#lifecycle(session, 'stopped', { durationMs: Math.round(performance.now() - startedAt), forced, exited });
+    if (!exited) {
+      // Completion of a bounded stop procedure is not evidence that the child
+      // actually exited. Retain a per-workspace fence until the close event.
+      const marker = {};
+      this.blockedRestarts.set(session.key, marker);
+      this.projectStatuses.set(session.key, { projectId: session.projectId, provider: session.provider, startedAt: session.startedAt, phase: 'failed', message: '上一代码智能进程尚未退出，可以继续编辑，稍后重试' });
+      this.#lifecycle(session, 'restart-blocked');
+      closed.then(() => { if (this.blockedRestarts.get(session.key) === marker) this.blockedRestarts.delete(session.key); });
+    }
   }
 }
 
 function languageId(file) { if (supportsBashLanguage(file)) return 'shellscript'; const extension = path.extname(file).toLowerCase(); if (extension === '.py') return 'python'; if (extension === '.java') return 'java'; if (extension === '.go') return 'go'; if (extension === '.rs') return 'rust'; if (extension === '.vue') return 'vue'; if (['.c', '.h'].includes(extension)) return 'c'; if (['.cc', '.cpp', '.cxx', '.hh', '.hpp', '.hxx'].includes(extension)) return 'cpp'; return extension === '.ts' || extension === '.tsx' ? 'typescript' : 'javascript'; }
-function languageRequest(session, method, params, timeoutMs = 15_000) {
-  let timer;
-  return Promise.race([
-    session.connection.sendRequest(method, params),
-    new Promise((_, reject) => { timer = setTimeout(() => reject(Object.assign(new Error(`${session.provider} 语言服务响应超时`), { code: 'LOCAL_LSP_TIMEOUT' })), timeoutMs); }),
-  ]).finally(() => clearTimeout(timer));
-}
 function lspPosition(input) { return { line: Math.max(0, Number(input.line || 1) - 1), character: Math.max(0, Number(input.column || 1) - 1) }; }
 function workspaceRelativePath(root, uri) { try { const file = fileURLToPath(uri); if (!file.startsWith(`${root}${path.sep}`)) return null; return path.relative(root, file).split(path.sep).join('/'); } catch { return null; } }
 function refactorError(message) { return Object.assign(new Error(message), { code: 'LOCAL_LSP_REFACTOR_UNSUPPORTED' }); }
@@ -585,7 +656,7 @@ function languageServerInvocation(session, dataRoot, commands = {}) {
     const baseConfig = process.platform === 'darwin' ? 'config_mac' : process.platform === 'win32' ? 'config_win' : 'config_linux';
     const configuration = path.join(home, process.arch === 'arm64' && process.platform !== 'win32' ? `${baseConfig}_arm` : baseConfig);
     const workspaceData = path.join(dataRoot, session.projectId); fs.mkdirSync(workspaceData, { recursive: true });
-    return { command: 'java', args: [`-javaagent:${resolveJavaTool('lombok.jar', session.resources)}`, '-Declipse.application=org.eclipse.jdt.ls.core.id1', '-Dosgi.bundles.defaultStartLevel=4', '-Declipse.product=org.eclipse.jdt.ls.core.product', '-Dlog.level=WARN', '-Xms256m', '-Xmx1G', '--add-modules=ALL-SYSTEM', '--add-opens', 'java.base/java.util=ALL-UNNAMED', '--add-opens', 'java.base/java.lang=ALL-UNNAMED', '-jar', path.join(plugins, launcher), '-configuration', configuration, '-data', workspaceData] };
+    return { command: commands.java || 'java', args: [...(session.resources.javaGcArguments || []), ...sharedIndexArguments(home, session.resources.sharedIndexRoot), ...flightRecordingArguments(session.resources.javaFlightRecording), ...(session.resources.indexThreadGuardJar ? [`-javaagent:${session.resources.indexThreadGuardJar}`] : []), `-javaagent:${resolveJavaTool('lombok.jar', session.resources)}`, '-Declipse.application=org.eclipse.jdt.ls.core.id1', '-Dosgi.bundles.defaultStartLevel=4', '-Declipse.product=org.eclipse.jdt.ls.core.product', '-Dlog.level=WARN', '-Xms256m', '-Xmx1G', '--add-modules=ALL-SYSTEM', '--add-opens', 'java.base/java.util=ALL-UNNAMED', '--add-opens', 'java.base/java.lang=ALL-UNNAMED', '-jar', path.join(plugins, launcher), '-configuration', configuration, '-data', workspaceData] };
   }
   if (session.provider === 'clangd') return { command: commands.clangd || process.env.CODE_STUDIO_CLANGD_COMMAND || 'clangd', args: ['--background-index=false', '--clang-tidy=false', '--header-insertion=never'] };
   if (session.provider === 'gopls') return { command: commands.gopls || process.env.CODE_STUDIO_GOPLS_COMMAND || 'gopls', args: ['serve'] };
@@ -635,7 +706,14 @@ function resolveJavaTool(name, resources = {}) {
   if (!file) throw new Error('Java 运行组件尚未安装，请执行 prepare-language-servers');
   return file;
 }
-function javaSettings(autobuild = true) { return { java: { autobuild: { enabled: autobuild }, import: { maven: { enabled: true }, gradle: { enabled: false } }, configuration: { updateBuildConfiguration: 'automatic' } } }; }
+function trustedJavaBundles(value) {
+  if (value === undefined) return [];
+  try {
+    if (!Array.isArray(value) || value.length > 2 || value.some(file => typeof file !== 'string' || !path.isAbsolute(file) || !file.endsWith('.jar') || /[\r\n\0]/.test(file) || !fs.statSync(file).isFile())) throw new Error();
+    return value.map(file => fs.realpathSync(file));
+  } catch { throw new TypeError('Diagnostic Java bundles must be absolute trusted JAR paths'); }
+}
+function javaSettings(autobuild = true, maxConcurrentBuilds) { return { java: { ...(maxConcurrentBuilds === undefined ? {} : { maxConcurrentBuilds }), completion: { guessMethodArguments: true }, autobuild: { enabled: autobuild }, import: { maven: { enabled: true }, gradle: { enabled: false } }, configuration: { updateBuildConfiguration: 'automatic' } } }; }
 function unrefDelay(milliseconds) { return new Promise((resolve) => { const timer = setTimeout(resolve, milliseconds); timer.unref?.(); }); }
 
 function detectProviders(root) {

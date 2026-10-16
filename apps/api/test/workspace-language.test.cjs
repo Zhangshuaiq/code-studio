@@ -16,7 +16,7 @@ function fixture(t, enabled = true) {
     return { projectId: 'project' };
   } };
   const settings = {
-    LSP_ENABLED: enabled ? 'true' : 'false', LSP_DATA_ROOT: dataRoot, FAST_INDEX_ROOT: path.join(dataRoot, 'fast-index'),
+    LSP_ENABLED: enabled ? 'true' : 'false', LSP_DATA_ROOT: dataRoot, FAST_INDEX_ROOT: path.join(dataRoot, 'fast-index'), RELATIONS_INDEX_ROOT: path.join(dataRoot, 'relations-index'),
     CODE_STUDIO_JDTLS_HOME: path.resolve(__dirname, '../../desktop/.cache/jdtls/1.61.0'),
     CODE_STUDIO_JAVA_TOOLS_ROOT: path.resolve(__dirname, '../../desktop/.cache/java-tools'),
   };
@@ -25,6 +25,46 @@ function fixture(t, enabled = true) {
   t.after(async () => { await service.onModuleDestroy(); fs.rmSync(root, { recursive: true, force: true }); fs.rmSync(dataRoot, { recursive: true, force: true }); });
   return { service, root, recreate, switchBranch: () => { branch = 'changed'; }, revoke: () => { revoked = true; } };
 }
+
+test('web static file relations work without LSP and enforce project read permissions', async t => {
+  const { service, root } = fixture(t, false);
+  fs.writeFileSync(path.join(root, 'Mapper.java'), 'package p; interface Mapper { void get(); }');
+  fs.writeFileSync(path.join(root, 'Mapper.xml'), '<mapper namespace="p.Mapper"><select id="get">select 1</select></mapper>');
+  await assert.rejects(service.execute('outsider', 'session', 'related-locations', { path: 'Mapper.java' }), error => error.getStatus() === 403);
+  const result = await service.execute('viewer', 'session', 'related-locations', { path: 'Mapper.java' });
+  assert.equal(result.result.rows[0].links[0].path, 'Mapper.xml');
+  assert.equal(service.manager.sessions.size, 0);
+});
+test('web fast-index progress bypasses a blocked fast query without skipping authorization', async t => {
+  const { service } = fixture(t, false);
+  let release, started;
+  const beginning = new Promise(resolve => { started = resolve; });
+  service.fastIndex.search = async () => { started(); await new Promise(resolve => { release = resolve; }); return { items: [] }; };
+  service.fastIndex.status = async () => ({ state: 'indexing', complete: false });
+  const blocked = service.execute('owner', 'session', 'fast-symbols', { query: 'Service' });
+  await beginning;
+  let timer;
+  try {
+    const status = await Promise.race([service.execute('owner', 'session', 'index-status'), new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('progress blocked')), 500); })]);
+    assert.equal(status.index.state, 'indexing');
+    await assert.rejects(service.execute('outsider', 'session', 'index-status'), error => error.getStatus() === 403);
+  } finally { clearTimeout(timer); release(); await blocked; }
+});
+test('web project implementation query uses positioned overlays without starting JDT', async t => {
+  const { service, root } = fixture(t, false);
+  const content = 'package p; interface Api { void run(); }';
+  fs.writeFileSync(path.join(root, 'Api.java'), content);
+  const input = { path: 'Api.java', content, line: 1, column: content.indexOf('run') + 1,
+    documents: [{ path: 'Impl.java', content: 'package p; class Impl implements Api { public void run(){} }' }] };
+  await assert.rejects(service.execute('outsider', 'session', 'related-locations', input), error => error.getStatus() === 403);
+  const body = await service.execute('viewer', 'session', 'related-locations', input);
+  assert.equal(body.result.rows[0].links[0].path, 'Impl.java');
+  assert.equal(body.result.scope, 'project');
+  assert.equal(body.result.semanticComplete, false);
+  assert.equal(service.manager.sessions.size, 0);
+  const diskOnly = await service.execute('viewer', 'session', 'related-locations', { ...input, documents: [] });
+  assert.deepEqual(diskOnly.result.rows, []);
+});
 
 test('web fast-index recovers its owned corrupt cache on restart and keeps authorization and source intact', async t => {
   const { service, root, recreate } = fixture(t, false);

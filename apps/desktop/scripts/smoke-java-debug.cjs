@@ -34,6 +34,7 @@ app.whenReady().then(async () => {
     await window.webContents.executeJavaScript(`[...document.querySelectorAll('button h2')].find(node => node.textContent === 'Java UI').closest('button').click()`);
     await waitFor(`!!document.querySelector('button[title="Debug"]:not(:disabled)')`);
     await window.webContents.executeJavaScript(`document.querySelector('button[title="运行参数"]').click()`);
+    await waitFor(`!!document.querySelector('[data-java-run-modal] input[aria-label="程序参数"]')`);
     await window.webContents.executeJavaScript(`(() => { const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set; for (const [placeholder, value] of [['--spring.profiles.active=dev', 'hello'], ['-Xmx1g -Dkey=value', '-DcodeStudioSmoke=verified']]) { const input = document.querySelector('input[placeholder="' + placeholder + '"]'); setter.call(input, value); input.dispatchEvent(new Event('input', { bubbles: true })); } })()`);
     await window.webContents.executeJavaScript(`[...document.querySelectorAll('button')].find(node => node.textContent === '保存运行配置').click()`);
     await waitFor(`document.body.textContent.includes('运行配置已保存到本机')`);
@@ -43,6 +44,7 @@ app.whenReady().then(async () => {
     await waitFor(`!!document.querySelector('button[title="Debug"]:not(:disabled)')`);
     await window.webContents.executeJavaScript(`document.querySelector('button[title="运行参数"]').click()`);
     await waitFor(`document.querySelector('input[placeholder="--spring.profiles.active=dev"]')?.value === 'hello' && document.querySelector('input[placeholder="-Xmx1g -Dkey=value"]')?.value === '-DcodeStudioSmoke=verified' && document.body.textContent.includes('已恢复本地运行配置')`);
+    await window.webContents.executeJavaScript(`document.querySelector('[aria-label="关闭运行配置"]').click()`);
     // Open folders through the real file tree.
     for (const folder of ['src', 'main', 'java']) {
       await waitFor(`[...document.querySelectorAll('button')].some(node => node.textContent.trim() === '${folder}')`);
@@ -174,6 +176,7 @@ app.whenReady().then(async () => {
     await waitFor(`[...document.querySelectorAll('button')].some(node => node.textContent === '清除保存配置')`);
     await window.webContents.executeJavaScript(`[...document.querySelectorAll('button')].find(node => node.textContent === '清除保存配置').click()`);
     await waitFor(`document.querySelector('input[placeholder="--spring.profiles.active=dev"]')?.value === '' && document.body.textContent.includes('已清除保存的运行配置')`);
+    await window.webContents.executeJavaScript(`document.querySelector('[aria-label="关闭运行配置"]').click()`);
     console.log('Java configuration UI smoke passed: save, Local API restart, restore, actual program/JVM arguments and clear.');
     console.log('Java evaluation UI smoke passed: primitive expression, object expansion, compile error and pause-change reset.');
     async function gutterClick(line, button = 'left') {
@@ -280,6 +283,7 @@ app.whenReady().then(async () => {
     await waitFor(`document.querySelector('button[aria-label="已保存运行配置"]')?.textContent.includes('开发配置')`);
     await window.webContents.executeJavaScript(`[...document.querySelectorAll('button')].find(button => button.textContent.trim() === '清除保存配置').click()`);
     await waitFor(`document.querySelector('input[placeholder="--spring.profiles.active=dev"]')?.value === 'prod' && document.querySelector('button[aria-label="已保存运行配置"]')?.textContent.includes('生产配置')`);
+    await window.webContents.executeJavaScript(`document.querySelector('[aria-label="关闭运行配置"]').click()`);
     await window.webContents.executeJavaScript(`new Promise(resolve => window.require(['vs/editor/editor.main'], module => { const monaco = window.monaco || module; monaco.editor.getEditors().find(editor => editor.getModel()?.uri.path.endsWith('Main.java')).getModel().setValue(${JSON.stringify(loopSource)}); resolve(); }))`);
     await waitFor(`[...document.querySelectorAll('button')].some(button => button.textContent.trim() === '保存' && !button.disabled)`);
     await window.webContents.executeJavaScript(`[...document.querySelectorAll('button')].find(button => button.textContent.trim() === '保存').click()`);

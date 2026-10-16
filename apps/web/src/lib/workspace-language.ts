@@ -8,7 +8,7 @@ export function supportsWorkspaceLanguage(path: string) { return languages.has(m
 
 export async function requestWorkspaceLanguage(sessionId: string, operation: string, input: Record<string, unknown> = {}) {
   const documents = Object.entries(useEditorTabs.getState().drafts)
-    .filter(([path, draft]) => !path.startsWith('@java-source/') && supportsWorkspaceLanguage(path) && draft.content !== draft.baseline && path !== input.path)
+    .filter(([path, draft]) => !path.startsWith('@java-source/') && (operation === 'related-locations' ? /\.(java|xml)$/.test(path) : supportsWorkspaceLanguage(path)) && draft.content !== draft.baseline && path !== input.path)
     .map(([path, draft]) => ({ path, content: draft.content }));
   if (documents.length > 20 || new TextEncoder().encode(JSON.stringify({ ...input, documents })).byteLength > 1_000_000) {
     throw new Error('未保存的编辑内容过多，请先保存部分文件后重试代码导航');

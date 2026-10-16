@@ -6,6 +6,41 @@ const TYPES = new Map([
   ['enum_declaration', 'enum'], ['record_declaration', 'record'],
   ['annotation_type_declaration', 'annotation'],
 ]);
+const DECLARATIONS = [...TYPES.keys(), 'method_declaration', 'annotation_type_element_declaration', 'constructor_declaration', 'compact_constructor_declaration', 'enum_constant', 'variable_declarator', 'formal_parameter'];
+function* extractionNodes(root, legacy) {
+  // Diagnostic reference implementation for parity tests and A/B measurements;
+  // this switch is not exposed through the workspace HTTP API.
+  if (legacy) {
+    const stack = [{ node: root, containers: [] }];
+    while (stack.length) {
+      const item = stack.pop(); yield item;
+      const name = TYPES.has(item.node.type) ? item.node.childForFieldName('name') : null;
+      const containers = name && !name.isMissing && name.text ? [...item.containers, name.text] : item.containers;
+      const children = item.node.namedChildren;
+      for (let i = children.length - 1; i >= 0; i--) stack.push({ node: children[i], containers });
+    }
+    return;
+  }
+  // Native traversal avoids constructing JS wrappers for every expression,
+  // statement and literal in a method body. It still finds local/anonymous
+  // class members and preserves the original source order.
+  const scopes = new Map();
+  for (const node of root.descendantsOfType(DECLARATIONS)) {
+    const ancestors = [];
+    let parent = node.parent;
+    while (parent && !scopes.has(parent.id)) { ancestors.push(parent); parent = parent.parent; }
+    let containers = parent ? scopes.get(parent.id) : [];
+    for (let index = ancestors.length - 1; index >= 0; index--) {
+      const ancestor = ancestors[index];
+      if (TYPES.has(ancestor.type)) {
+        const name = ancestor.childForFieldName('name');
+        if (name && !name.isMissing && name.text) containers = [...containers, name.text];
+      }
+      scopes.set(ancestor.id, containers);
+    }
+    yield { node, containers };
+  }
+}
 let languagePromise;
 function loadLanguage() {
   if (!languagePromise) languagePromise = (async () => {
@@ -57,11 +92,12 @@ class JavaSyntaxIndex {
       const packageName = packageNode?.namedChildren.find(node => ['identifier', 'scoped_identifier'].includes(node.type))?.text || '';
       const imports = root.namedChildren.filter(node => node.type === 'import_declaration').map(node => ({ name: node.text.replace(/^import\s+(?:static\s+)?/, '').replace(/;\s*$/, '').trim(), static: /^import\s+static\s/.test(node.text), range: range(node) }));
       const symbols = [], inheritance = [];
+      // The native path counts candidate declaration visits; it does not create
+      // JS nodes just to count unrelated expressions. Source/time/symbol budgets
+      // still apply, and no syntax tree or scope cache survives this call.
       let visitedNodes = 0, truncated = false;
-      const stack = [{ node: root, containers: [] }];
-      while (stack.length) {
+      for (const { node, containers } of extractionNodes(root, options.legacyTraversal === true)) {
         if (++visitedNodes > maxNodes || symbols.length >= maxSymbols || Date.now() > deadline) { truncated = true; break; }
-        const { node, containers } = stack.pop();
         let kind = TYPES.get(node.type);
         if (node.type === 'method_declaration' || node.type === 'annotation_type_element_declaration') kind = 'method';
         if (['constructor_declaration', 'compact_constructor_declaration'].includes(node.type)) kind = 'constructor';
@@ -80,8 +116,6 @@ class JavaSyntaxIndex {
             for (const clause of clauses) inheritance.push({ owner: nextContainers.join('.'), clause: clause.text, range: range(clause), resolved: false });
           }
         }
-        const children = node.namedChildren;
-        for (let i = children.length - 1; i >= 0; i--) stack.push({ node: children[i], containers: nextContainers });
       }
       return { parserVersion: PARSER_VERSION, semantic: false, path: filePath, packageName, imports, inheritance, symbols, hasErrors: root.hasError, truncated, visitedNodes };
     } finally { tree.delete(); }

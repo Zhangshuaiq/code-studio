@@ -52,3 +52,31 @@ test('refresh coalescing cancels superseded jobs and close rejects new work', as
   assert.equal((await first).cancelled, true); assert.equal((await second).complete, true);
   await f.index.close(); await assert.rejects(f.index.refresh(), /closed/);
 });
+test('cold and cache-only scans publish bounded progress and completion without reparsing', async t => {
+  const f = fixture(t);
+  for (let i = 0; i < 300; i++) f.write(`Progress${i}.java`, `class Progress${i} {}`);
+  const updates = [];
+  const polledCounts = [];
+  f.index.onProgress = value => {
+    updates.push(value);
+    polledCounts.push(f.index.status().discoveredFiles);
+  };
+  const first = await f.index.refresh();
+  assert.equal(first.parsedFiles, 300);
+  assert.equal(updates[0].state, 'scanning');
+  assert.equal(updates[0].complete, false);
+  assert.equal(updates.at(-1).complete, true);
+  assert.deepEqual(polledCounts, updates.map(value => value.discoveredFiles));
+  assert.ok(updates.length <= Math.ceil(first.elapsedMs / 100) + 2);
+  updates.length = 0;
+  polledCounts.length = 0;
+  const warm = await f.index.refresh();
+  assert.equal(warm.parsedFiles, 0);
+  assert.equal(warm.unchangedFiles, 300);
+  assert.equal(updates[0].state, 'scanning');
+  assert.equal(updates.at(-1).unchangedFiles, 300);
+  assert.deepEqual(polledCounts, updates.map(value => value.discoveredFiles));
+  assert.equal(f.index.status().unchangedFiles, 300);
+  assert.equal(f.index.status().elapsedMs, warm.elapsedMs);
+  assert.ok(updates.length <= Math.ceil(warm.elapsedMs / 100) + 2);
+});

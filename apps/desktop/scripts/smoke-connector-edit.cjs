@@ -89,10 +89,46 @@ app.whenReady().then(async () => {
     assert.equal(await evaluate(`[...document.querySelectorAll('.workspace-frame main th')].some(node => node.textContent === 'value')`), true);
     assert.equal(await evaluate(`[...document.querySelectorAll('.workspace-frame main td')].some(node => node.textContent === 'fixture-value')`), true);
     assert.ok(databaseCalls.some(input => input.sql === 'SELECT * FROM "public"."odd.table" LIMIT 10;' && input.database === 'updated'));
+    await waitFor(`!!document.querySelector('[data-route-key="connector:${id}"]')`);
+    await evaluate(`window.__retainedDetail=document.querySelector('[data-connector-tab="${id}"]');window.__retainedEditor=window.__retainedDetail.querySelector('.cm-content');window.__retainedEditor.focus()`);
+    await window.webContents.insertText(' -- retained SQL draft');
+    await waitFor(`window.__retainedEditor.textContent.includes('retained SQL draft')`);
+    const requestsBeforeSwitch = databaseCalls.length;
+    await evaluate(`document.querySelector('[data-route-key="projects"]').click()`);
+    await waitFor(`window.__retainedDetail.getAttribute('aria-hidden')==='true'`);
+    await evaluate(`document.querySelector('[data-route-key="connector:${id}"]').click()`);
+    await waitFor(`window.__retainedDetail.getAttribute('aria-hidden')==='false'`);
+    assert.ok(await evaluate(`window.__retainedDetail===document.querySelector('[data-connector-tab="${id}"]') && window.__retainedEditor===window.__retainedDetail.querySelector('.cm-content') && window.__retainedEditor.textContent.includes('retained SQL draft')`));
+    assert.equal(databaseCalls.length, requestsBeforeSwitch, 'Switching tabs should not reload connection metadata');
+    assert.ok(await evaluate(`window.__retainedDetail.textContent.includes('fixture-value')`));
+    await evaluate(`document.querySelector('[data-route-key="databases"]').click()`);
+    await evaluate(`[...document.querySelectorAll('[data-connector-list] button')].find(node=>node.textContent.trim()==='Editing fixture').click()`);
+    assert.equal(await evaluate(`document.querySelectorAll('[data-route-key="connector:${id}"]').length`), 1);
+    const secondResponse = await fetch(`${api.origin}/api/local/connectors`, { method: 'POST', headers: { Authorization: `Bearer ${api.token}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ name: 'Second fixture', type: 'mysql', settings: { host: 'localhost', port: 3306, database: 'updated' } }) });
+    assert.equal(secondResponse.status, 201);
+    const second = await secondResponse.json();
+    // Reopen the list to refresh the newly created fixture; keep first detail mounted.
+    await evaluate(`document.querySelector('[aria-label="关闭页签 数据源"]').click()`);
+    await evaluate(`[...document.querySelectorAll('aside button')].find(node=>node.textContent.trim()==='数据源').click()`);
+    await waitFor(`[...document.querySelectorAll('[data-connector-list] button')].some(node=>node.textContent.trim()==='Second fixture')`);
+    await evaluate(`[...document.querySelectorAll('[data-connector-list] button')].find(node=>node.textContent.trim()==='Second fixture').click()`);
+    await waitFor(`document.querySelector('[data-connector-tab="${second.id}"]')?.getAttribute('aria-hidden')==='false'`);
+    await evaluate(`document.querySelector('[data-route-key="connector:${id}"]').click()`);
+    await waitFor(`window.__retainedEditor.textContent.includes('retained SQL draft') && window.__retainedDetail.getAttribute('aria-hidden')==='false'`);
+    await evaluate(`document.querySelector('[aria-label="关闭页签 Second fixture"]').click()`);
+    await waitFor(`!document.querySelector('[data-connector-tab="${second.id}"]')`);
+    await evaluate(`[...document.querySelectorAll('[data-connector-tab="${id}"] button')].find(node=>node.textContent.trim()==='编辑连接').click()`);
+    await waitFor(`Boolean(${field('连接名称')}) && ${field('连接名称')}.value==='Editing fixture'`);
+    await input('连接名称', 'Renamed fixture');
+    await evaluate(`${saveButton}.click()`);
+    await waitFor(`document.querySelector('[data-route-key="connector:${id}"]').textContent.includes('Renamed fixture') && !${saveButton}`);
+    await evaluate(`document.querySelector('[data-route-key="connector:${id}"]').click()`);
+    await waitFor(`document.querySelector('[data-connector-tab="${id}"]')?.getAttribute('aria-hidden')==='false'`);
+    console.log('Connector tabs passed: independent details, SQL draft/result/table state, no duplicate tabs or metadata reload, multiple connections and close.');
     assert.deepEqual(remoteCalls, [], 'Local detail must never request remote database APIs');
     for (const label of ['导入', '导出', '备份', '迁移']) assert.equal(await evaluate(`[...document.querySelectorAll('.workspace-frame header button')].find(node => node.textContent.trim() === ${JSON.stringify(label)}).disabled`), true);
     await evaluate(`document.querySelector('button[aria-label="返回数据源列表"]').click()`);
-    await waitFor(`document.querySelector('button[aria-label="编辑连接 Editing fixture"]')`);
+    await waitFor(`document.querySelector('button[aria-label="编辑连接 Renamed fixture"]')`);
     console.log('Connector smoke passed: editing, credential retention/replacement, shared web detail, table structure, SQL results, personal access, no remote API calls.');
   } catch (error) { exitCode = 1; console.error(error); }
   finally {

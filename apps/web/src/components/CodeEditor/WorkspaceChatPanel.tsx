@@ -8,6 +8,6 @@ export function WorkspaceChatPanel({ children }: { children: ReactNode }) {
     <Panel ref={panel} id="workspace-chat" order={1} defaultSize={chatVisible ? 28 : 0} minSize={18} maxSize={50} collapsible collapsedSize={0} onCollapse={() => { if (useEditorPreferences.persist.hasHydrated()) setChatVisible(false); }} onExpand={() => { if (useEditorPreferences.persist.hasHydrated()) setChatVisible(true); }}>
       <div className="h-full min-w-0" style={{ visibility: chatVisible ? 'visible' : 'hidden' }} aria-hidden={!chatVisible} data-workspace-chat>{children}</div>
     </Panel>
-    <PanelResizeHandle className="resize-handle-x" disabled={!chatVisible} style={{ display: chatVisible ? undefined : 'none' }} />
+    <PanelResizeHandle aria-label="调整项目对话宽度" className="resize-handle-x" disabled={!chatVisible} style={{ display: chatVisible ? undefined : 'none' }} />
   </>;
 }

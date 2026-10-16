@@ -339,7 +339,7 @@ const fs = require('node:fs'); const path = require('node:path');
 fs.writeFileSync(path.join(process.cwd(), 'agent-created.txt'), 'local change\\n');
 console.log(JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: 'done locally' } }));
 console.log(JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 120, cached_input_tokens: 40, output_tokens: 30 } }));
-if (process.argv.join(' ').includes('slow-task')) setInterval(() => {}, 1000);
+let input = ''; process.stdin.setEncoding('utf8'); process.stdin.on('data', chunk => input += chunk); process.stdin.on('end', () => { if(input.includes('slow-task')) setInterval(() => {}, 1000); });
 `);
   fs.chmodSync(fakeAgent, 0o700);
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));

@@ -102,6 +102,7 @@ function validateConfiguration(input) {
   if (typeof input.mainClass !== 'string' || !input.mainClass || input.mainClass.length > 1000 || /[\s\0]/.test(input.mainClass)) invalid();
   if (input.projectName !== undefined && (typeof input.projectName !== 'string' || input.projectName.length > 1000 || /[\r\n\0]/.test(input.projectName))) invalid();
   for (const key of ['args', 'vmArgs']) if (input[key] !== undefined && (typeof input[key] !== 'string' || input[key].length > 8000 || input[key].includes('\0'))) invalid();
-  return { mainClass: input.mainClass, ...(input.projectName !== undefined ? { projectName: input.projectName } : {}), args: input.args || '', vmArgs: input.vmArgs || '' };
+  if (input.javaHome !== undefined && (typeof input.javaHome !== 'string' || input.javaHome.length > 4096 || /[\x00-\x1f]/.test(input.javaHome) || (input.javaHome && !require('node:path').isAbsolute(input.javaHome)))) invalid();
+  return { mainClass: input.mainClass, ...(input.projectName !== undefined ? { projectName: input.projectName } : {}), args: input.args || '', vmArgs: input.vmArgs || '', ...(input.javaHome ? { javaHome: input.javaHome } : {}) };
 }
 module.exports = { JavaRunConfigurationStore, validateConfiguration, validateCollection };

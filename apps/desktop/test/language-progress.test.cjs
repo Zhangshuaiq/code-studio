@@ -1,0 +1,32 @@
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const { updateLanguageProgress, registerLanguageProgress } = require('@codegen/code-intelligence/language-progress.cjs');
+test('JDT progressReport is received, import/build stay busy until all tasks finish', () => {
+  const handlers = new Map(), events = [], session = { provider: 'java' }, status = {};
+  registerLanguageProgress({ onNotification: (name, handler) => handlers.set(name, handler) }, progress => updateLanguageProgress(session, status, progress, (name, fields) => events.push({ name, ...fields })));
+  assert.ok(handlers.has('language/progressReport'));
+  assert.ok(handlers.has('language/progress'));
+  const report = handlers.get('language/progressReport');
+  report({ id: 'import', complete: false, task: '/private/path', status: 'sensitive description' });
+  assert.equal(status.phase, 'importing');
+  assert.deepEqual(session.progressTasks.get('import'), { id: 'import' });
+  session.serviceReady = true;
+  report({ id: 'build', complete: false }); report({ id: 'build', complete: false });
+  assert.equal(status.phase, 'indexing');
+  report({ id: 'import', complete: true });
+  assert.equal(status.phase, 'indexing');
+  handlers.get('language/progress')({ id: 'build', complete: true });
+  assert.equal(status.phase, 'ready');
+  assert.equal(session.progressTaskStarts.size, 0);
+  assert.equal(events.filter(event => event.name === 'background-task-start').length, 2);
+  assert.ok(!JSON.stringify(events).includes('/private/path'));
+});
+test('malformed/late progress cannot resurrect a stopped session or create phantom tasks', () => {
+  const session = { provider: 'java', serviceReady: true }, status = { phase: 'ready' };
+  const event = () => {};
+  for (const value of [undefined, {}, { id: {} }, { id: '' }, { id: NaN }, { id: Infinity }, { id: 'x', complete: 'true' }, { id: 'x'.repeat(257) }]) updateLanguageProgress(session, status, value, event);
+  assert.equal(session.progressTasks, undefined);
+  session.stopping = true;
+  updateLanguageProgress(session, status, { id: 'late' }, event);
+  assert.equal(status.phase, 'ready');
+});

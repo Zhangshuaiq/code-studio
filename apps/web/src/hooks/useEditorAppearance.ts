@@ -4,11 +4,14 @@ import { presetThemes } from '../lib/editor-appearance';
 export function useEditorAppearance(monaco: any, uiTheme: 'light' | 'dark') {
   const appearance = useEditorPreferences(state => state.appearance);
   const [registered, setRegistered] = useState(false);
-  const themes = { auto: uiTheme === 'dark' ? 'vs-dark' : 'light', light: 'light', dark: 'vs-dark', idea: 'code-studio-idea', darcula: 'code-studio-darcula', contrast: 'hc-black', custom: 'code-studio-custom' };
+  const themes: Record<string, string> = { auto: uiTheme === 'dark' ? 'vs-dark' : 'light', light: 'light', dark: 'vs-dark', ...Object.fromEntries(Object.keys(presetThemes).map(key => [key, `code-studio-${key}`])), contrast: 'hc-black', custom: 'code-studio-custom' };
+  useEffect(() => {
+    document.documentElement.style.setProperty('--code-editor-font-family', appearance.fontFamily);
+    document.documentElement.style.setProperty('--code-editor-font-size', `${appearance.fontSize}px`);
+  }, [appearance.fontFamily, appearance.fontSize]);
   useEffect(() => {
     if (!monaco) return;
-    monaco.editor.defineTheme('code-studio-idea', presetThemes.idea);
-    monaco.editor.defineTheme('code-studio-darcula', presetThemes.darcula);
+    for (const [key, theme] of Object.entries(presetThemes)) monaco.editor.defineTheme(`code-studio-${key}`, theme);
     if (appearance.customTheme) monaco.editor.defineTheme('code-studio-custom', appearance.customTheme);
     monaco.editor.setTheme(themes[appearance.theme]);
     setRegistered(true);

@@ -9,8 +9,9 @@ import { LanguageRequestDto } from './dto/language-request.dto';
 
 const { LocalLspManager } = require('@codegen/code-intelligence');
 const { FastIndexManager } = require('@codegen/code-intelligence/fast-index-manager.cjs');
-const FAST_OPERATIONS = new Set(['fast-symbols', 'fast-document-symbols', 'index-status', 'index-refresh']);
-const OPERATIONS = new Set(['prepare', 'status', 'definition', 'declaration', 'type-definition', 'implementation', 'references', 'hover', 'completion', 'diagnostics', 'rename', 'code-actions', 'call-hierarchy-prepare', 'call-hierarchy-incoming', 'call-hierarchy-outgoing', 'document-symbols', 'workspace-symbols', ...FAST_OPERATIONS]);
+const { relatedLocations, closeRelations, invalidateRelations } = require('@codegen/code-intelligence/workspace-relations.cjs');
+const FAST_OPERATIONS = new Set(['fast-symbols', 'fast-document-symbols', 'index-status', 'index-refresh', 'related-locations']);
+const OPERATIONS = new Set(['format', 'prepare', 'status', 'definition', 'declaration', 'type-definition', 'implementation', 'references', 'hover', 'completion', 'completion-resolve', 'diagnostics', 'rename', 'code-actions', 'call-hierarchy-prepare', 'call-hierarchy-incoming', 'call-hierarchy-outgoing', 'document-symbols', 'workspace-symbols', ...FAST_OPERATIONS]);
 
 @Injectable()
 export class WorkspaceLanguageService implements OnModuleDestroy {
@@ -34,7 +35,7 @@ export class WorkspaceLanguageService implements OnModuleDestroy {
   async execute(userId: string, sessionId: string, operation: string, input: LanguageRequestDto = {}) {
     if (!FAST_OPERATIONS.has(operation)) this.assertEnabled();
     if (!OPERATIONS.has(operation)) throw new BadRequestException('不支持该代码导航操作');
-    const permission = operation === 'rename' || operation === 'code-actions' ? 'edit' : 'read';
+    const permission = ['format', 'rename', 'code-actions'].includes(operation) ? 'edit' : 'read';
     const session = await this.access.requireSession(userId, sessionId, permission);
     const workspace = await this.workspaces.ensureForSession(userId, sessionId);
     const root = realpathSync(workspace.path);
@@ -46,17 +47,20 @@ export class WorkspaceLanguageService implements OnModuleDestroy {
       await this.access.requireSession(userId, sessionId, 'read');
       const current = await this.workspaces.ensureForSession(userId, sessionId);
       if (realpathSync(current.path) !== root || current.branch !== workspace.branch) throw new ConflictException('工作区已切换，请重新尝试');
-      return { providers: result.providers.map(({ provider, phase, message, elapsedMs }: { provider: string; phase: string; message: string; elapsedMs: number }) => ({ provider, phase, message, elapsedMs })) };
+      return { providers: result.providers.map(({ provider, phase, message, elapsedMs, backgroundTasks }: { provider: string; phase: string; message: string; elapsedMs: number; backgroundTasks?: number }) => ({ provider, phase, message, elapsedMs, backgroundTasks })) };
     }
     const queueId = FAST_OPERATIONS.has(operation) ? `${id}:fast` : id;
     // Serialize unsaved-buffer updates and queries in the same user's workspace.
     // Separate users never share document state, even for the same project.
-    const previous = this.queues.get(queueId) || Promise.resolve();
+    // Progress reads do not mutate document buffers. Never put them behind a
+    // cold relation scan, otherwise the UI cannot show progress during loading.
+    const serialized = operation !== 'index-status';
+    const previous = serialized ? this.queues.get(queueId) || Promise.resolve() : Promise.resolve();
     const pending = previous.catch(() => {}).then(async () => {
       await this.access.requireSession(userId, sessionId, permission);
       try {
         const path = input.path || (typeof input.item?.path === 'string' ? input.item.path : undefined);
-        const needsPosition = !['prepare', 'workspace-symbols', 'diagnostics', 'document-symbols', 'call-hierarchy-incoming', 'call-hierarchy-outgoing', ...FAST_OPERATIONS].includes(operation);
+        const needsPosition = !['format', 'prepare', 'workspace-symbols', 'diagnostics', 'document-symbols', 'call-hierarchy-incoming', 'call-hierarchy-outgoing', ...FAST_OPERATIONS].includes(operation);
         if (!['prepare', 'workspace-symbols', 'fast-symbols', 'index-status', 'index-refresh'].includes(operation) && (!path || (needsPosition && (!input.line || !input.column)))) throw new BadRequestException('代码位置无效');
         if (Buffer.byteLength(JSON.stringify(input)) > 1_000_000) throw new BadRequestException('编辑内容过大');
         if (operation === 'fast-symbols' && (!input.query?.trim() || input.query.includes('\0'))) throw new BadRequestException('搜索内容无效');
@@ -70,7 +74,8 @@ export class WorkspaceLanguageService implements OnModuleDestroy {
           if (existing >= 0) javaDocuments.splice(existing, 1);
           javaDocuments.push({ path, content: input.content });
         }
-        if (operation === 'fast-symbols') result = await this.fastIndex.search(project, input.query || '', 200, javaDocuments);
+        if (operation === 'related-locations') result = { result: await relatedLocations(root, input, { cacheDirectory: resolve(this.config.get<string>('RELATIONS_INDEX_ROOT', '.data/relations-index')) }) };
+        else if (operation === 'fast-symbols') result = await this.fastIndex.search(project, input.query || '', 200, javaDocuments);
         else if (operation === 'fast-document-symbols') result = await this.fastIndex.outline(project, path, javaDocuments);
         else if (operation === 'index-status') result = { index: await this.fastIndex.status(project) };
         else if (operation === 'index-refresh') { await this.fastIndex.invalidate(project, true); result = { index: await this.fastIndex.status(project) }; }
@@ -91,7 +96,7 @@ export class WorkspaceLanguageService implements OnModuleDestroy {
         return result;
       } catch (error) { throw this.publicError(error); }
     });
-    this.queues.set(queueId, pending);
+    if (serialized) this.queues.set(queueId, pending);
     try { return await pending; } finally { if (this.queues.get(queueId) === pending) this.queues.delete(queueId); }
   }
 
@@ -111,8 +116,8 @@ export class WorkspaceLanguageService implements OnModuleDestroy {
     } catch (error) { throw this.publicError(error); }
   }
 
-  workspaceChanged(root: string) { void this.fastIndex.invalidateRoot(root).catch(() => {}); }
-  async onModuleDestroy() { await Promise.all([this.manager.shutdown(), this.fastIndex.close()]); }
+  workspaceChanged(root: string) { invalidateRelations(root); void this.fastIndex.invalidateRoot(root).catch(() => {}); }
+  async onModuleDestroy() { await Promise.all([this.manager.shutdown(), this.fastIndex.close(), closeRelations()]); }
   private assertEnabled() {
     if (this.config.get<string>('LSP_ENABLED', 'false') !== 'true') throw new ServiceUnavailableException({ code: 'LSP_DISABLED', message: '服务器尚未启用代码语言服务' });
   }

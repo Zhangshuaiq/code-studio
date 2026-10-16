@@ -1,8 +1,6 @@
 import { useEffect, useState } from "react";
-import { DiffEditor } from "@monaco-editor/react";
+import { CodeDiffView } from '../CodeEditor/CodeDiffView';
 import { History, RefreshCw } from "lucide-react";
-import { monacoLang } from "../../lib/monaco";
-import { useTheme } from "../../store/theme";
 import {
   useCommits,
   useCommitDiff,
@@ -28,7 +26,6 @@ const KIND_LABEL: Record<string, string> = {
 };
 
 export function HistoryPanel({ sessionId, transport }: { sessionId?: string; transport?: GitHistoryTransport }) {
-  const theme = useTheme((s) => s.theme);
   const { confirm: askConfirm } = useFeedback();
   const commits = useCommits(sessionId, transport);
   const rollback = useRollback(sessionId, transport);
@@ -161,20 +158,9 @@ export function HistoryPanel({ sessionId, transport }: { sessionId?: string; tra
           ) : !current ? (
             <Center>该提交无可显示的文本改动</Center>
           ) : current.fileType ? <Center>{current.fileType === 'binary' ? '二进制文件无法显示文本差异' : '文件超过文本差异预览上限'}</Center> : (
-            <DiffEditor
+            <CodeDiffView
               key={`${sel}-${current.path}`}
-              language={monacoLang(current.path)}
-              original={current.before}
-              modified={current.after}
-              theme={theme === "dark" ? "vs-dark" : "light"}
-              options={{
-                fontSize: 13,
-                readOnly: true,
-                renderSideBySide: true,
-                minimap: { enabled: false },
-                automaticLayout: true,
-                scrollBeyondLastLine: false,
-              }}
+              path={current.path} before={current.before} after={current.after} leftLabel="父提交" rightLabel="选中提交"
             />
           )}
         </div>

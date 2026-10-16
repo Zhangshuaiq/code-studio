@@ -175,12 +175,21 @@ export function installWorkspaceLanguageProviders(monaco: any, projectId: string
         label: typeof item.label === 'string' ? item.label : item.label?.label || '',
         kind: lspCompletionKind(monaco, item.kind),
         detail: item.detail, documentation: typeof item.documentation === 'string' ? item.documentation : item.documentation?.value,
-        insertText: item.insertText || item.textEdit?.newText || (typeof item.label === 'string' ? item.label : item.label?.label || ''),
+        insertText: item.textEdit?.newText || item.insertText || (typeof item.label === 'string' ? item.label : item.label?.label || ''),
+        _resolve: item.resolveToken ? { token: item.resolveToken, model, version: model.getVersionId(), position } : undefined,
         range: item.textEdit?.range ? range(item.textEdit.range) : item.textEdit?.insert && item.textEdit?.replace ? { insert: range(item.textEdit.insert), replace: range(item.textEdit.replace) } : undefined,
         insertTextRules: item.insertTextFormat === 2 ? monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet : undefined,
         additionalTextEdits: (item.additionalTextEdits || []).map((edit: any) => ({ range: range(edit.range), text: edit.newText })),
         sortText: item.sortText, filterText: item.filterText,
       })), incomplete: Boolean(result?.isIncomplete) };
+    }, resolveCompletionItem: async (suggestion: any, token: any) => {
+      const context = suggestion._resolve;
+      if (!context || token?.isCancellationRequested || context.model.isDisposed() || context.model.getVersionId() !== context.version) return suggestion;
+      const resolved = await request('completion-resolve', context.model, context.position, { item: { token: context.token } });
+      if (!resolved || token?.isCancellationRequested || context.model.isDisposed() || context.model.getVersionId() !== context.version) return suggestion;
+      return { ...suggestion, detail: resolved.detail ?? suggestion.detail,
+        documentation: typeof resolved.documentation === 'string' ? resolved.documentation : resolved.documentation?.value ?? suggestion.documentation,
+        additionalTextEdits: (resolved.additionalTextEdits || suggestion.additionalTextEdits || []).map((edit: any) => edit.newText !== undefined ? { range: range(edit.range), text: edit.newText } : edit) };
     } }));
     disposables.push(monaco.languages.registerCodeActionProvider(language, { providedCodeActionKinds: ['quickfix'], provideCodeActions: async (model: any, targetRange: any, context: any) => {
       // Dependency sources are read-only virtual documents, not workspace files.

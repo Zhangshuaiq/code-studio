@@ -244,7 +244,7 @@ function WorkspacePage() {
       </WorkspaceChatPanel>
 
       {/* 右：代码/预览 + 底部日志 */}
-      <Panel minSize={30}>
+      <Panel id="workspace-content" order={2} minSize={30}>
         <PanelGroup direction="vertical" className="h-full">
           <Panel minSize={20}>
             <section className="flex h-full min-w-0 flex-col bg-white dark:bg-slate-900">

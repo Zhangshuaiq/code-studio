@@ -1,8 +1,9 @@
 const fs = require('node:fs');
 const path = require('node:path');
+const crypto = require('node:crypto');
 const { DatabaseSync } = require('node:sqlite');
 
-const CURRENT_SCHEMA_VERSION = 8;
+const CURRENT_SCHEMA_VERSION = 9;
 
 class LocalStore {
   constructor(databasePath) {
@@ -118,6 +119,15 @@ class LocalStore {
       PRAGMA user_version = 8;
       COMMIT;
     `);
+    if (version < 9) this.database.exec(`
+      BEGIN IMMEDIATE;
+      CREATE TABLE agent_conversations (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, model_config_id TEXT NOT NULL, engine TEXT NOT NULL, binding_key TEXT NOT NULL, title TEXT NOT NULL, cli_session_id TEXT, cli_permission TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+      CREATE INDEX agent_conversations_project ON agent_conversations(project_id, updated_at DESC);
+      ALTER TABLE agent_tasks ADD COLUMN conversation_id TEXT REFERENCES agent_conversations(id);
+      CREATE INDEX agent_tasks_conversation ON agent_tasks(conversation_id, created_at);
+      PRAGMA user_version = 9;
+      COMMIT;
+    `);
     this.database.prepare(`UPDATE agent_tasks SET status = 'interrupted', error = ?, finished_at = ?
       WHERE status IN ('queued', 'running', 'cancelling')`).run('客户端重启，任务已中断', new Date().toISOString());
   }
@@ -228,8 +238,35 @@ class LocalStore {
   getConnector(id) { const row = this.database.prepare(`SELECT id, name, type, config_json AS configJson, credential_ciphertext AS credentialCiphertext, created_at AS createdAt, updated_at AS updatedAt FROM connector_configs WHERE id = ?`).get(id); return row ? parseConnector(row) : undefined; }
   deleteConnector(id) { this.database.prepare('DELETE FROM connector_configs WHERE id = ?').run(id); }
   createAgentTask(task) {
-    this.database.prepare(`INSERT INTO agent_tasks (id, project_id, model_config_id, prompt, status, permission_profile, selected_model, reasoning_effort, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(task.id, task.projectId, task.modelConfigId, task.prompt, task.status, task.permissionProfile || 'read-only', task.selectedModel || null, task.reasoningEffort || null, task.createdAt);
+    this.database.prepare(`INSERT INTO agent_tasks (id, project_id, model_config_id, prompt, status, permission_profile, selected_model, reasoning_effort, created_at, conversation_id)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(task.id, task.projectId, task.modelConfigId, task.prompt, task.status, task.permissionProfile || 'read-only', task.selectedModel || null, task.reasoningEffort || null, task.createdAt, task.conversationId || null);
+    if (task.conversationId) this.database.prepare("UPDATE agent_conversations SET updated_at = ?, title = CASE WHEN title = '新对话' THEN ? ELSE title END WHERE id = ?").run(task.createdAt, task.prompt.slice(0, 48), task.conversationId);
+  }
+  createAgentConversation({ projectId, modelConfigId, engine, bindingKey }) {
+    const id = crypto.randomBytes(12).toString('hex'), now = new Date().toISOString();
+    this.database.prepare('INSERT INTO agent_conversations (id, project_id, model_config_id, engine, binding_key, title, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(id, projectId, modelConfigId, engine, bindingKey, '新对话', now, now);
+    return this.getAgentConversation(id);
+  }
+  getAgentConversation(id) { return this.database.prepare('SELECT id, project_id AS projectId, model_config_id AS modelConfigId, engine, binding_key AS bindingKey, title, cli_session_id AS cliSessionId, cli_permission AS cliPermission, created_at AS createdAt, updated_at AS updatedAt FROM agent_conversations WHERE id = ?').get(id); }
+  listAgentConversations(projectId) {
+    return this.database.prepare('SELECT id, model_config_id AS modelConfigId, engine, title, created_at AS createdAt, updated_at AS updatedAt FROM agent_conversations WHERE project_id = ? ORDER BY updated_at DESC, rowid DESC LIMIT 200').all(projectId);
+  }
+  setAgentConversationSession(id, sessionId, permission) { this.database.prepare('UPDATE agent_conversations SET cli_session_id = ?, cli_permission = ? WHERE id = ?').run(sessionId, permission, id); }
+  agentConversationHistory(conversationId, excludeTaskId, maxChars = 60000) {
+    const candidates = this.database.prepare("SELECT id, prompt FROM agent_tasks WHERE conversation_id = ? AND id != ? AND status = 'succeeded' ORDER BY rowid DESC LIMIT 40").all(conversationId, excludeTaskId);
+    const messages = []; let length = 0, truncated = false;
+    for (const task of candidates) {
+      let answer = '';
+      for (const event of this.database.prepare("SELECT substr(text, 1, ?) AS text FROM agent_events WHERE task_id = ? AND kind = 'text' ORDER BY sequence").iterate(maxChars + 1, task.id)) {
+        answer += (answer ? '\n' : '') + (event.text || '');
+        if (task.prompt.length + answer.length + length > maxChars) break;
+      }
+      if (!answer) continue;
+      if (length + task.prompt.length + answer.length > maxChars) { truncated = true; break; }
+      messages.unshift({ role: 'user', content: task.prompt }, { role: 'assistant', content: answer }); length += task.prompt.length + answer.length;
+    }
+    if (candidates.length === 40) truncated = true;
+    return { messages, truncated };
   }
   updateAgentTask(id, status, fields = {}) {
     this.database.prepare(`UPDATE agent_tasks SET status = ?, error = COALESCE(?, error),
@@ -246,16 +283,17 @@ class LocalStore {
     return sequence;
   }
   getAgentTask(id) {
-    const task = this.database.prepare(`SELECT id, project_id AS projectId, model_config_id AS modelConfigId, prompt, status, permission_profile AS permissionProfile,
+    const task = this.database.prepare(`SELECT id, conversation_id AS conversationId, project_id AS projectId, model_config_id AS modelConfigId, prompt, status, permission_profile AS permissionProfile,
       selected_model AS selectedModel, reasoning_effort AS reasoningEffort, input_tokens AS inputTokens, cached_input_tokens AS cachedInputTokens, output_tokens AS outputTokens, error,
       created_at AS createdAt, started_at AS startedAt, finished_at AS finishedAt FROM agent_tasks WHERE id = ?`).get(id);
     if (!task) return undefined;
     return { ...task, events: this.listAgentEvents(id) };
   }
-  listAgentTasks(projectId, limit = 50) {
-    return this.database.prepare(`SELECT id, project_id AS projectId, model_config_id AS modelConfigId, prompt, status, permission_profile AS permissionProfile,
+  listAgentTasks(projectId, limit = 50, conversationId) {
+    const filter = conversationId === 'legacy' ? ' AND conversation_id IS NULL' : conversationId ? ' AND conversation_id = ?' : '';
+    return this.database.prepare(`SELECT id, conversation_id AS conversationId, project_id AS projectId, model_config_id AS modelConfigId, prompt, status, permission_profile AS permissionProfile,
       selected_model AS selectedModel, reasoning_effort AS reasoningEffort, input_tokens AS inputTokens, cached_input_tokens AS cachedInputTokens, output_tokens AS outputTokens, error,
-      created_at AS createdAt, started_at AS startedAt, finished_at AS finishedAt FROM agent_tasks WHERE project_id = ? ORDER BY created_at DESC LIMIT ?`).all(projectId, limit);
+      created_at AS createdAt, started_at AS startedAt, finished_at AS finishedAt FROM agent_tasks WHERE project_id = ?${filter} ORDER BY rowid DESC LIMIT ?`).all(...(conversationId && conversationId !== 'legacy' ? [projectId, conversationId, limit] : [projectId, limit]));
   }
   listAgentUsage() {
     return this.database.prepare(`SELECT COALESCE(NULLIF(selected_model, ''), 'default') AS model,

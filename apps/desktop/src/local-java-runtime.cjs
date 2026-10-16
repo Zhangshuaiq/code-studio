@@ -5,6 +5,8 @@ const { randomUUID } = require('node:crypto');
 const { pathToFileURL, fileURLToPath } = require('node:url');
 const { EventEmitter } = require('node:events');
 const { validateBreakpoints } = require('./java-breakpoint-configuration.cjs');
+const { discoverJdks, selectJdk, javaMajor } = require('./local-java-jdks.cjs');
+const { buildMaven } = require('./local-java-build.cjs');
 
 class DapConnection extends EventEmitter {
   constructor(socket) {
@@ -44,10 +46,33 @@ class DapConnection extends EventEmitter {
 }
 
 class LocalJavaRuntime {
-  constructor(lsp) { this.lsp = lsp; this.sessions = new Map(); this.builtProjects = new Set(); }
+  constructor(lsp, options = {}) { this.lsp = lsp; this.discoverJdks = options.discoverJdks || discoverJdks; this.sessions = new Map(); this.builtProjects = new Set(); this.pendingTargets = new Map(); }
   async targets(project) {
-    const targets = await this.lsp.javaCommand(project, 'vscode.java.resolveMainClass', [pathToFileURL(fs.realpathSync(project.path)).href]);
-    return (targets || []).map((item) => ({ mainClass: item.mainClass, projectName: item.projectName, label: `${item.mainClass}${item.projectName ? ` · ${item.projectName}` : ''}` }));
+    const root = fs.realpathSync(project.path), key = JSON.stringify([project.id, root]);
+    let pending = this.pendingTargets.get(key);
+    if (!pending) {
+      pending = Promise.resolve().then(async () => {
+        const targets = await this.lsp.javaCommand(project, 'vscode.java.resolveMainClass', [pathToFileURL(root).href]);
+        return (targets || []).map((item) => ({ mainClass: item.mainClass, projectName: item.projectName, filePath: item.filePath, label: `${item.mainClass}${item.projectName ? ` · ${item.projectName}` : ''}` }));
+      }).finally(() => { if (this.pendingTargets.get(key) === pending) this.pendingTargets.delete(key); });
+      this.pendingTargets.set(key, pending);
+    }
+    return pending;
+  }
+  async environment(project, input, target) {
+    if (!target) target = (await this.targets(project)).find(item => item.mainClass === input.mainClass && item.projectName === input.projectName);
+    if (!target) throw Error('请选择有效的 Java 启动入口');
+    const root = fs.realpathSync(project.path);
+    let uri = pathToFileURL(root).href;
+    if (target.filePath) { const file = fs.realpathSync(target.filePath); if (!file.startsWith(root + path.sep)) throw Error('启动入口不在当前项目内'); uri = pathToFileURL(file).href; }
+    else if (target.projectName) throw Error('语言服务未提供启动入口源码路径，无法确认所属模块的编译配置');
+    const keys = ['org.eclipse.jdt.core.compiler.source', 'org.eclipse.jdt.core.compiler.codegen.targetPlatform', 'org.eclipse.jdt.core.compiler.release', 'org.eclipse.jdt.ls.core.vm.location', 'org.eclipse.m2e.core.selectedProfiles'];
+    const settings = await this.lsp.javaCommand(project, 'java.project.getSettings', [uri, keys]);
+    const source = settings?.[keys[0]], targetVersion = settings?.[keys[1]], required = Math.max(javaMajor(source) || 0, javaMajor(targetVersion) || 0);
+    if (!required) throw Error('项目编译版本尚未解析完成，请等待代码智能加载后刷新');
+    const jdks = this.discoverJdks({ candidates: [settings[keys[3]]] });
+    const jdk = selectJdk(jdks, required, input.javaHome, settings[keys[3]]);
+    return { source, target: targetVersion, release: settings[keys[2]] === 'enabled', required, jdks, selected: jdk, profiles: settings[keys[4]] || '', buildTool: fs.existsSync(path.join(root, 'pom.xml')) ? 'maven' : 'eclipse', origin: '项目导入配置', projectName: target.projectName || '' };
   }
   inspect(project) {
     const session = this.sessions.get(project.id);
@@ -99,7 +124,13 @@ class LocalJavaRuntime {
       const target = targets.find((item) => item.mainClass === input.mainClass && item.projectName === input.projectName);
       if (!target) throw new Error('未找到 Java main 入口，请选择有效的运行配置');
       session.mainClass = target.mainClass;
+      const environment = await this.environment(project, input, target);
+      if (session.cancelled) throw Error('项目启动已取消');
+      session.logs.push(`项目编译级别：source ${environment.source} / target ${environment.target}${environment.release ? '（release）' : ''}\n`);
       const fullBuild = !this.builtProjects.has(project.id);
+      if (environment.buildTool === 'maven') {
+        await buildMaven(project, environment.selected, session, undefined, environment.profiles);
+      } else {
       session.logs.push(fullBuild ? '正在完整重建 Java 项目…\n' : '正在编译 Java 项目…\n');
       const build = await this.lsp.javaBuild(project, target, fullBuild);
       session.issues = build.issues;
@@ -110,11 +141,15 @@ class LocalJavaRuntime {
         const first = build.issues[0];
         throw Object.assign(new Error(first ? `${reason}：${first.path}:${first.line} ${first.message}` : `${reason}。请查看运行面板的编译输出。`), { code: 'LOCAL_JAVA_BUILD_FAILED', issues: build.issues });
       }
+      }
+      if (session.cancelled) throw Error('项目启动已取消');
       this.builtProjects.add(project.id);
       session.logs.push('Java 编译成功。\n');
       const [modulePaths, classPaths] = await this.lsp.javaCommand(project, 'vscode.java.resolveClasspath', [target.mainClass, target.projectName]);
-      const javaExec = await this.lsp.javaCommand(project, 'vscode.java.resolveJavaExecutable', [target.mainClass, target.projectName]);
+      if (session.cancelled) throw Error('项目启动已取消');
+      const javaExec = environment.selected.javaExec;
       const port = await this.lsp.javaCommand(project, 'vscode.java.startDebugSession');
+      if (session.cancelled) throw Error('项目启动已取消');
       if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('Java 调试端口无效');
       const socket = net.connect({ host: '127.0.0.1', port });
       const dap = new DapConnection(socket); session.dap = dap;
@@ -139,6 +174,7 @@ class LocalJavaRuntime {
       session.capabilities = await dap.request('initialize', { adapterID: 'java', clientID: 'code-studio', linesStartAt1: true, columnsStartAt1: true, pathFormat: 'path', supportsRunInTerminalRequest: false, supportsVariableType: true });
       let initializeTimer;
       const initialized = new Promise((resolve, reject) => { dap.once('initialized', resolve); initializeTimer = setTimeout(() => reject(new Error('等待调试初始化超时')), 60_000); initializeTimer.unref(); });
+      if (session.cancelled) { clearTimeout(initializeTimer); throw Error('项目启动已取消'); }
       const launch = dap.request('launch', { ...target, cwd: fs.realpathSync(project.path), javaExec, modulePaths, classPaths, noDebug: input.mode === 'run', console: 'internalConsole', stopOnEntry: false, shortenCommandLine: 'argfile', args: input.args || '', vmArgs: input.vmArgs || '' });
       // Attach rejection handling immediately: launch errors can arrive before initialized.
       if (input.mode === 'debug') {
@@ -150,10 +186,11 @@ class LocalJavaRuntime {
       await launch;
       if (session.status === 'starting') session.status = 'running';
       return this.inspect(project);
-    } catch (error) { session.status = 'failed'; session.logs.push(error.message); session.release?.(); session.dap?.socket.destroy(); throw error; }
+    } catch (error) { session.status = session.cancelled ? 'stopped' : 'failed'; if (error.issues) session.issues = error.issues; session.logs.push(error.message); session.release?.(); session.dap?.socket.destroy(); throw error; }
   }
   async action(project, action, input = {}) {
     const session = this.sessions.get(project.id);
+    if (action === 'stop' && session?.status === 'starting') { session.cancelled = true; session.buildChild?.kill('SIGTERM'); session.dap?.socket.destroy(); await session.buildDone?.catch(() => {}); session.release?.(); session.status = 'stopped'; return this.inspect(project); }
     if (!session?.dap || !['paused', 'running'].includes(session.status)) throw new Error('当前没有活动调试会话');
     if (action === 'stop') { await session.dap.request('disconnect', { terminateDebuggee: true }); session.status = 'stopped'; session.frames = []; session.threads = []; session.pausedThreads?.clear(); session.release?.(); session.dap.socket.end(); return this.inspect(project); }
     if (session.mode !== 'debug') throw new Error('当前不是调试模式');
@@ -262,6 +299,8 @@ class LocalJavaRuntime {
   }
   async shutdown() {
     await Promise.all([...this.sessions.values()].map(async (session) => {
+      session.cancelled = true; session.buildChild?.kill('SIGTERM');
+      await session.buildDone?.catch(() => {});
       session.release?.();
       if (!session.dap || session.dap.socket.destroyed) return;
       try { await session.dap.request('disconnect', { terminateDebuggee: true }); } catch {}

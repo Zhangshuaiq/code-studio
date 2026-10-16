@@ -15,6 +15,7 @@ import { useEditorTabs } from '../../store/editorTabs';
 import { api } from '../../lib/api';
 import { verifyFastSymbolTarget, staleFastSymbol, type FastSymbolTarget } from '../../lib/fast-symbol-target';
 import { buildWorkspaceFileTree } from '../../lib/workspace-file-tree';
+import { useFolderExpansion } from '../../hooks/useFolderExpansion';
 
 interface TreeNode {
   name: string;
@@ -41,6 +42,7 @@ export function FileTree({
 }) {
   const { data: paths = [], isLoading, isError } = useSessionFiles(sessionId);
   const [searchInput, setSearchInput] = useState("");
+  const expansion = useFolderExpansion(sessionId || '');
   const [searchQuery, setSearchQuery] = useState("");
   const [targetNotice, setTargetNotice] = useState('');
   const queryClient = useQueryClient();
@@ -191,6 +193,7 @@ export function FileTree({
       ) : (
         <ul className="py-2">
           <TreeItem
+            expansion={expansion}
             node={root}
             depth={0}
             selected={selected}
@@ -203,25 +206,28 @@ export function FileTree({
 }
 
 function TreeItem({
+  expansion,
   node,
   depth,
   selected,
   onSelect,
 }: {
+  expansion: ReturnType<typeof useFolderExpansion>;
   node: TreeNode;
   depth: number;
   selected?: string;
   onSelect?: (path: string, line?: number | null, column?: number | null) => void;
 }) {
   // 默认只展开浅层（root + 第一层），更深的收起，避免一次展开一大片
-  const [open, setOpen] = useState(depth <= 1);
+  const open = expansion.isOpen(node.path, depth);
   const pad = { paddingLeft: `${depth * 12 + 12}px` };
 
   if (node.isDir) {
     return (
       <li>
         <button
-          onClick={() => setOpen((o) => !o)}
+          onClick={() => expansion.toggle(node.path, depth)}
+          aria-expanded={open}
           style={pad}
           className="flex min-h-7 w-full items-center gap-1.5 pr-2 text-left text-xs text-slate-600 transition hover:bg-slate-200/60 hover:text-slate-900 dark:text-slate-300 dark:hover:bg-slate-800/70 dark:hover:text-white"
         >
@@ -243,8 +249,9 @@ function TreeItem({
           style={{ gridTemplateRows: open ? "1fr" : "0fr" }}
         >
           <ul className="min-h-0 overflow-hidden">
-            {node.children.map((c) => (
+            {open && node.children.map((c) => (
               <TreeItem
+                expansion={expansion}
                 key={c.path}
                 node={c}
                 depth={depth + 1}

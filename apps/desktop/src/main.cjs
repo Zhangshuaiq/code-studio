@@ -3,6 +3,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { createLocalApi } = require('./local-api.cjs');
+const { initializeUserNetworkEnvironment } = require('./user-network-environment.cjs');
 const { installGracefulQuit } = require('./graceful-lifecycle.cjs');
 
 const DEFAULT_SERVER_URL = process.env.CODEGEN_SERVER_URL || '';
@@ -179,6 +180,8 @@ ipcMain.handle('runtime:open-directory', async (event) => {
 app.whenReady().then(async () => {
   lifecycle({ component: 'desktop', event: 'electron-ready', elapsedMs: Math.round(performance.now() - bootStarted) });
   augmentDesktopPath();
+  const networkEnvironment = await initializeUserNetworkEnvironment();
+  lifecycle({ component: 'desktop', event: 'network-environment', refreshed: networkEnvironment.refreshed });
   localApi = await createLocalApi({
     staticDir: path.join(__dirname, '..', 'renderer'),
     storePath: path.join(app.getPath('userData'), 'code-studio.sqlite3'),

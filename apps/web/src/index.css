@@ -1,19 +1,62 @@
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
+.workspace-terminal header button:hover,
+.workspace-terminal header button[aria-selected="true"] { background: var(--terminal-selection); }
+
+/* Peek's embedded editor inherits Monaco options; its result tree does not. */
+.monaco-editor .reference-zone-widget .ref-tree,
+.monaco-editor .reference-zone-widget .ref-tree .monaco-list-row,
+.monaco-editor .reference-zone-widget .head .filename,
+.monaco-editor .reference-zone-widget .head .dirname {
+  font-family: var(--code-editor-font-family, monospace) !important;
+  font-size: var(--code-editor-font-size, 13px) !important;
+}
+.monaco-editor .monaco-editor-overlaymessage .message,
+.monaco-editor .monaco-editor-overlaymessage .message p {
+  font-family: var(--code-editor-font-family, monospace) !important;
+  font-size: var(--code-editor-font-size, 13px) !important;
+  line-height: 1.5;
+}
+.monaco-editor .workspace-relation-arrow { cursor: pointer; color: #818cf8; width: 15px !important; text-align: center; z-index: 4; }
+.workspace-relations-editor .margin-view-overlays .cldr[class*="codicon-folding-"] { transform: translateX(15px); width: 15px !important; }
+.monaco-editor .workspace-relation-arrow::before { content: '↕'; font-size: 15px; font-weight: 600; }
+.monaco-editor .workspace-relation-up::before { content: '↑'; }
+.monaco-editor .workspace-relation-down::before { content: '↓'; }
+.workspace-relation-picker {
+  max-height: 280px; max-width: min(90%, 850px); overflow: auto;
+  background: var(--vscode-editorWidget-background, #fff); color: var(--vscode-editorWidget-foreground, #333);
+  border: 1px solid #818cf8; border-radius: 6px; padding: 6px; z-index: 40;
+  font-family: var(--code-editor-font-family, monospace); font-size: var(--code-editor-font-size, 13px);
+  box-shadow: 0 8px 24px #0003;
+}
+.workspace-relation-picker button { display: block; width: 100%; text-align: left; padding: 5px 8px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.workspace-relation-picker button:hover, .workspace-relation-picker button:focus { background: #818cf833; outline: none; }
 
 .monaco-editor .desktop-java-breakpoint {
-  background: radial-gradient(circle, #ef4444 0 5px, transparent 5.5px);
+  background: none;
   cursor: pointer;
 }
+.monaco-editor .desktop-java-breakpoint::after {
+  content: ''; position: absolute; width: 8px; height: 8px;
+  left: 50%; top: 50%; transform: translate(-50%, -50%);
+  border-radius: 50%; background: #ef4444;
+  pointer-events: none;
+}
+.monaco-editor .desktop-java-logpoint::after { background: #22c55e; }
+.monaco-editor .desktop-java-breakpoint-conditional::after { box-shadow: inset 0 0 0 2px #ef4444; background: white; }
 .monaco-editor .desktop-java-current-line {
   background-color: rgba(234, 179, 8, 0.18);
 }
+.monaco-editor .desktop-java-execution-pointer::before { content: '▶'; color: #d69e00; font-size: 13px; }
+.monaco-editor .desktop-java-debug-lane { cursor: pointer; }
+.monaco-editor .git-diff-apply-left { cursor: pointer; }
+.monaco-editor .git-diff-apply-left::before { content: '→'; color: #6366f1; font-size: 15px; }
 .monaco-editor .desktop-java-breakpoint-conditional {
-  background: radial-gradient(circle, #fff 0 2px, #ef4444 2.5px 5px, transparent 5.5px);
+  background: none;
 }
 .monaco-editor .desktop-java-logpoint {
-  background: radial-gradient(circle, #22c55e 0 5px, transparent 5.5px);
+  background: none;
 }
 
 @layer components {

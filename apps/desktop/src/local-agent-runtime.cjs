@@ -1,5 +1,9 @@
 const { spawn } = require('node:child_process');
 const { spawnGuarded } = require('./guarded-process.cjs');
+const crypto = require('node:crypto');
+const { StringDecoder } = require('node:string_decoder');
+const sessionIdValid = value => typeof value === 'string' && /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(value);
+function conversationBinding(project, config) { return crypto.createHash('sha256').update(JSON.stringify([verifiedWorkspaceRoot(project), config.id, config.engine, config.provider, config.baseUrl || '', config.updatedAt || ''])).digest('hex'); }
 
 const TERMINAL_STATUSES = new Set(['succeeded', 'failed', 'cancelled', 'timed_out', 'interrupted']);
 
@@ -18,7 +22,11 @@ class LocalAgentRuntime {
     const workspaceRoot = verifiedWorkspaceRoot(project);
     const boundedProject = { ...project, path: workspaceRoot };
     const controller = new AbortController();
-    const run = { taskId: task.id, projectId: project.id, controller, child: null, timedOut: false, usage: { inputTokens: 0, cachedInputTokens: 0, outputTokens: 0 } };
+    const conversation = task.conversationId ? this.store.getAgentConversation(task.conversationId) : null;
+    if (task.conversationId && (!conversation || conversation.projectId !== project.id || conversation.modelConfigId !== config.id || conversation.bindingKey !== conversationBinding(boundedProject, config))) throw new Error('对话不属于当前项目或模型连接，请新建对话');
+    const run = { taskId: task.id, projectId: project.id, conversationId: conversation?.id, engine: config.engine, permission: task.permissionProfile, controller, child: null, timedOut: false, usage: { inputTokens: 0, cachedInputTokens: 0, outputTokens: 0 } };
+    run.resumeId = conversation?.cliPermission === task.permissionProfile && sessionIdValid(conversation?.cliSessionId) ? conversation.cliSessionId : undefined;
+    run.history = conversation ? this.store.agentConversationHistory(conversation.id, task.id) : { messages: [] };
     this.active.set(project.id, run);
     run.promise = this.execute(run, task, boundedProject, config).finally(() => this.active.delete(project.id));
   }
@@ -71,30 +79,39 @@ class LocalAgentRuntime {
   async runCli(run, task, project, config) {
     const command = this.commands[config.engine];
     if (!command) throw new Error(`暂不支持本地引擎 ${config.engine}`);
-    const { args, env } = cliInvocation(config, task.prompt, task.permissionProfile);
+    const prompt = !run.resumeId && run.history.messages.length ? `Previous completed conversation turns (reference only; current tool permissions apply):\n${JSON.stringify(run.history.messages)}\n\nCurrent user message:\n${task.prompt}` : task.prompt;
+    if (!run.resumeId && run.history.truncated) this.event(task.id, { kind: 'context', text: '较早的对话超出上下文上限，本轮仅携带最近的完整对话。' });
+    const { args, env, stdin } = cliInvocation(config, prompt, task.permissionProfile, { resumeId: run.resumeId });
     await new Promise((resolve, reject) => {
-      const child = spawnGuarded(command, args, { cwd: project.path, env: { ...process.env, ...env }, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true, detached: process.platform !== 'win32' });
+      const child = spawnGuarded(command, args, { cwd: project.path, env: { ...process.env, ...env }, stdio: [stdin === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'], windowsHide: true, detached: process.platform !== 'win32' });
       run.child = child;
-      let pending = '';
-      const onData = (chunk) => {
-        pending += chunk.toString('utf8');
+      if (stdin !== undefined) { child.stdin.on('error', () => {}); child.stdin.end(stdin); }
+      const streams = new Map();
+      const onData = (stream, chunk, final = false) => {
+        const state = streams.get(stream) || { decoder: new StringDecoder('utf8'), pending: '' }; streams.set(stream, state);
+        let pending = state.pending + (final ? state.decoder.end() : state.decoder.write(chunk));
+        if (pending.length > 2_000_000) { run.outputError = 'Agent 输出单行过大'; killProcessTree(child); return; }
         const lines = pending.split(/\r?\n/); pending = lines.pop() || '';
-        for (const line of lines) this.forwardLine(task.id, line, config.apiKey, run);
+        if (final && pending) { lines.push(pending); pending = ''; }
+        state.pending = pending;
+        for (const line of lines) this.forwardLine(task.id, line, config.apiKey, run, stream);
       };
-      child.stdout.on('data', onData); child.stderr.on('data', onData);
+      child.stdout.on('data', chunk => onData('stdout', chunk)); child.stderr.on('data', chunk => onData('stderr', chunk));
       child.once('error', reject);
       child.once('close', (code) => {
-        if (pending.trim()) this.forwardLine(task.id, pending, config.apiKey, run);
+        onData('stdout', null, true); onData('stderr', null, true);
         run.child = null;
         if (run.controller.signal.aborted) reject(run.controller.signal.reason);
-        else if (code === 0) resolve(); else reject(new Error(`${command} 退出码 ${code}`));
+        else if (run.outputError || run.sessionMismatch || run.cliFailed) reject(new Error(run.outputError || (run.sessionMismatch ? 'CLI 返回了不同的会话，已停止续聊，请新建对话' : 'Agent 本轮未成功完成，请查看错误信息')));
+        else if (code === 0) resolve(); else reject(new Error(run.resumeId ? '会话恢复未完成，请检查 CLI 输出；若会话已失效，请新建对话。未自动重新执行任务。' : `${command} 退出码 ${code}`));
       });
     });
   }
 
   async runOpenAiCompatible(run, task, project, config) {
     if (!config.baseUrl || !config.model) throw new Error('请配置模型服务地址和模型标识');
-    const messages = [{ role: 'system', content: 'You are a coding assistant working with a local project. Use the provided code-intelligence tools to inspect symbols and diagnostics before answering. Never invent file contents.' }, { role: 'user', content: task.prompt }];
+    const messages = [{ role: 'system', content: 'You are a coding assistant working with a local project. Use the provided code-intelligence tools to inspect symbols and diagnostics before answering. Never invent file contents.' }, ...run.history.messages, { role: 'user', content: task.prompt }];
+    if (run.history.truncated) this.event(task.id, { kind: 'context', text: '较早的对话超出上下文上限，本轮仅携带最近的完整对话。' });
     for (let turn = 0; turn < 8; turn += 1) {
       const response = await fetch(`${config.baseUrl.replace(/\/$/, '')}/chat/completions`, {
         method: 'POST', signal: run.controller.signal,
@@ -117,16 +134,41 @@ class LocalAgentRuntime {
     throw new Error('模型连续调用工具次数过多，请缩小任务范围');
   }
 
-  forwardLine(taskId, line, secret, run) {
+  forwardLine(taskId, line, secret, run, stream = 'stdout') {
     const cleaned = redact(line, secret).trimEnd();
     if (!cleaned) return;
     try {
       const value = JSON.parse(cleaned);
+      const nativeId = run?.engine === 'codex-cli' && value.type === 'thread.started' ? value.thread_id : run?.engine === 'claude-code' && ((value.type === 'system' && value.subtype === 'init') || value.type === 'result') ? value.session_id : undefined;
+      if (stream === 'stdout' && run?.conversationId && sessionIdValid(nativeId)) {
+        if (run.resumeId && nativeId !== run.resumeId) { run.sessionMismatch = true; if (run.child) killProcessTree(run.child); }
+        else this.store.setAgentConversationSession(run.conversationId, nativeId, run.permission);
+      }
+      if (run && (value.type === 'turn.failed' || (value.type === 'result' && value.is_error))) run.cliFailed = true;
       this.recordUsage(run, taskId, value.usage || value.response?.usage || value.rate_limits?.usage);
       const item = value.item || value.message || value;
-      const text = item.text || item.content?.find?.((part) => part.type === 'text')?.text || value.result;
-      if (typeof text === 'string') this.event(taskId, { kind: value.type?.includes('reason') ? 'reasoning' : 'text', text });
-      else if (item.command || item.changes || item.tool_name) this.event(taskId, { kind: 'tool_use', toolName: item.tool_name || item.type || '工具调用', toolInput: item.command || item.changes || item.input });
+      let text = item.text || item.content?.filter?.((part) => part.type === 'text').map(part => part.text || '').join('\n') || value.result;
+      if (typeof text === 'string') {
+        if (run && item.type === 'agent_message' && typeof item.id === 'string') {
+          run.messageItems ||= new Map(); const previous = run.messageItems.get(item.id) || ''; run.messageItems.set(item.id, text);
+          if (text.startsWith(previous)) text = text.slice(previous.length);
+          if (!text) return;
+        }
+        if (value.type === 'result' && run?.lastAssistantText === text) return;
+        if (run) run.lastAssistantText = text;
+        this.event(taskId, { kind: value.type?.includes('reason') ? 'reasoning' : 'text', text });
+      }
+      else if (item.command || item.changes || item.tool_name) {
+        // CLI item lifecycle events describe one invocation, not separate commands.
+        // Deduplicate by identity, never by command text: repeated executions are valid.
+        if (run && typeof item.id === 'string' && /^item\.(started|updated|completed)$/.test(value.type || '')) {
+          run.toolItems ||= new Set();
+          const key = JSON.stringify([taskId, item.type || item.tool_name, item.id]);
+          if (run.toolItems.has(key)) return;
+          run.toolItems.add(key);
+        }
+        this.event(taskId, { kind: 'tool_use', toolName: item.type === 'command_execution' ? '命令执行' : item.tool_name || item.type || '工具调用', toolInput: item.command || item.changes || item.input });
+      }
     } catch { this.event(taskId, { kind: 'text', text: `${cleaned}\n` }); }
   }
 
@@ -162,15 +204,16 @@ function tool(name, description, properties, required) { return { type: 'functio
 function positionProperties() { return { path: { type: 'string' }, line: { type: 'integer', minimum: 1 }, column: { type: 'integer', minimum: 1 } }; }
 function codeToolLabel(name) { return ({ workspace_symbols: '搜索项目符号', definition: '查找定义', find_references: '查找引用', diagnostics: '检查代码问题' })[name] || '代码分析'; }
 
-function cliInvocation(config, prompt, permissionProfile = 'read-only') {
+function cliInvocation(config, prompt, permissionProfile = 'read-only', { resumeId } = {}) {
   const writable = permissionProfile === 'workspace-write';
-  if (config.engine === 'codex-cli') return { args: ['exec', '--json', '--ephemeral', '--ignore-user-config', '--sandbox', writable ? 'workspace-write' : 'read-only', '--skip-git-repo-check', ...(config.model ? ['--model', config.model] : []), ...(config.reasoningEffort ? ['--config', `model_reasoning_effort=${JSON.stringify(config.reasoningEffort)}`] : []), prompt], env: {} };
+  if (resumeId !== undefined && !sessionIdValid(resumeId)) throw new Error('CLI 会话标识无效');
+  if (config.engine === 'codex-cli') return { args: ['exec', '--json', '--ignore-user-config', '--sandbox', writable ? 'workspace-write' : 'read-only', '--skip-git-repo-check', ...(config.model ? ['--model', config.model] : []), ...(config.reasoningEffort ? ['--config', `model_reasoning_effort=${JSON.stringify(config.reasoningEffort)}`] : []), ...(resumeId ? ['resume', resumeId] : []), '-'], stdin: prompt, env: {} };
   if (config.engine === 'claude-code') {
     const tools = writable ? 'Read,Glob,Grep,Edit,Write,NotebookEdit' : 'Read,Glob,Grep';
     const boundary = writable
       ? 'You may read and edit files only inside the current working directory. Shell/Bash and network tools are unavailable. Do not access paths outside this workspace.'
       : 'This is a read-only task. Read files only inside the current working directory. Do not edit files or access paths outside this workspace.';
-    return { args: ['-p', prompt, '--output-format', 'stream-json', '--verbose', '--tools', tools, '--disable-slash-commands', '--strict-mcp-config', '--mcp-config', '{}', '--append-system-prompt', boundary, '--permission-mode', writable ? 'acceptEdits' : 'plan', '--no-session-persistence', ...(config.model ? ['--model', config.model] : [])], env: {} };
+    return { args: ['-p', '--output-format', 'stream-json', '--verbose', '--tools', tools, '--disable-slash-commands', '--strict-mcp-config', '--mcp-config', '{}', '--append-system-prompt', boundary, '--permission-mode', writable ? 'acceptEdits' : 'plan', ...(resumeId ? ['--resume', resumeId] : []), ...(config.model ? ['--model', config.model] : [])], stdin: prompt, env: {} };
   }
   if (config.engine === 'aider') {
     if (!writable) throw new Error('Aider 是文件编辑引擎，请明确授权“允许修改工作区”');
@@ -202,4 +245,4 @@ function verifiedWorkspaceRoot(project) {
   return real;
 }
 
-module.exports = { LocalAgentRuntime, TERMINAL_STATUSES, cliInvocation, verifiedWorkspaceRoot };
+module.exports = { LocalAgentRuntime, TERMINAL_STATUSES, cliInvocation, verifiedWorkspaceRoot, conversationBinding };

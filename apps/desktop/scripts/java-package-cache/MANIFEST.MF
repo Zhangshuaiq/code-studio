@@ -1,0 +1,9 @@
+Manifest-Version: 1.0
+Bundle-ManifestVersion: 2
+Bundle-Name: Code Studio Package Metadata Diagnostic
+Bundle-SymbolicName: codestudio.diagnostic.packages;singleton:=true
+Bundle-Version: 0.0.5
+Bundle-RequiredExecutionEnvironment: JavaSE-21
+Require-Bundle: org.eclipse.jdt.core,org.eclipse.jdt.ls.core,
+ org.eclipse.core.runtime,org.eclipse.core.resources
+

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import Editor, { type OnMount } from "@monaco-editor/react";
+import Editor, { useMonaco, type OnMount } from "@monaco-editor/react";
 import {
   AlertTriangle,
   ArrowDown,
@@ -21,9 +21,11 @@ import {
   type ConflictDetail,
   type ConflictHunk,
   type ConflictResolution,
+  type ConflictTransport,
 } from "../../hooks/useGit";
 import { monacoLang } from "../../lib/monaco";
 import { useTheme } from "../../store/theme";
+import { useEditorAppearance } from '../../hooks/useEditorAppearance';
 import { useFeedback } from "../common/FeedbackProvider";
 
 type HunkChoice = "ours" | "theirs" | "both";
@@ -34,12 +36,15 @@ export function ConflictResolverModal({
   sessionId,
   conflicts,
   onClose,
+  transport,
 }: {
   sessionId?: string;
   conflicts: string[];
   onClose: () => void;
+  transport?: ConflictTransport;
 }) {
   const theme = useTheme((state) => state.theme);
+  const appearance = useEditorAppearance(useMonaco(), theme);
   const { confirm, toast } = useFeedback();
   const [selected, setSelected] = useState<string | undefined>(conflicts[0]);
   const [draft, setDraft] = useState("");
@@ -60,9 +65,9 @@ export function ConflictResolverModal({
   const theirsDecorationIdsRef = useRef<string[]>([]);
   const syncingScrollRef = useRef(false);
 
-  const detail = useConflictDetail(sessionId, selected);
-  const resolve = useResolveConflict(sessionId);
-  const syncOps = useRemoteSyncOps(sessionId);
+  const detail = useConflictDetail(sessionId, selected, transport);
+  const resolve = useResolveConflict(sessionId, transport);
+  const syncOps = useRemoteSyncOps(sessionId, transport);
 
   useEffect(() => {
     if (!selected || !conflicts.includes(selected)) setSelected(conflicts[0]);
@@ -89,6 +94,7 @@ export function ConflictResolverModal({
     setError("");
     try {
       const result = await resolve.mutateAsync({
+        version: detail.data?.version,
         path: selected,
         resolution,
         content,
@@ -528,8 +534,8 @@ export function ConflictResolverModal({
                       language={monacoLang(selected)}
                       value={detail.data.suggestions.ours ?? ""}
                       onMount={sourceMount("ours")}
-                      theme={theme === "dark" ? "vs-dark" : "light"}
-                      options={sourceEditorOptions}
+                      theme={appearance.editorTheme}
+                      options={{ ...sourceEditorOptions, ...appearance.appearanceOptions }}
                     />
                   </MergePane>
 
@@ -599,8 +605,8 @@ export function ConflictResolverModal({
                       value={draft}
                       onChange={(value) => setDraft(value ?? "")}
                       onMount={saveMount}
-                      theme={theme === "dark" ? "vs-dark" : "light"}
-                      options={resultEditorOptions}
+                      theme={appearance.editorTheme}
+                      options={{ ...resultEditorOptions, ...appearance.appearanceOptions }}
                     />
                   </MergePane>
 
@@ -623,8 +629,8 @@ export function ConflictResolverModal({
                       language={monacoLang(selected)}
                       value={detail.data.suggestions.theirs ?? ""}
                       onMount={sourceMount("theirs")}
-                      theme={theme === "dark" ? "vs-dark" : "light"}
-                      options={sourceEditorOptions}
+                      theme={appearance.editorTheme}
+                      options={{ ...sourceEditorOptions, ...appearance.appearanceOptions }}
                     />
                   </MergePane>
                 </div>

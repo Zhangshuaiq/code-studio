@@ -5,11 +5,12 @@ const os = require('node:os');
 const path = require('node:path');
 const { LocalLspManager } = require('../src/local-lsp-manager.cjs');
 const { LocalJavaRuntime } = require('../src/local-java-runtime.cjs');
+const { discoverJdks } = require('../src/local-java-jdks.cjs');
 
 test('Lombok-generated methods resolve; Java run and breakpoint/variables/step/stop work', { timeout: 150_000 }, async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'code-studio-java-debug-'));
   const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'code-studio-debug-data-'));
-  const lsp = new LocalLspManager({ dataRoot, idleMs: 120_000 }); const runtime = new LocalJavaRuntime(lsp);
+  const lsp = new LocalLspManager({ dataRoot, idleMs: 120_000, ...(process.env.CODE_STUDIO_TEST_JDT_TUNING === '1' ? { javaMaxConcurrentBuilds: 2, javaSharedIndexRoot: path.join(dataRoot, 'shared-index') } : {}), resources: process.env.CODE_STUDIO_TEST_INDEX_THREAD_GUARD_JAR ? { indexThreadGuardJar: process.env.CODE_STUDIO_TEST_INDEX_THREAD_GUARD_JAR } : {} }); const runtime = new LocalJavaRuntime(lsp);
   t.after(async () => { await runtime.shutdown(); await lsp.shutdown(); fs.rmSync(root, { recursive: true, force: true }); fs.rmSync(dataRoot, { recursive: true, force: true }); });
   const sourceRoot = path.join(root, 'src/main/java/sample'); fs.mkdirSync(sourceRoot, { recursive: true });
   const lombokJar = path.resolve(__dirname, '../.cache/java-tools/lombok.jar');
@@ -17,11 +18,14 @@ test('Lombok-generated methods resolve; Java run and breakpoint/variables/step/s
   fs.writeFileSync(path.join(sourceRoot, 'Person.java'), 'package sample;\n@lombok.Data\npublic class Person { private String name; }\n');
   const hiddenBrokenPath = 'src/main/java/sample/Broken.java';
   fs.writeFileSync(path.join(root, hiddenBrokenPath), 'package sample; class Broken { int value = missing(); }\n');
-  const source = 'package sample;\npublic class Main {\n  public static void main(String[] args) throws Exception {\n    Person person = new Person();\n    person.setName("Lombok works");\n    int answer = 42;\n    System.out.println(person.getName() + answer);\n    Thread.sleep(30000);\n  }\n}\n';
+  const source = 'package sample;\npublic class Main {\n  public static void main(String[] args) throws Exception {\n    Person person = new Person();\n    person.setName("Lombok works");\n    int answer = 42;\n    System.out.println(person.getName() + answer); System.out.println("runtime=" + System.getProperty("java.home"));\n    Thread.sleep(30000);\n  }\n}\n';
   const sourcePath = 'src/main/java/sample/Main.java'; fs.writeFileSync(path.join(root, sourcePath), source);
   const project = { id: 'debug-project', path: root };
   const prepared = await lsp.prepareProject(project); assert.equal(prepared.providers[0].ready, true, JSON.stringify(prepared));
   const targets = await runtime.targets(project); assert.ok(targets.some((item) => item.mainClass === 'sample.Main'), JSON.stringify(targets));
+  const formatEdits = await lsp.request(project, 'format', { path: sourcePath, content: source.replace(/\n/g, '') });
+  assert.ok(Array.isArray(formatEdits) && formatEdits.some(edit => edit.newText.includes('\n')), 'Java language service must provide actual formatting edits');
+  await lsp.saved(project, sourcePath);
   // Wait for actual diagnostics publication; do not pass simply because the initial cache is empty.
   await lsp.request(project, 'documentSymbols', { path: sourcePath });
   await new Promise((resolve) => setTimeout(resolve, 2500));
@@ -31,15 +35,18 @@ test('Lombok-generated methods resolve; Java run and breakpoint/variables/step/s
   assert.ok(broken.some((item) => item.severity === 1 && /notGenerated/.test(item.message)), JSON.stringify(broken));
   await lsp.saved(project, sourcePath);
   const target = targets.find((item) => item.mainClass === 'sample.Main');
+  const environment = await runtime.environment(project, {}, target);
+  assert.equal(environment.required, 17); assert.equal(environment.source, '17'); assert.equal(environment.buildTool, 'maven');
   // A real compile error must prevent launch and expose a clickable file/line.
   fs.writeFileSync(path.join(root, sourcePath), source.replace('getName()', 'notGenerated()'));
   await lsp.saved(project, sourcePath);
-  await assert.rejects(runtime.start(project, { ...target, mode: 'run' }), (error) => error.code === 'LOCAL_JAVA_BUILD_FAILED' && error.issues.some((issue) => issue.path === sourcePath && /notGenerated/.test(issue.message)) && error.issues.some((issue) => issue.path === hiddenBrokenPath && /missing/.test(issue.message)));
+  await assert.rejects(runtime.start(project, { ...target, mode: 'run' }), (error) => { const valid = error.code === 'LOCAL_JAVA_BUILD_FAILED' && error.issues.some((issue) => issue.path === sourcePath && /notGenerated/.test(issue.message)) && error.issues.some((issue) => issue.path === hiddenBrokenPath && /missing/.test(issue.message)); if (!valid) console.error(runtime.inspect(project).logs.join('').slice(-6000)); return valid; });
   assert.equal(runtime.inspect(project).status, 'failed');
   fs.writeFileSync(path.join(root, sourcePath), source); await lsp.saved(project, sourcePath);
   fs.writeFileSync(path.join(root, hiddenBrokenPath), 'package sample; class Broken { int value = 1; }\n'); await lsp.saved(project, hiddenBrokenPath);
   await assert.rejects(runtime.start(project, { mode: 'debug', mainClass: 'evil.Main' }), /入口/);
   await runtime.start(project, { ...target, mode: 'debug', breakpoints: { [sourcePath]: [7] } });
+  assert.equal(fs.readFileSync(path.join(root, 'target/classes/sample/Main.class')).readUInt16BE(6), 61, 'Maven must preserve Java 17 classfile target');
   async function until(predicate) { for (let index = 0; index < 100; index++) { const state = runtime.inspect(project); if (predicate(state)) return state; await new Promise((resolve) => setTimeout(resolve, 100)); } throw new Error(JSON.stringify(runtime.inspect(project))); }
   const paused = await until((state) => state.status === 'paused' && state.frames.length);
   assert.equal(paused.frames[0].path, sourcePath); assert.equal(paused.frames[0].line, 7); assert.equal(paused.breakpoints[0].verified, true);
@@ -69,7 +76,10 @@ test('Lombok-generated methods resolve; Java run and breakpoint/variables/step/s
   await runtime.action(project, 'stop'); assert.equal(runtime.inspect(project).status, 'stopped');
   fs.writeFileSync(path.join(root, sourcePath), source.replace('answer = 42', 'answer = 43'));
   await lsp.saved(project, sourcePath);
-  await runtime.start(project, { ...target, mode: 'run', args: '--test=true', vmArgs: '-Xmx128m' });
+  const alternate = discoverJdks().find(jdk => jdk.major === 21 && jdk.home !== environment.selected.home);
+  await runtime.start(project, { ...target, mode: 'run', args: '--test=true', vmArgs: '-Xmx128m', ...(alternate ? { javaHome: alternate.home } : {}) });
   await until((state) => state.logs.join('').includes('Lombok works43'));
+  await until(state => state.logs.join('').includes('runtime=' + (alternate || environment.selected).home));
+  assert.equal(fs.readFileSync(path.join(root, 'target/classes/sample/Main.class')).readUInt16BE(6), 61);
   await runtime.action(project, 'stop');
 });

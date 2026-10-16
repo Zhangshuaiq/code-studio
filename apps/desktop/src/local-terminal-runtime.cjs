@@ -2,14 +2,16 @@ const crypto = require('node:crypto');
 const fs = require('node:fs');
 const os = require('node:os');
 const pty = require('node-pty');
+const { utf8ProcessEnvironment } = require('@codegen/code-intelligence/process-text.cjs');
 
 class LocalTerminalRuntime {
   constructor() { this.sessions = new Map(); this.byProject = new Map(); }
 
   create(project, options = {}) {
     const existingId = this.byProject.get(project.id); const existing = existingId && this.sessions.get(existingId);
-    if (existing && existing.status === 'running') return publicSession(existing);
-    if (existing) this.sessions.delete(existing.id);
+    if (!options.newSession && existing && existing.status === 'running') return publicSession(existing);
+    if (!options.newSession && existing) this.sessions.delete(existing.id);
+    if ([...this.sessions.values()].filter(session => session.projectId === project.id).length >= 10) throw Error('每个项目最多打开 10 个终端，请先关闭不用的终端');
     const shell = defaultShell(); const cols = clamp(options.cols, 20, 400, 100); const rows = clamp(options.rows, 5, 200, 30);
     const id = crypto.randomBytes(12).toString('hex');
     const process = pty.spawn(shell.command, shell.args, { name: 'xterm-256color', cols, rows, cwd: project.path, env: { ...processEnv(), TERM: 'xterm-256color', COLORTERM: 'truecolor' } });
@@ -28,7 +30,8 @@ class LocalTerminalRuntime {
   output(id, after = 0) { const session = this.sessions.get(id); if (!session) return null; return { ...publicSession(session), chunks: session.chunks.filter((item) => item.sequence > after) }; }
   write(id, data) { const session = this.sessions.get(id); if (!session?.process || session.status !== 'running') return false; session.process.write(data); return true; }
   resize(id, cols, rows) { const session = this.sessions.get(id); if (!session?.process || session.status !== 'running') return false; session.process.resize(clamp(cols, 20, 400, 100), clamp(rows, 5, 200, 30)); return true; }
-  close(id) { const session = this.sessions.get(id); if (!session) return false; try { session.process?.kill(); } catch {} this.sessions.delete(id); if (this.byProject.get(session.projectId) === id) this.byProject.delete(session.projectId); return true; }
+  close(id) { const session = this.sessions.get(id); if (!session) return false; try { session.process?.kill(); } catch {} this.sessions.delete(id); if (this.byProject.get(session.projectId) === id) { const remaining = [...this.sessions.values()].filter(item => item.projectId === session.projectId).at(-1); if (remaining) this.byProject.set(session.projectId, remaining.id); else this.byProject.delete(session.projectId); } return true; }
+  list(projectId) { return [...this.sessions.values()].filter(session => session.projectId === projectId).map(publicSession); }
   async shutdown() { for (const id of [...this.sessions.keys()]) this.close(id); }
 }
 
@@ -37,7 +40,7 @@ function defaultShell() {
   const candidate = process.env.SHELL && fs.existsSync(process.env.SHELL) ? process.env.SHELL : '/bin/zsh';
   return { command: candidate, args: ['-l'], label: candidate.split('/').pop() || 'shell' };
 }
-function processEnv() { const env = {}; for (const [key, value] of Object.entries(process.env)) if (typeof value === 'string') env[key] = value; return env; }
+function processEnv() { const env = {}; for (const [key, value] of Object.entries(process.env)) if (typeof value === 'string') env[key] = value; return utf8ProcessEnvironment(env); }
 function clamp(value, min, max, fallback) { const number = Number(value); return Number.isFinite(number) ? Math.max(min, Math.min(max, Math.round(number))) : fallback; }
 function publicSession(session) { return { id: session.id, projectId: session.projectId, cwd: session.cwd, shell: session.shell, status: session.status, exitCode: session.exitCode, sequence: session.sequence }; }
 

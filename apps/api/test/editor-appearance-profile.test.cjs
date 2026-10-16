@@ -3,6 +3,18 @@ const filename = path.resolve(__dirname, '../../web/src/lib/editor-appearance.ts
 const compiled = new Module(filename, module); compiled.filename = filename; compiled.paths = Module._nodeModulePaths(path.dirname(filename));
 compiled._compile(ts.transpileModule(fs.readFileSync(filename, 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020, esModuleInterop: true } }).outputText, filename);
 const { importAppearance, exportAppearance, validateAppearance } = compiled.exports;
+test('every bundled palette is valid and survives preference export/import', () => {
+  const { presets } = require('../../../packages/code-intelligence/editor-appearance.cjs');
+  assert.equal(Object.keys(presets).length, 13);
+  for (const [name, palette] of Object.entries(presets)) {
+    const appearance = validateAppearance({ theme: name });
+    assert.deepEqual(importAppearance(exportAppearance(appearance)), appearance);
+    const custom = validateAppearance({ theme: 'custom', customTheme: palette });
+    assert.equal(custom.customTheme.base, palette.base);
+    assert.deepEqual(importAppearance(exportAppearance(custom)), custom);
+    assert.ok(palette.rules.some(rule => rule.token === 'keyword'));
+  }
+});
 test('editor style exports/imports losslessly including complete Monaco themes', () => {
   const appearance = validateAppearance({ fontSize: 17, fontFamily: 'JetBrains Mono, monospace', lineHeight: 26, fontLigatures: true, wordWrap: 'on', theme: 'custom', customTheme: { base: 'vs-dark', inherit: true, rules: [{ token: 'comment', foreground: '008000', fontStyle: 'italic' }], colors: { 'editor.background': '#123456' } } });
   assert.deepEqual(importAppearance(exportAppearance(appearance)), appearance);

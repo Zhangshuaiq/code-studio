@@ -30,6 +30,7 @@ import { useEditorTabs, type EditorDraft } from "../../store/editorTabs";
 import { useFeedback } from "../common/FeedbackProvider";
 import { ConflictResolverModal } from "../HistoryPanel/ConflictResolverModal";
 import { GitRemoteModal } from "../HistoryPanel/GitRemoteModal";
+import { GitCompareModal } from './GitCompareModal';
 
 type PendingOperation =
   | { kind: "checkout"; branch: string }
@@ -78,6 +79,7 @@ export function BranchControl({
   const [filter, setFilter] = useState("");
   const [showRemote, setShowRemote] = useState(false);
   const [showResolver, setShowResolver] = useState(false);
+  const [showCompare, setShowCompare] = useState(false);
   const [pendingOperation, setPendingOperation] = useState<PendingOperation>();
   const [operationBusy, setOperationBusy] = useState(false);
   const [notice, setNotice] = useState("");
@@ -417,6 +419,7 @@ export function BranchControl({
                 </div>
 
                 <div className="mt-3 grid grid-cols-3 gap-2">
+                  <ActionButton icon={<GitBranch size={14}/>} label="对比分支" onClick={() => { setOpen(false); setShowCompare(true); }} disabled={!sessionId} />
                   <ActionButton
                     icon={<Plus size={14} />}
                     label="新建分支"
@@ -659,6 +662,7 @@ export function BranchControl({
           onClose={() => setShowRemote(false)}
         />
       )}
+      {showCompare && sessionId && <GitCompareModal scope={sessionId} current={currentBranch || 'HEAD'} branches={branches.data?.list || []} load={async (params, signal) => (await api.get(`/sessions/${sessionId}/git/compare`, { params, signal })).data} onClose={() => setShowCompare(false)} />}
       {showResolver && mergeInProgress && (
         <ConflictResolverModal
           sessionId={sessionId}

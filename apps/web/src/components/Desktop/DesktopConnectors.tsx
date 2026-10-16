@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   CheckCircle2,
   Database,
@@ -13,7 +13,7 @@ import { Select } from "../common/Select";
 import { DesktopDatabaseDetail } from './DesktopDatabaseDetail';
 
 export type ConnectorType = "postgres" | "mysql" | "redis" | "kafka" | "kubernetes";
-interface Connector {
+export interface Connector {
   id: string;
   name: string;
   type: ConnectorType;
@@ -35,14 +35,21 @@ export function DesktopConnectors({
   types = TYPES.map((item) => item.value),
   title = "数据与集群连接",
   subtitle = "数据库、Kafka 与 Kubernetes",
+  onOpenDetail,
+  onItemsChange,
+  editRequest,
 }: {
   onClose?: () => void;
   embedded?: boolean;
   types?: ConnectorType[];
   title?: string;
   subtitle?: string;
+  onOpenDetail?: (connector: Connector) => void;
+  onItemsChange?: (items: Connector[]) => void;
+  editRequest?: { id: string; version: number };
 }) {
   const [items, setItems] = useState<Connector[]>([]);
+  const processedEditRequest = useRef('');
   const [showForm, setShowForm] = useState(false);
   const [editingId, setEditingId] = useState<string>();
   const [detailId, setDetailId] = useState<string>();
@@ -69,10 +76,12 @@ export function DesktopConnectors({
   async function load() {
     const response = await fetch("/api/local/connectors");
     const body = await response.json();
-    if (response.ok)
+    if (response.ok) {
       setItems(
         body.items.filter((item: Connector) => types.includes(item.type)),
       );
+      onItemsChange?.(body.items);
+    }
   }
   useEffect(() => {
     setForm((current) =>
@@ -93,6 +102,14 @@ export function DesktopConnectors({
     setEditingId(item.id); setError(''); setShowForm(true);
     setForm({ name: item.name, type: item.type, host: settings.host || '127.0.0.1', port: String(settings.port || (item.type === 'mysql' ? 3306 : item.type === 'redis' ? 6379 : 5432)), database: item.type === 'redis' ? String(settings.db ?? 0) : settings.database || '', username: settings.username || '', secret: '', brokers: (settings.brokers || []).join(','), clientId: settings.clientId || 'code-studio', server: settings.server || 'https://127.0.0.1:6443', namespace: settings.namespace || 'default', ssl: Boolean(settings.ssl) });
   }
+  useEffect(() => {
+    if (!editRequest) { processedEditRequest.current = ''; return; }
+    const key = `${editRequest.id}:${editRequest.version}`;
+    if (processedEditRequest.current === key) return;
+    const item = items.find(value => value.id === editRequest.id);
+    if (item) { processedEditRequest.current = key; edit(item); }
+  }, [editRequest?.id, editRequest?.version, items]);
+  function openDetail(item: Connector) { if (onOpenDetail) onOpenDetail(item); else setDetailId(item.id); }
   async function save() {
     setBusy("save");
     setError("");
@@ -184,6 +201,7 @@ export function DesktopConnectors({
   if (detail && !showForm && (detail.type === 'postgres' || detail.type === 'mysql' || detail.type === 'redis')) return <DesktopDatabaseDetail key={`${detail.id}:${detail.updatedAt}`} connector={{ ...detail, type: detail.type }} onBack={() => setDetailId(undefined)} onEdit={() => edit(detail)} />;
   const content = (
     <div
+      data-connector-list
       className={
         embedded
           ? "flex h-full min-h-0 flex-col rounded-[22px] border border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900"
@@ -383,7 +401,7 @@ export function DesktopConnectors({
                     <Database size={16} className="text-indigo-500" />
                   )}
                   <div className="min-w-0 flex-1">
-                    <button className="text-left text-sm font-medium hover:text-indigo-500" onClick={() => { if (item.type === 'postgres' || item.type === 'mysql' || item.type === 'redis') setDetailId(item.id); else void explore(item); }}>{item.name}</button>
+                    <button className="text-left text-sm font-medium hover:text-indigo-500" onClick={() => { if (item.type === 'postgres' || item.type === 'mysql' || item.type === 'redis') openDetail(item); else void explore(item); }}>{item.name}</button>
                     <div className="truncate text-[10px] text-slate-400">
                       {TYPES.find((type) => type.value === item.type)?.label}
                       {item.hasCredential ? " · 凭据已保护" : ""}
@@ -413,7 +431,7 @@ export function DesktopConnectors({
                     className="btn btn-ghost btn-sm"
                     disabled={Boolean(busy)}
                     onClick={() => {
-                      if (item.type === 'postgres' || item.type === 'mysql' || item.type === 'redis') { setDetailId(item.id); return; }
+                      if (item.type === 'postgres' || item.type === 'mysql' || item.type === 'redis') { openDetail(item); return; }
                       if (active === item.id) {
                         setActive(undefined);
                         return;

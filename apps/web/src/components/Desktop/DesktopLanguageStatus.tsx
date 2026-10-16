@@ -2,7 +2,13 @@ import { useEffect, useRef, useState } from 'react';
 import { LoaderCircle, RefreshCw } from 'lucide-react';
 import type { FastIndexStatus } from '../../hooks/useSessionFiles';
 
-type ProviderStatus = { provider: string; phase: string; message: string; elapsedMs?: number };
+type ProviderStatus = { provider: string; phase: string; message: string; elapsedMs?: number; backgroundTasks?: number };
+export function semanticStatusText(current: ProviderStatus | undefined, message: string, loading: boolean) {
+  if (current?.provider !== 'java' || !loading) return message;
+  if (current.phase !== 'indexing') return '语义服务正在加载';
+  const tasks = Number.isSafeInteger(current.backgroundTasks) && Number(current.backgroundTasks) > 0 ? ` · ${current.backgroundTasks} 项任务` : '';
+  return `正在后台分析与构建${tasks}`;
+}
 export function isLanguageStartupError(error: { code?: string }) {
   return ['LOCAL_LSP_UNAVAILABLE', 'LOCAL_LSP_TIMEOUT', 'LSP_CAPACITY_EXCEEDED'].includes(error?.code || '');
 }
@@ -14,6 +20,11 @@ export function fastIndexStatusText(index?: FastIndexStatus & { backgroundError?
   const count = Math.max(0, Number(index.files) || 0);
   if (index.backgroundError) return count ? `快速索引部分可用 · ${count} 文件 · 后台更新暂未完成` : '快速索引暂未就绪';
   if (index.state === 'ready' && index.complete) return `快速索引就绪 · ${count} 文件`;
+  if (index.state === 'scanning' && Number.isSafeInteger(index.discoveredFiles) && Number(index.discoveredFiles) > 0) {
+    const reused = Math.max(0, Number(index.unchangedFiles) || 0);
+    const parsed = Math.max(0, Number(index.parsedFiles) || 0);
+    return `快速索引更新中 · 已检查 ${index.discoveredFiles} 文件 · 缓存复用 ${reused} · 新解析 ${parsed}`;
+  }
   if (['starting', 'needs-scan', 'needs-validation', 'scanning'].includes(index.state)) return count ? `缓存符号可用 · ${count} 文件 · 后台校验中` : '快速索引正在建立';
   return count ? `快速索引部分可用 · ${count} 文件` : '快速索引尚无项目符号';
 }
@@ -43,13 +54,14 @@ export function DesktopLanguageStatus({ projectId, active, transport, indexTrans
   }, [projectId]);
   useEffect(() => {
     const controller = new AbortController();
+    if (!active) return () => controller.abort();
     if (!prepareOnMount && attempt === 0) { setPreparing(false); return () => controller.abort(); }
     setPreparing(true);
     void request('prepare', controller.signal)
       .catch(() => { if (!controller.signal.aborted && !statusReceived.current) setConnectionPending(true); })
       .finally(() => { if (!controller.signal.aborted) setPreparing(false); });
     return () => controller.abort();
-  }, [base, attempt, prepareOnMount]);
+  }, [base, attempt, prepareOnMount, active]);
   useEffect(() => {
     if (!active) return;
     const controller = new AbortController();
@@ -94,7 +106,7 @@ export function DesktopLanguageStatus({ projectId, active, transport, indexTrans
   const elapsed = Math.floor(Math.max(0, ...busy.map((item) => item.elapsedMs || 0)) / 1000);
   const message = loading ? current?.message || '正在加载代码智能' : failed.length ? '代码智能暂未就绪，可继续编辑' : connectionPending ? (statusReceived.current ? '代码智能状态更新暂不可用' : '正在连接代码智能') : providers.some((item) => item.phase === 'ready') ? '代码智能已就绪' : '';
   const fastText = fastIndexStatusText(fastIndex);
-  const semanticMessage = current?.provider === 'java' && loading ? (current.phase === 'indexing' ? '正在后台分析与构建' : '语义服务正在加载') : message;
+  const semanticMessage = semanticStatusText(current, message, loading);
   if (!message && !fastText) return null;
   return <div className="flex h-7 shrink-0 items-center gap-2 border-t border-slate-200 px-3 text-[11px] text-slate-500 dark:border-slate-800 dark:text-slate-400" data-language-status>
     {loading && <LoaderCircle size={12} className="shrink-0 animate-spin" aria-hidden />}

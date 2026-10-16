@@ -1,0 +1,27 @@
+const test=require('node:test'), assert=require('node:assert/strict'), fs=require('node:fs'), os=require('node:os'), path=require('node:path'), http=require('node:http');
+const {createLocalApi}=require('../src/local-api.cjs');
+test('conversation API persists context, scopes IDs to project and connection, creates empty chats and keeps write approval per turn', async t=>{
+  const directory=fs.mkdtempSync(path.join(os.tmpdir(),'conversation-api-')); const root=path.join(directory,'workspace'), other=path.join(directory,'other');fs.mkdirSync(root);fs.mkdirSync(other);
+  const inputs=[];
+  const server=http.createServer((req,res)=>{let body='';req.on('data',chunk=>body+=chunk);req.on('end',()=>{const input=JSON.parse(body); inputs.push(input); res.setHeader('Content-Type','application/json');res.end(JSON.stringify({choices:[{message:{role:'assistant',content:inputs.length===1?'remembered:blue-sky':'continued'}}]}));});});
+  await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve)); let api;
+  t.after(async()=>{await api?.close();await new Promise(resolve=>server.close(resolve));fs.rmSync(directory,{recursive:true,force:true});});
+  const storePath=path.join(directory,'store.sqlite3'); const headers={Authorization:'Bearer fixture-token','Content-Type':'application/json'};
+  const create=()=>createLocalApi({storePath,token:'fixture-token'});api=await create();let project=api.registerWorkspace(root), otherProject=api.registerWorkspace(other);
+  const request=(suffix,body,projectId=project.id)=>fetch(`${api.origin}/api/local/projects/${projectId}/agent/${suffix}`,{headers,...(body===undefined?{}:{method:'POST',body:JSON.stringify(body)})});
+  const model=await (await fetch(`${api.origin}/api/local/models`,{method:'POST',headers,body:JSON.stringify({name:'Fixture',engine:'openai-compatible',provider:'fixture',model:'test',baseUrl:`http://127.0.0.1:${server.address().port}`})})).json();
+  const make=async()=>{const response=await request('conversations',{modelConfigId:model.id});assert.equal(response.status,201);return response.json();};
+  const send=async(prompt,conversationId)=>{const response=await request('tasks',{modelConfigId:model.id,prompt,permissionProfile:'read-only',conversationId});assert.equal(response.status,202);let task=await response.json();for(let i=0;i<100&&!['succeeded','failed'].includes(task.status);i++){await new Promise(resolve=>setTimeout(resolve,20));task=await (await fetch(`${api.origin}/api/local/agent/tasks/${task.id}`,{headers})).json();}assert.equal(task.status,'succeeded');return task;};
+  assert.equal((await request('conversations',{})).status,400);
+  const first=await make();await send('Remember token blue-sky',first.id);await send('What token?',first.id);
+  assert.deepEqual(inputs[1].messages.map(m=>m.content).slice(1),['Remember token blue-sky','remembered:blue-sky','What token?']);
+  assert.equal((await request(`tasks?conversationId=${first.id}`,undefined,otherProject.id)).status,404);
+  assert.equal((await request('tasks',{modelConfigId:model.id,prompt:'wrong project',permissionProfile:'read-only',conversationId:first.id},otherProject.id)).status,409);
+  assert.equal((await request('tasks',{modelConfigId:model.id,prompt:'write?',permissionProfile:'workspace-write',conversationId:first.id})).status,403);
+  await api.close();api=await create();project=api.registerWorkspace(root); otherProject=api.registerWorkspace(other);
+  await send('After restart?',first.id);assert.ok(inputs[2].messages.some(m=>m.content==='Remember token blue-sky'));
+  const fresh=await make();await send('Empty conversation?',fresh.id);assert.equal(inputs[3].messages.length,2);
+  const list=await (await request('conversations')).json();assert.equal(list.items.length,2);assert.ok(!JSON.stringify(list).includes('cliSessionId'));
+  const tasks=await (await request(`tasks?conversationId=${first.id}`)).json();assert.equal(tasks.items.length,3);assert.ok(tasks.items.every(item=>item.conversationId===first.id));
+  assert.equal((await request(`tasks?conversationId=${fresh.id}`)).status,200);
+});

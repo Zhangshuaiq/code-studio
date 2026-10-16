@@ -1,7 +1,7 @@
 import schema from '@codegen/code-intelligence/editor-appearance.cjs';
 export interface EditorAppearance {
   fontSize: number; fontFamily: string; lineHeight: number; fontLigatures: boolean; minimap: boolean; wordWrap: 'off' | 'on'; lineNumbers: boolean;
-  theme: 'auto' | 'light' | 'dark' | 'idea' | 'darcula' | 'contrast' | 'custom';
+  theme: 'auto' | 'light' | 'dark' | 'idea' | 'darcula' | 'contrast' | 'custom' | 'xcode-light' | 'xcode-dark' | 'jetbrains-light' | 'jetbrains-dark' | 'github-light' | 'github-dark' | 'material-default' | 'material-ocean' | 'material-darker' | 'material-palenight' | 'material-light';
   customTheme: { base: 'vs' | 'vs-dark' | 'hc-black' | 'hc-light'; inherit: boolean; rules: Array<{ token: string; foreground?: string; background?: string; fontStyle?: string }>; colors: Record<string, string> } | null;
 }
 export const defaultAppearance: EditorAppearance = schema.defaults;
